@@ -49,6 +49,12 @@ describe('RUNE/scan contexts', () => {
     ['run.sh', `lightning-cli commando 02${'ab'.repeat(32)} getinfo '{}' ${READ_RUNE}\n`, 'commando positional argument'],
     ['run.sh', `lightning-cli checkrune ${READ_RUNE} 02${'ab'.repeat(32)} getinfo\n`, 'checkrune positional argument'],
     ['notes.md', `Run \`lightning-cli showrunes "${READ_RUNE}"\` to see it.\n`, 'showrunes positional argument'],
+    ['main.go', `clnRune := "${READ_RUNE}"\n`, 'Go short variable declaration'],
+    ['Makefile', `CLN_RUNE := ${READ_RUNE}\n`, 'Makefile simple assignment'],
+    ['run.sh', `myapp --rune ${READ_RUNE} --verbose\n`, 'command-line option with a blank'],
+    ['run.sh', `cln-mcp --cln-rune "${READ_RUNE}"\n`, 'prefixed command-line option with a blank, quoted'],
+    ['config.xml', `<node><rune>${READ_RUNE}</rune></node>\n`, 'XML element'],
+    ['config.xml', `<clnRune>${READ_RUNE}</clnRune>\n`, 'camelCase XML element'],
   ];
   for (const [name, text, label] of contexts) {
     it(`RUNE/scan finds a rune in ${label}`, async () => {
@@ -119,6 +125,10 @@ describe('RUNE/scan no context, no finding', () => {
     ['runes is not a rune key', `runes=${READ_RUNE}\n`],
     ['rune_id is not a rune key', `rune_id=${READ_RUNE}\n`],
     ['comparison', `if rune == ${READ_RUNE}: pass\n`],
+    ['the word rune before a value in prose', `the rune ${READ_RUNE} is here\n`],
+    ['an option whose name only ends a word', `myapp --prune ${READ_RUNE}\n`],
+    ['a rune option that takes a file', `myapp --rune-file ${READ_RUNE}\n`],
+    ['an element that is not a rune element', `<runes>${READ_RUNE}</runes>\n`],
     ['arrow', `rune => ${READ_RUNE}\n`],
     ['all-caps compound without separator', `CLNRUNE=${READ_RUNE}\n`],
     ['placeholder', 'RUNE=${CLN_RUNE}\n'],

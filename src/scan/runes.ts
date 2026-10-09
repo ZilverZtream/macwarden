@@ -19,7 +19,7 @@ const NONE = Object.freeze([]) as unknown as string[];
 const RUNE_LINE = /rune|commando|lightning-cli/i;
 // Characters that end a value without suggesting it continues: blanks, quotes and common
 // punctuation after a value in configuration, code and prose.
-const TERMINATORS = new Set([...' \t"\'`,;)]}>&#|'.split('')]);
+const TERMINATORS = new Set([...' \t"\'`,;)]}<>&#|'.split('')]);
 
 function textFingerprint(text: string): string {
   return `fp:${createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 16)}`;

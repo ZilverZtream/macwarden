@@ -9,8 +9,10 @@
 //
 // The key is "rune" (any case) on its own or after a separator ('_', '-', '.') or a lower-case
 // letter or digit (camelCase); "prune", "runes" and "rune_id" are not rune keys. One optional
-// quote may close the key; then optional blanks, '=' or ':' (not '==' or '=>'), optional
-// blanks and one optional opening quote. The value is the following run of base64 characters
+// quote may close the key; then optional blanks, '=', ':' or ':=' (not '==' or '=>'), optional
+// blanks and one optional opening quote. An option token starting with '-' may be followed by
+// blanks alone (--rune …, --cln-rune "…"), and an XML element's '>' ends its key (<rune>…).
+// Key names are read back at most 64 characters, so the work stays linear. The value is the following run of base64 characters
 // (both alphabets and '=', so a standard-alphabet value is examined and refused rather than cut).
 //
 // Command context (weaker): a whole argument, after a command that takes a rune positionally,
@@ -51,6 +53,14 @@ function isRunCharacter(code: number): boolean {
   return isAlnum(code) || code === 45 || code === 95 || code === 43 || code === 47 || code === 61;
 }
 
+/** Where the key token holding a match at `at` starts (name characters, at most 64 back), or -1 when it is longer. */
+function tokenStart(text: string, at: number): number {
+  let start = at;
+  const limit = Math.max(0, at - 64);
+  while (start > limit && /[A-Za-z0-9_.-]/.test(text[start - 1])) start--;
+  return start > limit || start === 0 ? start : -1;
+}
+
 function keyCandidates(text: string): RuneCandidate[] {
   const found: RuneCandidate[] = [];
   KEY.lastIndex = 0;
@@ -63,12 +73,24 @@ function keyCandidates(text: string): RuneCandidate[] {
       if (isAlnum(before) && !camel) continue;
     }
     let p = at + 4;
-    if (p < text.length && QUOTES.includes(text[p])) p++;
-    while (p < text.length && BLANK.includes(text[p])) p++;
-    if (text[p] !== '=' && text[p] !== ':') continue;
-    if (text[p] === '=' && (text[p + 1] === '=' || text[p + 1] === '>')) continue;
-    p++;
-    while (p < text.length && BLANK.includes(text[p])) p++;
+    const quotedKey = p < text.length && QUOTES.includes(text[p]);
+    if (quotedKey) p++;
+    if (!quotedKey && text[p] === '>' && text[tokenStart(text, at) - 1] === '<') p++; // <rune>…, <clnRune>…
+    else {
+      const blanks = p;
+      while (p < text.length && BLANK.includes(text[p])) p++;
+      if (text[p] === '=' || text[p] === ':') {
+        if (text[p] === '=' && (text[p + 1] === '=' || text[p + 1] === '>')) continue;
+        if (text[p] === ':' && text[p + 1] === '=') p++; // := (Go, make)
+        p++;
+        while (p < text.length && BLANK.includes(text[p])) p++;
+      } else {
+        // An option followed by a blank: --rune …, --cln-rune "…" (a whole token that starts with '-').
+        const start = tokenStart(text, at);
+        if (quotedKey || p === blanks || text[start] !== '-' || (start > 0 && !BLANK.includes(text[start - 1]) && !QUOTES.includes(text[start - 1])))
+          continue;
+      }
+    }
     const quote = p < text.length && QUOTES.includes(text[p]) ? text[p] : null;
     if (quote) p++;
     const start = p;

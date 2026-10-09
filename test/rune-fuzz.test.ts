@@ -77,5 +77,9 @@ describe('RUNE/fuzz work grows linearly (n against 4n, compared in-process)', ()
     expect(scanned.ratio, scanned.summary).toBeLessThan(LINEAR_4X);
     const redacted = await growth(size => { const text = `lightning-cli checkrune ${value} rune=${value}\n`.repeat(size); return repeat(40, () => redactRuneContexts(text)); }, 200, 4);
     expect(redacted.ratio, redacted.summary).toBeLessThan(LINEAR_4X);
+    // Key names are read back from each match (options, XML elements); one long token of matches stays linear.
+    const tokens = await growth(size => { const text = `--${'aRune-'.repeat(size)} <${'xRune.'.repeat(size)}> ${'--rune '.repeat(size)}`;
+      return repeat(10, () => runeFindings(text, new Date(0), context)); }, 2000, 4);
+    expect(tokens.ratio, tokens.summary).toBeLessThan(LINEAR_4X);
   });
 });
