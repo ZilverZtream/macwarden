@@ -10,6 +10,7 @@ import { nwc } from '../src/scan/patterns.js';
 import { nwcMatches } from '../src/scan/nwc-match.js';
 import { run as scanCommand } from '../src/commands/scan.js';
 import { Secret } from '../src/secret.js';
+import { LINEAR_4X, compare } from './helpers/growth.js';
 
 // Threat model: the attacker controls the bytes and names of every scanned or inspected
 // file. Each test states the bound it proves.
@@ -67,19 +68,25 @@ it('RED-TEAM/amplification a small identifier that would expand to megabytes of 
 
 it('RED-TEAM/amplification many worst-case accepted copies in one 4 MB file scan in linear time', async () => {
   const dir = scratch();
-  // At the caps: a 16-byte entity with 512 one-byte actions, as base64 lines, about 4 MB.
-  const lines: string[] = [];
-  for (let i = 0; i < 1_800; i++)
-    lines.push(`TOKEN=${macaroon([operation('e'.repeat(16), Array.from({ length: 512 }, () => 'r'))]).toString('base64')}`);
-  writeFileSync(join(dir, 'config.env'), `${lines.join('\n')}\n`);
-  const started = performance.now();
-  const result = await scanCommand([dir, '--fail-on', 'READ', '--json']);
-  const elapsed = performance.now() - started;
-  expect(result.exitCode).toBe(1);
-  expect((result.result as { summary: { findings: number } }).summary.findings).toBe(1_800);
-  // Before the fix a comparable file took about a minute; linear processing takes a few seconds.
-  expect(elapsed).toBeLessThan(20_000);
-});
+  // At the caps: a 16-byte entity with 512 one-byte actions, as base64 lines, about 4 MB for 1,800.
+  // Before the fix a comparable file took about a minute. Cost is measured as growth, not against a
+  // fixed limit: four times the copies must cost about four times as much.
+  const file = (copies: number) => {
+    const path = join(dir, `config-${copies}.env`);
+    const lines: string[] = [];
+    for (let i = 0; i < copies; i++)
+      lines.push(`TOKEN=${macaroon([operation('e'.repeat(16), Array.from({ length: 512 }, () => 'r'))]).toString('base64')}`);
+    writeFileSync(path, `${lines.join('\n')}\n`);
+    return async () => {
+      const result = await scanCommand([path, '--fail-on', 'READ', '--json']);
+      expect(result.exitCode).toBe(1);
+      expect((result.result as { summary: { findings: number } }).summary.findings).toBe(copies);
+    };
+  };
+  const timing = await compare(file(450), file(1_800), 2);
+  console.log(`RED-TEAM/amplification 450 and 1,800 copies: ${timing.summary}`);
+  expect(timing.ratio, timing.summary).toBeLessThan(LINEAR_4X);
+}, 180_000);
 
 it('RED-TEAM/forging a file name cannot start a text line with a GitHub workflow command or reorder the terminal', async () => {
   if (process.platform === 'win32') {

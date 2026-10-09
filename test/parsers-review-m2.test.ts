@@ -15,6 +15,7 @@ import { DecodeError, decodeMacaroon, macaroonId } from '../src/decode/index.js'
 import { grade, gradeFacts } from '../src/grade/index.js';
 import type { ScanResult } from '../src/scan/index.js';
 import { Secret } from '../src/secret.js';
+import { LINEAR_4X, compare } from './helpers/growth.js';
 import { m2 } from './vectors/lnd-oracle/cases.mjs';
 
 type Run<T> = [T, number][];
@@ -115,28 +116,36 @@ it('PARSERS-M2/inspect and scan report an over-bound credential instead of an un
   expect((output.result as { warnings: string[] }).warnings).toContain('identifier-exceeds-bounds');
 });
 
-it('PARSERS-M2/decode stays fast and small at the input limit', () => {
+it('PARSERS-M2/decode stays small at the input limit and its cost grows linearly to it', async () => {
   // A 1 MiB identifier of nested groups, and a 1 MiB identifier of one-byte actions: both are
-  // walked once; the permission text kept stays within 64 KiB.
+  // walked once; the permission text kept stays within 64 KiB. Cost is measured as growth from a
+  // quarter of the limit, not against a fixed limit: walking groups or actions more than once
+  // would cost sixteen times as much for four times the input.
   const tag = (field: number, wire: number) => Buffer.from([(field << 3) | wire]);
-  const groups = Buffer.concat([...Array(10_001).fill(tag(10, 3)), ...Array(10_001).fill(tag(10, 4))]);
-  const actions = Buffer.concat(Array.from({ length: 300_000 }, () => Buffer.from([0x12, 1, 0x72])));
   const field = (number: number, value: Buffer) => {
     const length: number[] = []; let n = value.length;
     do { let d = n % 128; n = Math.floor(n / 128); if (n) d |= 0x80; length.push(d); } while (n);
     return Buffer.concat([Buffer.from([number << 3 | 2]), Buffer.from(length), value]);
   };
-  const identifier = Buffer.concat([Buffer.from([3]), field(2, Buffer.from('0')),
-    field(3, Buffer.concat([field(1, Buffer.from('e'.repeat(16))), actions])), groups]);
   const lengthOf = (n: number) => { const out: number[] = []; do { let d = n % 128; n = Math.floor(n / 128); if (n) d |= 0x80; out.push(d); } while (n); return Buffer.from(out); };
-  const mac = Buffer.concat([Buffer.from([2, 2]), lengthOf(identifier.length), identifier, Buffer.from([0, 0, 6, 32]), Buffer.alloc(32, 1)]);
+  // scale 4 is the limit: 10,001 nested groups and 300,000 actions.
+  const build = (scale: number) => {
+    const groupCount = Math.round(10_001 * scale / 4);
+    const groups = Buffer.concat([...Array(groupCount).fill(tag(10, 3)), ...Array(groupCount).fill(tag(10, 4))]);
+    const actions = Buffer.concat(Array.from({ length: 75_000 * scale }, () => Buffer.from([0x12, 1, 0x72])));
+    const identifier = Buffer.concat([Buffer.from([3]), field(2, Buffer.from('0')),
+      field(3, Buffer.concat([field(1, Buffer.from('e'.repeat(16))), actions])), groups]);
+    return Buffer.concat([Buffer.from([2, 2]), lengthOf(identifier.length), identifier, Buffer.from([0, 0, 6, 32]), Buffer.alloc(32, 1)]);
+  };
+  const mac = build(4);
   expect(mac.length).toBeLessThanOrEqual(1_048_576);
   const before = process.memoryUsage().heapUsed;
-  const started = performance.now();
   const facts = decodeMacaroon(new Secret(mac));
-  const ms = performance.now() - started;
   expect(facts.permissions.length).toBe(1024);
   expect(facts.warnings).toContain('identifier-exceeds-bounds');
-  expect(ms).toBeLessThan(2_000);
   expect(process.memoryUsage().heapUsed - before).toBeLessThan(64 * 1024 * 1024);
-});
+  const quarter = build(1);
+  const timing = await compare(() => decodeMacaroon(new Secret(quarter)), () => decodeMacaroon(new Secret(mac)), 5);
+  console.log(`PARSERS-M2 decode at a quarter of the limit and at the limit: ${timing.summary}`);
+  expect(timing.ratio, timing.summary).toBeLessThan(LINEAR_4X);
+}, 60_000);
