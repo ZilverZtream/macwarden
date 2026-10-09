@@ -82,3 +82,15 @@ describe('RUNE/leak', () => {
     expect(leaks(output)).toBeNull();
   }));
 });
+
+describe('RUNE/leak fuzz', () => {
+  it('RUNE/leak 100 fuzz-generated runes (valid, mutated, nested) leak through no inspect, scan or redaction output', async () => {
+    const { leakCampaign } = await import('../scripts/rune-leak-fuzz.mjs');
+    const [{ scan }, { renderChunks, render }, { run }, { redactRuneContexts }] = await Promise.all([import('../src/scan/index.js'),
+      import('../src/output/index.js'), import('../src/commands/inspect.js'), import('../src/scan/rune-context.js')]);
+    const report = await leakCampaign({ scan, renderChunks, render, inspectRun: run, redactRuneContexts },
+      { seed: 20261009, cases: 100, scratchRoot: root() });
+    expect(report.cases).toBe(100);
+    expect(report.leaks).toEqual([]);
+  }, 60_000);
+});
