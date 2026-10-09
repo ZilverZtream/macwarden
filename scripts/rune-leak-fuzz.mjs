@@ -91,8 +91,9 @@ export async function leakCampaign(api, { seed, cases, batch = 25, scratchRoot =
           outputs.push({ where: `inspect ${args.length > 1 ? args.slice(1).join(' ') : args[0] === '-' ? 'stdin' : 'literal'} (case ${index})`,
             text: api.render(result, args.includes('--json') ? 'json' : 'text') });
         }
-        // The output redaction must remove every key-context value, and every command-context value a node could have issued.
-        if (!COMMAND_CONTEXTS.has(context) || checkable(item.text))
+        // The output redaction must remove every key-context value that is a rune, and every command-context value a node
+        // could have issued. A mutation that breaks the text (a blank or other character inside it) leaves no rune to remove.
+        if (referenceDecode(item.text).ok && (!COMMAND_CONTEXTS.has(context) || checkable(item.text)))
           outputs.push({ where: `redaction (case ${index})`, text: api.redactRuneContexts(lines.at(-1)) });
         report.cases++;
       }
