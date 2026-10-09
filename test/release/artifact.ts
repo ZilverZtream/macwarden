@@ -193,7 +193,11 @@ export function installedCommand(args: string[], workingDirectory?: string): Res
   if (windows) {
     // Invoke npm's PowerShell shim with literal array elements, avoiding cmd.exe parsing.
     const literal = (value: string) => `'${value.replace(/'/g, "''")}'`;
-    const script = `$ErrorActionPreference = 'Stop'; $shimArgs = @(${args.map(literal).join(',')}); ` +
+    // npm's shim uses Management cmdlets (Split-Path, Test-Path). Import them by name: autoloading
+    // first analyses every module on the path, about 25 s on GitHub's Windows runners.
+    const script = `$ErrorActionPreference = 'Stop'; ` +
+      'Import-Module Microsoft.PowerShell.Management, Microsoft.PowerShell.Utility; ' +
+      `$shimArgs = @(${args.map(literal).join(',')}); ` +
       `& ${literal(shim)} @shimArgs; exit $LASTEXITCODE`;
     executable = 'powershell.exe';
     launchArgs = ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
