@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.0 (unreleased)
+
+### Added
+
+- A regtest Lightning payment lab, [`examples/payment-lab/`](examples/payment-lab/README.md): three LND v0.21.4 nodes (customer, router, merchant) and bitcoind, pinned by digest, and a payment service that uses one `macwarden bake` credential per role (`pay-only` payer, `invoice-only` invoice worker, `read-only` analysis). The service records business intent and payment hash before SendPaymentV2, keeps a payment unresolved after a timeout or lost connection until TrackPaymentV2 reports a terminal state, and posts settlements once (keys on payment hash and operation ID). Five scenarios, each with `.sh` and `.ps1` scripts and a verdict computed from node state and the service's SQLite records: a connection cut while a hold invoice holds the HTLC, a settlement delivered again after a listener restart, a refund that fails for lack of outbound balance (with a diagnosis from balances, reserves, pending HTLCs and HTLC attempts, then a new channel and a retry), a multi-part payment whose books match LND's principal and per-attempt fees, and two concurrent payouts against one budget with reservations. The README states what the lab does not cover, including that an application budget does not limit someone holding the credential itself.
+
 ## 1.1.1 (2026-10-09)
 
 Security release. It fixes every finding of the independent audit of 1.1.0 ([report](docs/reviews/2026-10-09-audit-1.1.0.md)) and of four further internal reviews (threat model, lifecycle logic, scan robustness, output files and environment): 38 issues, each proven by a test that failed on 1.1.0. The most important: a long or punctuation-terminated `lndconnect://` URI could be missed by `scan`; `verify` could report a live credential as conclusively rejected (clock skew, an altered copy); a FIFO could hang `scan`; a new `--out` file was briefly readable under the folder's inherited Windows permissions.
