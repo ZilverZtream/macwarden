@@ -5,7 +5,7 @@
 // argument of a rune-taking command is reported only when it is a checkable rune.
 import { createHash } from 'node:crypto';
 import { decodeRuneText, RUNE_ALPHABET, RUNE_TEXT_LIMIT, type RuneFacts } from '../decode/rune.js';
-import { unixSeconds } from '../grade/rune.js';
+import { runeUniqueIdNumber, unixSeconds } from '../grade/rune.js';
 import { runeReport, type RuneInvalidReport, type RuneReport } from '../rune-report.js';
 import { checkableRune, runeCandidates, type RuneCandidate } from './rune-context.js';
 import type { ScanFinding } from './index.js';
@@ -41,7 +41,17 @@ function possiblyTruncated(line: string, candidate: RuneCandidate, next: string 
   return !TERMINATORS.has(after);
 }
 
-/** The rune whose text a standard base64 value encodes, when it encodes exactly one rune. */
+/**
+ * Why parsed facts are not a rune Core Lightning would check, or null when they are: checkrune's
+ * parameter parser (param_rune) refuses a rune without a numeric unique ID before anything else,
+ * and arbitrary base64 under a rune key often parses as restriction text without one.
+ */
+function uncheckable(facts: RuneFacts): 'no-unique-id' | 'unique-id-not-numeric' | null {
+  if (facts.uniqueId === null) return 'no-unique-id';
+  return runeUniqueIdNumber(facts.uniqueId) === null ? 'unique-id-not-numeric' : null;
+}
+
+/** The rune whose text a standard base64 value encodes, when it encodes exactly one checkable rune. */
 function base64Rune(text: string): RuneFacts | null {
   if (!/^[A-Za-z0-9+/]+={0,2}$/.test(text) || text.length % 4 !== 0) return null;
   const bytes = Buffer.from(text, 'base64');
@@ -49,7 +59,7 @@ function base64Rune(text: string): RuneFacts | null {
   const inner = bytes.toString('latin1').trim();
   if (!RUNE_ALPHABET.test(inner)) return null;
   const decoded = decodeRuneText(inner);
-  return decoded.ok ? decoded.facts : null;
+  return decoded.ok && uncheckable(decoded.facts) === null ? decoded.facts : null;
 }
 
 function shared(candidate: RuneCandidate, truncated: boolean, now: Date, cache: Map<string, Shared>): Shared {
@@ -71,6 +81,7 @@ function shared(candidate: RuneCandidate, truncated: boolean, now: Date, cache: 
       result = { fingerprint: inner.fingerprint, grade: assessed.grade,
         unassessed: assessed.unassessed.length ? assessed.unassessed : NONE, rune: assessed.report };
     } else if (!decoded.ok) result = invalid(decoded.reason);
+    else if (uncheckable(decoded.facts)) result = invalid(uncheckable(decoded.facts)!);
     else {
       const assessed = runeReport(decoded.facts, unixSeconds(now), truncated);
       result = { fingerprint: decoded.facts.fingerprint, grade: assessed.grade,

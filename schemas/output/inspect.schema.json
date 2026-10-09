@@ -480,7 +480,9 @@
             "too-short",
             "nul-byte",
             "restriction-syntax",
-            "unique-id-placement"
+            "unique-id-placement",
+            "no-unique-id",
+            "unique-id-not-numeric"
           ]
         },
         "verification": {

@@ -326,6 +326,7 @@ const runeInvalidText: Record<string, string> = {
   'exceeds-bounds': 'longer than macwarden parses', 'not-base64url': 'not URL-safe base64', 'too-short': 'shorter than a rune',
   'nul-byte': 'NUL byte in its restrictions', 'restriction-syntax': 'restriction syntax error',
   'unique-id-placement': 'misplaced unique ID',
+  'no-unique-id': 'no unique ID, which checkrune requires', 'unique-id-not-numeric': 'unique ID is not a number checkrune accepts',
 };
 
 /** A scan text line's rune facts: unique ID, possible capabilities, method access, expiry; never node acceptance. */

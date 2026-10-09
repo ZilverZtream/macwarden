@@ -1,9 +1,10 @@
+import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import Ajv2020 from 'ajv/dist/2020.js';
 import { describe, expect, it } from 'vitest';
 import { main } from '../src/cli.js';
-import { RUNE_TEXT_LIMIT } from '../src/decode/rune.js';
+import { decodeRuneText, RUNE_TEXT_LIMIT } from '../src/decode/rune.js';
 import { renderChunks, type OutputResult } from '../src/output/index.js';
 import { scan, type ScanFinding } from '../src/scan/index.js';
 import { runeCandidates } from '../src/scan/rune-context.js';
@@ -151,6 +152,24 @@ describe('RUNE/scan invalid values in rune context are reported', () => {
       expect(findings[0].grade, text).toBe('UNASSESSED');
       expect((findings[0].rune as { warnings: string[] }).warnings, text).toContain('possibly-truncated');
     }
+  });
+
+  it('RUNE/scan a value under a rune key that parses but has no numeric unique ID is rune-invalid, not an ADMIN rune', async () => {
+    // About 40% of SHA-256 digests and node IDs placed under a rune key parse as restriction text
+    // with unknown fields, which used to report them as broad ADMIN runes. checkrune refuses every
+    // value without a numeric unique ID (param_rune), so none of them is a rune a node would check.
+    const digest = Array.from({ length: 200 }, (_, index) => createHash('sha256').update(String(index)).digest('hex'))
+      .find(hex => { const decoded = decodeRuneText(hex); return decoded.ok && decoded.facts.uniqueId === null; })!;
+    const cases: [string, string][] = [[digest, 'no-unique-id'], [rune('method^list'), 'no-unique-id'],
+      [rune('=abc&method=pay'), 'unique-id-not-numeric'], [rune('=9223372036854775808&method=pay'), 'unique-id-not-numeric']];
+    for (const [value, reason] of cases) {
+      const findings = await scanText('x.env', `RUNE=${value}\n"rune": "${value}"\nRune: ${value}\n`);
+      expect(findings.map(finding => [finding.kind, finding.grade, (finding.rune as { reason?: string }).reason]), reason)
+        .toEqual(Array(3).fill(['rune-invalid', 'UNASSESSED', reason]));
+    }
+    // The base64 of such text in a Kubernetes Secret is not a rune either.
+    const secret = Buffer.from(rune('method=pay')).toString('base64');
+    expect((await scanText('secret.yaml', `  rune: ${secret}\n`)).map(finding => finding.kind)).toEqual(['rune-invalid']);
   });
 
   it('RUNE/scan a rune whose per unit is an Object.prototype name is reported, and the rest of the file is still scanned', async () => {

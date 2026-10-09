@@ -34,7 +34,10 @@ export type RuneReport = {
   verification: 'unchecked';
   warnings: (RuneWarning | 'possibly-truncated')[];
 };
-export type RuneInvalidReport = { recognition: 'invalid'; reason: RuneInvalidReason; verification: 'unchecked' };
+/** Why a value in rune context is not reported as a rune: the decoder's reason, or (scan) a parsed rune that
+ * checkrune refuses because it has no numeric unique ID. */
+export type RuneInvalidReportReason = RuneInvalidReason | 'no-unique-id' | 'unique-id-not-numeric';
+export type RuneInvalidReport = { recognition: 'invalid'; reason: RuneInvalidReportReason; verification: 'unchecked' };
 export type RuneAssessed = { grade: Grade; reasons: string[]; unassessed: string[]; report: RuneReport };
 
 const fatal = new TextDecoder('utf-8', { fatal: true });
