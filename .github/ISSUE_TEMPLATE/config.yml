@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/ZilverZtream/macwarden/security/advisories/new
+    about: Report vulnerabilities privately as described in SECURITY.md. Do not open a public issue.
+  - name: Security policy
+    url: https://github.com/ZilverZtream/macwarden/blob/main/SECURITY.md
+    about: Supported versions, how reports are handled and what to include.

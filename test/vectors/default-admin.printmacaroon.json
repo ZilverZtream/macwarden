@@ -1,0 +1,27 @@
+{
+  "version": 2,
+  "location": "lnd",
+  "root_key_id": "0",
+  "permissions": [
+    "address:read",
+    "address:write",
+    "info:read",
+    "info:write",
+    "invoices:read",
+    "invoices:write",
+    "macaroon:generate",
+    "macaroon:read",
+    "macaroon:write",
+    "message:read",
+    "message:write",
+    "offchain:read",
+    "offchain:write",
+    "onchain:read",
+    "onchain:write",
+    "peers:read",
+    "peers:write",
+    "signer:generate",
+    "signer:read"
+  ],
+  "caveats": null
+}

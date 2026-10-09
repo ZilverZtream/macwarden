@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "location": "lnd",
+  "root_key_id": "0",
+  "permissions": [
+    "signer:read",
+    "signer:read"
+  ],
+  "caveats": null
+}

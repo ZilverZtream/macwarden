@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "location": "lnd",
+  "root_key_id": "0",
+  "permissions": [
+    "address:read",
+    "address:write",
+    "invoices:read",
+    "invoices:write",
+    "onchain:read"
+  ],
+  "caveats": null
+}

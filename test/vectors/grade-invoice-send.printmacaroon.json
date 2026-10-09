@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "location": "lnd",
+  "root_key_id": "0",
+  "permissions": [
+    "invoices:read",
+    "uri:/routerrpc.Router/SendPaymentV2"
+  ],
+  "caveats": null
+}

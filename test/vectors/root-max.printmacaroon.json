@@ -1,0 +1,9 @@
+{
+  "version": 2,
+  "location": "lnd",
+  "root_key_id": "18446744073709551615",
+  "permissions": [
+    "info:read"
+  ],
+  "caveats": null
+}

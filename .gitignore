@@ -1,0 +1,7 @@
+node_modules/
+dist/
+test/.tmp/
+test/.sentinels/
+test/.scratch-cp040/
+scripts/.tmp/
+.ratchet/

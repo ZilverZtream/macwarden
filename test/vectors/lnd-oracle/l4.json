@@ -1,0 +1,345 @@
+{
+ "source": "LND v0.21.4-beta macaroon oracle (test/vectors/lnd-oracle/oracle)",
+ "rootKey": "macwarden-fuzz-root-key-0123456",
+ "clock": "2026-10-08T12:00:00Z",
+ "cases": [
+  {
+   "value": "2027-10-08T1:00:00Z",
+   "lnd": {
+    "ok": true,
+    "unixSeconds": "1822957200",
+    "nanos": 0
+   }
+  },
+  {
+   "value": "2026-10-08T1:00:00Z",
+   "lnd": {
+    "ok": true,
+    "unixSeconds": "1791421200",
+    "nanos": 0
+   }
+  },
+  {
+   "value": "2026-10-08T9:59:59.5Z",
+   "lnd": {
+    "ok": true,
+    "unixSeconds": "1791453599",
+    "nanos": 500000000
+   }
+  },
+  {
+   "value": "2027-10-08T23:00:00+24:00",
+   "lnd": {
+    "ok": true,
+    "unixSeconds": "1822950000",
+    "nanos": 0
+   }
+  },
+  {
+   "value": "2027-10-08T23:00:00-24:00",
+   "lnd": {
+    "ok": true,
+    "unixSeconds": "1823122800",
+    "nanos": 0
+   }
+  },
+  {
+   "value": "2027-10-08T1:00:00+24:00",
+   "lnd": {
+    "ok": true,
+    "unixSeconds": "1822870800",
+    "nanos": 0
+   }
+  },
+  {
+   "value": "2027-10-08T00:00:00+24:59",
+   "lnd": {
+    "ok": true,
+    "unixSeconds": "1822863660",
+    "nanos": 0
+   }
+  },
+  {
+   "value": "2027-10-08T00:00:00+25:00",
+   "lnd": {
+    "ok": false
+   }
+  },
+  {
+   "value": "2027-10-08T00:00:00Z",
+   "lnd": {
+    "ok": true,
+    "unixSeconds": "1822953600",
+    "nanos": 0
+   }
+  },
+  {
+   "value": "2027-10-08T00:00:00.123456789Z",
+   "lnd": {
+    "ok": true,
+    "unixSeconds": "1822953600",
+    "nanos": 123456789
+   }
+  },
+  {
+   "value": "2027-10-08T00:00:00,5+01:00",
+   "lnd": {
+    "ok": true,
+    "unixSeconds": "1822950000",
+    "nanos": 500000000
+   }
+  },
+  {
+   "value": "2027-10-08T24:00:00Z",
+   "lnd": {
+    "ok": false
+   }
+  },
+  {
+   "value": "2027-10-08T001:00:00Z",
+   "lnd": {
+    "ok": false
+   }
+  },
+  {
+   "value": "2027-10-08T1:0:00Z",
+   "lnd": {
+    "ok": false
+   }
+  },
+  {
+   "value": "2027-10-08T1:00:0Z",
+   "lnd": {
+    "ok": false
+   }
+  },
+  {
+   "value": "2027-10-08T:00:00Z",
+   "lnd": {
+    "ok": false
+   }
+  },
+  {
+   "value": "2027-10-08T01:00:00+1:00",
+   "lnd": {
+    "ok": false
+   }
+  },
+  {
+   "value": "2027-10-08T01:00:00+01:0",
+   "lnd": {
+    "ok": false
+   }
+  },
+  {
+   "value": "2027-10-08T01:00:00+0100",
+   "lnd": {
+    "ok": false
+   }
+  },
+  {
+   "value": "2027-02-29T01:00:00Z",
+   "lnd": {
+    "ok": false
+   }
+  },
+  {
+   "value": "2028-02-29T1:00:00Z",
+   "lnd": {
+    "ok": true,
+    "unixSeconds": "1835398800",
+    "nanos": 0
+   }
+  },
+  {
+   "value": "2027-10-08T9:00:00-23:59",
+   "lnd": {
+    "ok": true,
+    "unixSeconds": "1823072340",
+    "nanos": 0
+   }
+  },
+  {
+   "value": "2027-10-08T01:00:00+24:00",
+   "lnd": {
+    "ok": true,
+    "unixSeconds": "1822870800",
+    "nanos": 0
+   }
+  },
+  {
+   "value": "2027-10-08T01:00:00-24:00",
+   "lnd": {
+    "ok": true,
+    "unixSeconds": "1823043600",
+    "nanos": 0
+   }
+  },
+  {
+   "value": "0000-01-01T0:00:00+24:00",
+   "lnd": {
+    "ok": true,
+    "unixSeconds": "-62167305600",
+    "nanos": 0
+   }
+  },
+  {
+   "value": "9999-12-31T23:59:59-24:00",
+   "lnd": {
+    "ok": true,
+    "unixSeconds": "253402387199",
+    "nanos": 0
+   }
+  },
+  {
+   "value": "2027-10-08T1:00:00.5+24:00",
+   "lnd": {
+    "ok": true,
+    "unixSeconds": "1822870800",
+    "nanos": 500000000
+   }
+  },
+  {
+   "value": "2027-10-08T1:00:00z",
+   "lnd": {
+    "ok": false
+   }
+  },
+  {
+   "value": "2027-10-08t1:00:00Z",
+   "lnd": {
+    "ok": false
+   }
+  },
+  {
+   "value": "2027-10-08T01:00:00+23:60",
+   "lnd": {
+    "ok": true,
+    "unixSeconds": "1822870800",
+    "nanos": 0
+   }
+  },
+  {
+   "value": "2027-10-08T01:00:00+00:60",
+   "lnd": {
+    "ok": true,
+    "unixSeconds": "1822953600",
+    "nanos": 0
+   }
+  },
+  {
+   "value": "2027-10-08T01:00:00+00:61",
+   "lnd": {
+    "ok": false
+   }
+  },
+  {
+   "value": "2027-10-08T01:00:00+24:60",
+   "lnd": {
+    "ok": true,
+    "unixSeconds": "1822867200",
+    "nanos": 0
+   }
+  },
+  {
+   "value": "2027-10-08T01:00:00-24:59",
+   "lnd": {
+    "ok": true,
+    "unixSeconds": "1823047140",
+    "nanos": 0
+   }
+  },
+  {
+   "value": "2027-10-08T01:60:00Z",
+   "lnd": {
+    "ok": false
+   }
+  },
+  {
+   "value": "2027-10-08T01:00:60Z",
+   "lnd": {
+    "ok": false
+   }
+  },
+  {
+   "value": "2027-10-08T1:00:00.Z",
+   "lnd": {
+    "ok": false
+   }
+  },
+  {
+   "value": "2027-10-08T1:00:00.1234567891Z",
+   "lnd": {
+    "ok": true,
+    "unixSeconds": "1822957200",
+    "nanos": 123456789
+   }
+  },
+  {
+   "value": "2027-10-08T1:00:00,5Z",
+   "lnd": {
+    "ok": true,
+    "unixSeconds": "1822957200",
+    "nanos": 500000000
+   }
+  },
+  {
+   "value": "2027-10-08T 1:00:00Z",
+   "lnd": {
+    "ok": false
+   }
+  },
+  {
+   "value": "2027-10-08T+1:00:00Z",
+   "lnd": {
+    "ok": false
+   }
+  },
+  {
+   "value": "0000-01-01T00:00:00Z",
+   "lnd": {
+    "ok": true,
+    "unixSeconds": "-62167219200",
+    "nanos": 0
+   }
+  },
+  {
+   "value": "2027-10-08T9:5:00Z",
+   "lnd": {
+    "ok": false
+   }
+  },
+  {
+   "value": "2027-10-08T09:00:00+24:00",
+   "lnd": {
+    "ok": true,
+    "unixSeconds": "1822899600",
+    "nanos": 0
+   }
+  },
+  {
+   "value": "2026-10-08T9:00:00-03:00",
+   "lnd": {
+    "ok": true,
+    "unixSeconds": "1791460800",
+    "nanos": 0
+   }
+  },
+  {
+   "value": "2026-10-08T11:59:59.999999999+00:00",
+   "lnd": {
+    "ok": true,
+    "unixSeconds": "1791460799",
+    "nanos": 999999999
+   }
+  },
+  {
+   "value": "2027-10-08T1:00:00+00:00",
+   "lnd": {
+    "ok": true,
+    "unixSeconds": "1822957200",
+    "nanos": 0
+   }
+  }
+ ]
+}

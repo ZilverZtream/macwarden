@@ -1,0 +1,30 @@
+# Always run gitleaks with --redact. Without --redact, gitleaks prints and stores the matched credential.
+# These rules add to gitleaks' built-in rules ([extend] useDefault = true); a custom config without it
+# replaces them. Keywords are a case-insensitive prefilter checked before each regex.
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = 'macwarden-macaroon-hex'
+description = 'LND macaroon (location lnd) in hex'
+regex = '''(?i)0201036c6e6402[0-9a-f]{40,}'''
+keywords = ['0201036c6e6402']
+
+[[rules]]
+id = 'macwarden-macaroon-base64'
+description = 'LND macaroon (location lnd) in base64 or base64url'
+regex = '''AgEDbG5kA[A-Za-z0-9+/_-]{40,}={0,2}'''
+keywords = ['agedbg5ka']
+
+[[rules]]
+id = 'macwarden-lndconnect'
+description = 'lndconnect URI, which embeds an LND macaroon'
+regex = '''(?i)lndconnect://[^\s"'<>]+'''
+keywords = ['lndconnect://']
+
+[[rules]]
+id = 'macwarden-nwc'
+description = 'Nostr Wallet Connect (NIP-47) URI with a secret'
+regex = '''(?i)(?:nostr\+walletconnect|nostrwalletconnect):(?://)?[0-9a-f]{64}/?\?[^\s"'<>]*?secret=[0-9a-f]{64}(?:[^0-9a-f]|$)'''
+keywords = ['walletconnect']

@@ -1,0 +1,8 @@
+{
+  "revision": "b779ae7aec80b5462bf85cf20e2a40fb816f296e",
+  "source": "https://github.com/lightninglabs/lightning-terminal/blob/b779ae7aec80b5462bf85cf20e2a40fb816f296e/macaroons/super_mac.go#L19-L35",
+  "location": "macaroons/super_mac.go:19-35, 69-75",
+  "observation": "SuperMacaroonRootKeyPrefix is four bytes FF EE DD CC; NewSuperMacaroonRootKeyID prepends it to a four-byte suffix and interprets the eight bytes as a big-endian uint64; IsSuperMacaroonRootKeyID checks that prefix.",
+  "localLndObservation": false,
+  "architectureAssumption12Conflict": false
+}

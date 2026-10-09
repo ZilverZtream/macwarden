@@ -1,0 +1,1768 @@
+{
+  "schema": 1,
+  "supportedVersion": "BTCPay Server v2.4.4",
+  "serverRevision": "2d5a0d8077bb33af080e949031da33d84b80638d",
+  "clientRevision": "62164e9394295bb27ebd06b769c6038f9277fb37",
+  "lndRevision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+  "lndVersion": "0.21.4-beta",
+  "packages": [
+    {
+      "name": "BTCPayServer.Lightning.All",
+      "version": "1.7.8",
+      "sha256": "c8c08b1d74c6c5ec64a48e778796e31297b9033140447f04f3fb8c107504bdde",
+      "url": "https://api.nuget.org/v3-flatcontainer/btcpayserver.lightning.all/1.7.8/btcpayserver.lightning.all.1.7.8.nupkg"
+    },
+    {
+      "name": "BTCPayServer.Lightning.LND",
+      "version": "1.7.2",
+      "sha256": "6f8e82b36135b0562c0545bead7bf23554dd6a7089e0afb989f432684fe40849",
+      "url": "https://api.nuget.org/v3-flatcontainer/btcpayserver.lightning.lnd/1.7.2/btcpayserver.lightning.lnd.1.7.2.nupkg"
+    }
+  ],
+  "supportedScope": "All LndClient ILightningClient operations at the pinned dependency, including payment, cancellation, channels, balances, deposit address and peer helpers. No client operation is omitted. Uncalled generated Swagger endpoints, other backends and other versions are not claimed.",
+  "sources": {
+    "client": {
+      "repository": "btcpayserver/BTCPayServer.Lightning",
+      "revision": "62164e9394295bb27ebd06b769c6038f9277fb37",
+      "path": "src/BTCPayServer.Lightning.LND/LndClient.cs",
+      "url": "https://github.com/btcpayserver/BTCPayServer.Lightning/blob/62164e9394295bb27ebd06b769c6038f9277fb37/src/BTCPayServer.Lightning.LND/LndClient.cs",
+      "sha256": "74ce9fb304b54ae9284e4ae90b9497ef7c3f1cdb708bf3a640a90dcf68e6cd78",
+      "gitBlob": "d62fe09cc56744ab291b35a42e2ba75b16336e6a",
+      "local": "LndClient.cs"
+    },
+    "swagger": {
+      "repository": "btcpayserver/BTCPayServer.Lightning",
+      "revision": "62164e9394295bb27ebd06b769c6038f9277fb37",
+      "path": "src/BTCPayServer.Lightning.LND/LndSwaggerClient.cs",
+      "url": "https://github.com/btcpayserver/BTCPayServer.Lightning/blob/62164e9394295bb27ebd06b769c6038f9277fb37/src/BTCPayServer.Lightning.LND/LndSwaggerClient.cs",
+      "sha256": "abbb6f2e8f79ebba3ac72265e0287de26084ecbcb6ae61b74062c69f45852204",
+      "gitBlob": "026d5969c01bd08d188fa8663893c98fa62791a8"
+    },
+    "cancel": {
+      "repository": "btcpayserver/BTCPayServer.Lightning",
+      "revision": "62164e9394295bb27ebd06b769c6038f9277fb37",
+      "path": "src/BTCPayServer.Lightning.LND/LndSwaggerClient.partial2.cs",
+      "url": "https://github.com/btcpayserver/BTCPayServer.Lightning/blob/62164e9394295bb27ebd06b769c6038f9277fb37/src/BTCPayServer.Lightning.LND/LndSwaggerClient.partial2.cs",
+      "sha256": "8843c48a46f387d17d613b822daf103bf202f1a4f5d8dc66922489c4f6db35d9",
+      "gitBlob": "602df8200552931a551ffb2324463cf01b399ccf",
+      "local": "LndSwaggerClient.partial2.cs"
+    },
+    "server": {
+      "repository": "btcpayserver/btcpayserver",
+      "revision": "2d5a0d8077bb33af080e949031da33d84b80638d",
+      "path": "BTCPayServer/BTCPayServer.csproj",
+      "url": "https://github.com/btcpayserver/btcpayserver/blob/2d5a0d8077bb33af080e949031da33d84b80638d/BTCPayServer/BTCPayServer.csproj",
+      "sha256": "c06ebc516a2b8d906a554e22952d1b12f4a41546bc4e18b2adadab80afabcef2",
+      "gitBlob": "4064334a30c019a63a5426b2f1f43a7cf5319fcf",
+      "local": "BTCPayServer.csproj"
+    },
+    "rpc": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "rpcserver.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/rpcserver.go",
+      "sha256": "6b3f749038e4634aecc523dc47dbebed8f5509fa102c296807ee11a17e207f96",
+      "gitBlob": "ca59d6187a138862e1115ec522a72b2452482375"
+    },
+    "router": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "lnrpc/routerrpc/router_server.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/lnrpc/routerrpc/router_server.go",
+      "sha256": "af004177909a10c65824777b57e00e777f062455081c4c7663072adba0ae7dcf",
+      "gitBlob": "7903924fadc1b8d43dd2877a5d5e51089ea5069c"
+    },
+    "invoices": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "lnrpc/invoicesrpc/invoices_server.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/lnrpc/invoicesrpc/invoices_server.go",
+      "sha256": "f68b537da087ca3b9ba268e26934e3b39ca1a2499dd9d7665fa39d7b4a0b0d5c",
+      "gitBlob": "7b00b9b6438c1166baaa36c914191894b19d9056"
+    },
+    "lightningYaml": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "lnrpc/lightning.yaml",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/lnrpc/lightning.yaml",
+      "sha256": "cc7f5c2c73e828916585235b5a9a3965f4560d2d753cb95e1719fefedb674bca",
+      "gitBlob": "079271714002e06e5151c5ab27a17c3c021b4828"
+    },
+    "routerYaml": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "lnrpc/routerrpc/router.yaml",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/lnrpc/routerrpc/router.yaml",
+      "sha256": "be5ed2ed29f33507d9956a96dde33414ba4333b084a35e74c36253c130ef34e9",
+      "gitBlob": "cba907e10c2312315916aeb9d00ce96e2d210e3e"
+    },
+    "invoicesYaml": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "lnrpc/invoicesrpc/invoices.yaml",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/lnrpc/invoicesrpc/invoices.yaml",
+      "sha256": "80ab2540a6b8b662dfb776c4e5fdc9018976a8e2853b9260a2486ba4db65d7fd",
+      "gitBlob": "66d53153e93c711b634e6fdbf3ca51cc5415627a"
+    },
+    "lncli-cmd_payments.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/cmd_payments.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/cmd_payments.go",
+      "sha256": "19b81b1c08a35b228279a6870684f33d5948ea25e9a0d0c7688603db6db7b75a",
+      "gitBlob": "be7dc3d8c55e4b6ee51d6653917b8c01373c601d"
+    },
+    "lncli-arg_parse.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/arg_parse.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/arg_parse.go",
+      "sha256": "cd68737facf6f36c6cfe67210786b35f190db21a6df45494b75822ec5e890c19",
+      "gitBlob": "1d8bbe198876524f8f28a77c40dcfa03ccdc839f"
+    },
+    "lncli-cmd_open_channel.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/cmd_open_channel.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/cmd_open_channel.go",
+      "sha256": "4cc6e729a49e698bc6aab1c2d1d3745a1a6321428e1070710185539fa2f63196",
+      "gitBlob": "921f8478756b22342404521cee10a11d5b96ae62"
+    },
+    "lncli-invoicesrpc_active.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/invoicesrpc_active.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/invoicesrpc_active.go",
+      "sha256": "e478e56c18e574f0fe21ce958aea313ab1573fe49e4cb24004b43e3b0260413b",
+      "gitBlob": "0ee767c8b22b7e1f42b36b2bd5a3692117377abb"
+    },
+    "lncli-peersrpc_active.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/peersrpc_active.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/peersrpc_active.go",
+      "sha256": "8ee321da09b1c92fb309773cb55f8664c99312394d8dbe6beb4c1bfeee64697b",
+      "gitBlob": "5a1fc85e36dcf38c0a1b2bb56a8042d27dec8f67"
+    },
+    "lncli-chainrpc_active.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/chainrpc_active.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/chainrpc_active.go",
+      "sha256": "2fe5dbbd8b4a789bb4a9ea94ba77bc94ecd42e174560b38afbca6a92dc5424bb",
+      "gitBlob": "0f1f8b61210fdf1cf36e061511a54bcc2a9dceb2"
+    },
+    "lncli-cmd_custom.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/cmd_custom.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/cmd_custom.go",
+      "sha256": "37bc768661aac42bb8ed1dce3a13ffb504eaf235a4a77104554657ce972bff4b",
+      "gitBlob": "474af6c67fe8639d8a3d4bc4104d0beab6e9cbc8"
+    },
+    "lncli-cmd_invoice.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/cmd_invoice.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/cmd_invoice.go",
+      "sha256": "151e9cdc057a6605d94b49e35febc80b61f993d74fbe47ab481c60dbc7a91922",
+      "gitBlob": "24f6aa8bd2d8f8068b6b1a481bf8d02e42e49630"
+    },
+    "lncli-cmd_debug.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/cmd_debug.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/cmd_debug.go",
+      "sha256": "c134d34c659a060b089a6728eb0c5fbe98a96eab3813c8181217d0939a178b3b",
+      "gitBlob": "eca1a3063d7b0315639ef1d150980cc6a97d43d1"
+    },
+    "lncli-main.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/main.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/main.go",
+      "sha256": "e331f2ba7ac9ca908d8b4aae88cd7daa7c0231bdfa93ee4121bba4333ba00693",
+      "gitBlob": "dc9b993de5730ed46bcf56e3ca184f1ef6d0d083"
+    },
+    "lncli-cmd_import_mission_control.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/cmd_import_mission_control.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/cmd_import_mission_control.go",
+      "sha256": "0e0cc854893e28bde63e4b6649d3462d94249d616b140f4d20ee668824805860",
+      "gitBlob": "1fb63c85990cfcd00aa78323b7c48bde379787fe"
+    },
+    "lncli-autopilotrpc_default.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/autopilotrpc_default.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/autopilotrpc_default.go",
+      "sha256": "c12c0467e99271c231bd8b73721792caed6431b57c8d7a0bc0dd2b77faaab1ed",
+      "gitBlob": "393b6f124f4f9cba6738cebdc97a953955678d96"
+    },
+    "lncli-profile.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/profile.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/profile.go",
+      "sha256": "6b1f3bb820e78a1aea365024013baf02ce17e52bca37954b14236457cc607ddb",
+      "gitBlob": "0d63ca93c99a64ab13892fa6c36b1ffe5850ee03"
+    },
+    "lncli-cmd_profile.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/cmd_profile.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/cmd_profile.go",
+      "sha256": "601c0318e17ed0162811f74babe81aad23f14397d712965aff4bca9fd251e3be",
+      "gitBlob": "6767964eb4f99fbe14aefa5766d093f8fa5188bb"
+    },
+    "lncli-cmd_walletunlocker.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/cmd_walletunlocker.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/cmd_walletunlocker.go",
+      "sha256": "541a47b562a942909eec726871e1e7e2bc783bd5118d258fa89de01113f3be8e",
+      "gitBlob": "0c04ce25c0d26de60d448424b52307a88df79017"
+    },
+    "lncli-watchtower_default.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/watchtower_default.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/watchtower_default.go",
+      "sha256": "ffbb961ccf68b6f2acbe7fe52be8195286169cf74b28f2cd6ed86908bccd3e0e",
+      "gitBlob": "c958a66bdc1edfd0f53284454d9e471375e1c80d"
+    },
+    "lncli-routerrpc.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/routerrpc.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/routerrpc.go",
+      "sha256": "244659bb5e431925927a0fdca1343cd5e33a5c70d0a65da82fb554cc6f3f0362",
+      "gitBlob": "e7b877a08ff85da8704b365a630934f21c588249"
+    },
+    "lncli-peersrpc_default.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/peersrpc_default.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/peersrpc_default.go",
+      "sha256": "aefa4384edbf9123ddfc6d46c2fb7a96cb052f1a911c3eb9c8acb2147cf51191",
+      "gitBlob": "57c8aa7a97ff2c85da9670c7c2f6b27a4096e60b"
+    },
+    "lncli-devrpc_active.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/devrpc_active.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/devrpc_active.go",
+      "sha256": "498a874f268d9fcbf542f448860b691d6fe98506d9844de15c37f6017d277137",
+      "gitBlob": "8d1960e461b4db0a0330590f34bb955b005935f5"
+    },
+    "lncli-autopilotrpc_active.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/autopilotrpc_active.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/autopilotrpc_active.go",
+      "sha256": "05a18ad8391abee9f835b04707e1cef0a32bacf212478d45ca74bb1ad9fd2c2b",
+      "gitBlob": "212ef45797df718b04d506c80a4f8edc7b056a57"
+    },
+    "lncli-cmd_state.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/cmd_state.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/cmd_state.go",
+      "sha256": "a27343a5d9a1d97196c9d109175ec12024fd5e2f64feab2da26ece0e87ade4e3",
+      "gitBlob": "c2522b721be3db1083f6dc4a581b3669ce8a7741"
+    },
+    "lncli-walletrpc_default.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/walletrpc_default.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/walletrpc_default.go",
+      "sha256": "72da378c60d2dffe6e462304be98e7b34416c1b5428df1d33a853bdc6f52351c",
+      "gitBlob": "90c627c2a5a2759f0eb8da2b6505db5f18176e71"
+    },
+    "lncli-wtclient.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/wtclient.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/wtclient.go",
+      "sha256": "8cbb59e376e1c1a3f7dbab192b7fc4faafc5bf039ba4df7aae9087f3df42f844",
+      "gitBlob": "2969d27ae5dca3084104f05860018f66cf06712b"
+    },
+    "lncli-neutrino_default.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/neutrino_default.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/neutrino_default.go",
+      "sha256": "b7ff37943858ba8f198e17901a5f397fd07dfd743410eb6eaa86373a603c93a9",
+      "gitBlob": "b269e1238630a852cad5dcd16a8ffd42996753a8"
+    },
+    "lncli-cmd_macaroon.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/cmd_macaroon.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/cmd_macaroon.go",
+      "sha256": "0129250bfd77ddbd9c02b6064c748caf68eec81bacb1fb367bcb66da392b0cbb",
+      "gitBlob": "7e94e496d3edf93ae2b751db56b211e2258d9aff"
+    },
+    "lncli-commands.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/commands.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/commands.go",
+      "sha256": "b6ea34cb91dc07c2b2c7afa21f1d0a676b999c3df8011717bd9e671535e66f50",
+      "gitBlob": "0c389a610b07f0c8366cebb4bea0a307884581bf"
+    },
+    "lncli-chainrpc_default.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/chainrpc_default.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/chainrpc_default.go",
+      "sha256": "2b0837d3acc85da40e22bf1e00fc22d5c218afe7f8117d2b22d38bccbfc91e1c",
+      "gitBlob": "28440a839e6c6dd749520159b79bc6d3678f350b"
+    },
+    "lncli-walletrpc_types.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/walletrpc_types.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/walletrpc_types.go",
+      "sha256": "8ccc6c8e24180d6040014961e4b8c5edb840fc261bf349c6ef0b7347ed662d6b",
+      "gitBlob": "f3a025c393fda43b643d05351906f17abd46613b"
+    },
+    "lncli-invoicesrpc_default.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/invoicesrpc_default.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/invoicesrpc_default.go",
+      "sha256": "4828ab9efa3efa87ddab1699382855493fec2bc667327527d53136ad21024dae",
+      "gitBlob": "e925e55d69490b5d78ebed4199a7f4f748c50aa6"
+    },
+    "lncli-cmd_mission_control.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/cmd_mission_control.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/cmd_mission_control.go",
+      "sha256": "798016287783053bbfb59097f2fe083c2e3984bcd447d5f34e56849ae782cd62",
+      "gitBlob": "fe4acb25cf78b75522e7718156102f4d21c9059c"
+    },
+    "lncli-cmd_update_chan_status.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/cmd_update_chan_status.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/cmd_update_chan_status.go",
+      "sha256": "4a1f23e44a873841f6af8f9f5d1c1b1fea604db8b01f954346a7d5f44ebcf420",
+      "gitBlob": "3525f7c5c602b1abdf25743dae55b1cfe00aa0e6"
+    },
+    "lncli-macaroon_jar.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/macaroon_jar.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/macaroon_jar.go",
+      "sha256": "08f6a0ae1f34654f1ed5f53f0e52cdffea55f7b8187c815f000601f617b05aa1",
+      "gitBlob": "d3a4345b0ba9cb84a6b402490c2570551b7901f4"
+    },
+    "lncli-devrpc_default.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/devrpc_default.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/devrpc_default.go",
+      "sha256": "8c8d2a4edf35af65a50ea20865b5308006b1aca4ecb9f184966d644141f3da4e",
+      "gitBlob": "1c5b482c32475a150e51a2bd2e156a6c22efb139"
+    },
+    "lncli-neutrino_active.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/neutrino_active.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/neutrino_active.go",
+      "sha256": "992287ab343ffe4bef4c1e6cc5f782812da28141d86d582b64b3a037c466c0c3",
+      "gitBlob": "f34c7cc0e270e121fc8b0eaf3cfd2b72d68175e0"
+    },
+    "lncli-walletrpc_active.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/walletrpc_active.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/walletrpc_active.go",
+      "sha256": "f946d1f2dc2408fa467dbdea0e9831f30fe3f4e5d09bb7dc9c64eaf9a0d83747",
+      "gitBlob": "671e2548c62b9d27e1b003477aab7acc0acd3118"
+    },
+    "lncli-watchtower_active.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/watchtower_active.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/watchtower_active.go",
+      "sha256": "e56298702cda509e5d589a35f2c2fddfec1943b9571e978c2c4402ec137ac67c",
+      "gitBlob": "bc5cd196958cabec91252861b011d17f64ff41e2"
+    },
+    "lncli-cmd_version.go": {
+      "repository": "lightningnetwork/lnd",
+      "revision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+      "path": "cmd/commands/cmd_version.go",
+      "url": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/cmd_version.go",
+      "sha256": "150650efd59998b668d9210f2dc74b96cb7566be4a6c80a49f88e79ee3e482f0",
+      "gitBlob": "9e7a2b0775b8fd1dad7595ce2645157c1c251491"
+    }
+  },
+  "calls": [
+    {
+      "method": "/invoicesrpc.Invoices/CancelInvoice",
+      "entry": "CancelInvoice",
+      "helper": "CancelInvoiceAsync",
+      "direct": null,
+      "clientLocations": [
+        {
+          "source": "client",
+          "line": 413,
+          "text": "            await SwaggerClient.CancelInvoiceAsync(new InvoicesrpcCancelInvoiceMsg"
+        }
+      ],
+      "endpointSources": [
+        {
+          "source": "cancel",
+          "line": 1,
+          "text": "using System;\nusing System.Threading;\nusing System.Threading.Tasks;\n\nnamespace BTCPayServer.Lightning.LND\n{\n    public partial class LndSwaggerClient\n    {\n        /// <param name=\"cancellationToken\">A cancellation token that can be used by other objects or threads to receive notice of cancellation.</param>\n        /// <summary>CancelInvoice cancels a currently open invoice. If the invoice is already\n        /// <br/>canceled, this call will succeed. If the invoice is already settled, it will\n        /// <br/>fail.</summary>\n        /// <returns>A successful response.</returns>\n        /// <exception cref=\"ApiException\">A server side error occurred.</exception>\n        public async Task<InvoicesrpcCancelInvoiceResp> CancelInvoiceAsync(InvoicesrpcCancelInvoiceMsg body,\n            CancellationToken cancellationToken)\n        {\n            if (body == null)\n                throw new System.ArgumentNullException(\"body\");\n\n            var urlBuilder_ = new System.Text.StringBuilder();\n            urlBuilder_.Append(BaseUrl != null ? BaseUrl.TrimEnd('/') : \"\").Append(\"/v2/invoices/cancel\");\n\n            var client_ = _httpClient;\n            var disposeClient_ = false;\n            try\n            {\n                using var request_ = new System.Net.Http.HttpRequestMessage();\n                var content_ =\n                    new System.Net.Http.StringContent(\n                        Newtonsoft.Json.JsonConvert.SerializeObject(body, _settings.Value));\n                content_.Headers.ContentType =\n                    System.Net.Http.Headers.MediaTypeHeaderValue.Parse(\"application/json\");\n                request_.Content = content_;\n                request_.Method = new System.Net.Http.HttpMethod(\"POST\");\n                request_.Headers.Accept.Add(\n                    System.Net.Http.Headers.MediaTypeWithQualityHeaderValue.Parse(\"application/json\"));\n\n                PrepareRequest(client_, request_, urlBuilder_);\n\n                var url_ = urlBuilder_.ToString();\n                request_.RequestUri = new System.Uri(url_, System.UriKind.RelativeOrAbsolute);\n\n                PrepareRequest(client_, request_, url_);\n\n                var response_ = await client_.SendAsync(request_,\n                        System.Net.Http.HttpCompletionOption.ResponseHeadersRead, cancellationToken)\n                    .ConfigureAwait(false);\n                var disposeResponse_ = true;\n                try\n                {\n                    var headers_ =\n                        System.Linq.Enumerable.ToDictionary(response_.Headers, h_ => h_.Key, h_ => h_.Value);\n                    if (response_.Content != null && response_.Content.Headers != null)\n                    {\n                        foreach (var item_ in response_.Content.Headers)\n                            headers_[item_.Key] = item_.Value;\n                    }\n\n                    ProcessResponse(client_, response_);\n\n\n                    var status_ = (int)response_.StatusCode;\n                    if (status_ == 200)\n                    {\n                        var responseData_ = await response_.Content.ReadAsStringAsync().ConfigureAwait(false);\n                        var result_ = default(InvoicesrpcCancelInvoiceResp);\n                        try\n                        {\n                            result_ = Newtonsoft.Json.JsonConvert.DeserializeObject<InvoicesrpcCancelInvoiceResp>(\n                                responseData_, _settings.Value);\n                            return result_;\n                        }\n                        catch (System.Exception exception)\n                        {\n                            throw new SwaggerException(\"Could not deserialize the response body.\",\n                                status_.ToString(), responseData_, headers_, exception);\n                        }\n                    }\n                    else\n                    {\n                        var responseData_ = await response_.Content.ReadAsStringAsync().ConfigureAwait(false);\n                        throw new SwaggerException(\n                            \"The HTTP status code of the response was not expected (\" +\n                            (int)response_.StatusCode + \").\", status_.ToString(), responseData_, headers_,\n                            null);\n                    }\n                }\n                finally\n                {\n                    if (disposeResponse_)\n                        response_.Dispose();\n                }\n            }\n            finally\n            {\n                if (disposeClient_)\n                    client_.Dispose();\n            }\n        }\n    }\n\n    [System.CodeDom.Compiler.GeneratedCode(\"NJsonSchema\", \"10.5.2.0 (Newtonsoft.Json v12.0.0.0)\")]\n    public partial class InvoicesrpcCancelInvoiceMsg\n    {\n        /// <summary>Hash corresponding to the (hold) invoice to cancel.</summary>\n        [Newtonsoft.Json.JsonProperty(\"payment_hash\", Required = Newtonsoft.Json.Required.Default,\n            NullValueHandling = Newtonsoft.Json.NullValueHandling.Ignore)]\n        public byte[] Payment_hash { get; set; }\n    }\n\n    [System.CodeDom.Compiler.GeneratedCode(\"NJsonSchema\", \"10.5.2.0 (Newtonsoft.Json v12.0.0.0)\")]\n    public partial class InvoicesrpcCancelInvoiceResp\n    {\n    }\n}\n"
+        }
+      ],
+      "restMapping": {
+        "source": "invoicesYaml",
+        "line": 8,
+        "text": "    - selector: invoicesrpc.Invoices.CancelInvoice\n      post: \"/v2/invoices/cancel\"\n      body: \"*\"\n"
+      },
+      "permissions": [
+        "invoices:write"
+      ],
+      "permissionsSource": {
+        "source": "invoices",
+        "line": 59,
+        "text": "\"/invoicesrpc.Invoices/CancelInvoice\": {{\n\t\t\tEntity: \"invoices\",\n\t\t\tAction: \"write\",\n\t\t}},"
+      },
+      "lncli": {
+        "args": [
+          "cancelinvoice",
+          "--paymenthash={invoiceHash}"
+        ]
+      }
+    },
+    {
+      "method": "/lnrpc.Lightning/AddInvoice",
+      "entry": "CreateInvoice",
+      "helper": "AddInvoiceAsync",
+      "direct": null,
+      "clientLocations": [
+        {
+          "source": "client",
+          "line": 394,
+          "text": "            var resp = await SwaggerClient.AddInvoiceAsync(lndRequest, cancellation);"
+        }
+      ],
+      "endpointSources": [
+        {
+          "source": "swagger",
+          "line": 1748,
+          "text": "public async System.Threading.Tasks.Task<LnrpcAddInvoiceResponse> AddInvoiceAsync(LnrpcInvoice body, System.Threading.CancellationToken cancellationToken)\n        {\n            var urlBuilder_ = new System.Text.StringBuilder();\n            urlBuilder_.Append(BaseUrl).Append(\"/v1/invoices\");\n\n            var client_ = _httpClient;\n            try\n            {\n                using (var request_ = new System.Net.Http.HttpRequestMessage())\n                {\n                    var content_ = new System.Net.Http.StringContent(Newtonsoft.Json.JsonConvert.SerializeObject(body, _settings.Value));\n                    content_.Headers.ContentType.MediaType = \"application/json\";\n                    request_.Content = content_;\n                    request_.Method = new System.Net.Http.HttpMethod(\"POST\");\n                    request_.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue(\"application/json\"));\n\n                    PrepareRequest(client_, request_, urlBuilder_);\n                    var url_ = urlBuilder_.ToString();\n                    request_.RequestUri = new System.Uri(url_, System.UriKind.RelativeOrAbsolute);\n                    PrepareRequest(client_, request_, url_);\n\n                    var response_ = await client_.SendAsync(request_, System.Net.Http.HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);\n                    try\n                    {\n                        var headers_ = System.Linq.Enumerable.ToDictionary(response_.Headers, h_ => h_.Key, h_ => h_.Value);\n                        foreach (var item_ in response_.Content.Headers)\n                            headers_[item_.Key] = item_.Value;\n\n                        ProcessResponse(client_, response_);\n\n                        var status_ = ((int)response_.StatusCode).ToString();\n                        if (status_ == \"200\")\n                        {\n                            var responseData_ = await response_.Content.ReadAsStringAsync().ConfigureAwait(false);\n                            var result_ = default(LnrpcAddInvoiceResponse);\n                            try\n                            {\n                                result_ = Newtonsoft.Json.JsonConvert.DeserializeObject<LnrpcAddInvoiceResponse>(responseData_, _settings.Value);\n                                return result_;\n                            }\n                            catch (System.Exception exception)\n                            {\n                                throw new SwaggerException(\"Could not deserialize the response body.\", status_, responseData_, headers_, exception);\n                            }\n                        }\n                        else\n                        if (status_ != \"200\" && status_ != \"204\")\n                        {\n                            var responseData_ = await response_.Content.ReadAsStringAsync().ConfigureAwait(false);\n                            throw new SwaggerException(\"The HTTP status code of the response was not expected (\" + (int)response_.StatusCode + \").\", status_, responseData_, headers_, null);\n                        }\n\n                        return default(LnrpcAddInvoiceResponse);\n                    }\n                    finally\n                    {\n                        if (response_ != null)\n                            response_.Dispose();\n                    }\n                }\n            }\n            finally\n            {\n            }\n        }\n"
+        }
+      ],
+      "restMapping": {
+        "source": "lightningYaml",
+        "line": 78,
+        "text": "    - selector: lnrpc.Lightning.AddInvoice\n      post: \"/v1/invoices\"\n      body: \"*\"\n"
+      },
+      "permissions": [
+        "invoices:write"
+      ],
+      "permissionsSource": {
+        "source": "rpc",
+        "line": 399,
+        "text": "\"/lnrpc.Lightning/AddInvoice\": {{\n\t\t\tEntity: \"invoices\",\n\t\t\tAction: \"write\",\n\t\t}},"
+      },
+      "lncli": {
+        "args": [
+          "addinvoice",
+          "--amt=1"
+        ]
+      }
+    },
+    {
+      "method": "/lnrpc.Lightning/ChannelBalance",
+      "entry": "GetBalance",
+      "helper": "ChannelBalanceAsync",
+      "direct": null,
+      "clientLocations": [
+        {
+          "source": "client",
+          "line": 479,
+          "text": "            var channelBalance = SwaggerClient.ChannelBalanceAsync(cancellation);"
+        }
+      ],
+      "endpointSources": [
+        {
+          "source": "swagger",
+          "line": 131,
+          "text": "public async System.Threading.Tasks.Task<LnrpcChannelBalanceResponse> ChannelBalanceAsync(System.Threading.CancellationToken cancellationToken)\n        {\n            var urlBuilder_ = new System.Text.StringBuilder();\n            urlBuilder_.Append(BaseUrl).Append(\"/v1/balance/channels\");\n\n            var client_ = _httpClient;\n            try\n            {\n                using (var request_ = new System.Net.Http.HttpRequestMessage())\n                {\n                    request_.Method = new System.Net.Http.HttpMethod(\"GET\");\n                    request_.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue(\"application/json\"));\n\n                    PrepareRequest(client_, request_, urlBuilder_);\n                    var url_ = urlBuilder_.ToString();\n                    request_.RequestUri = new System.Uri(url_, System.UriKind.RelativeOrAbsolute);\n                    PrepareRequest(client_, request_, url_);\n\n                    var response_ = await client_.SendAsync(request_, System.Net.Http.HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);\n                    try\n                    {\n                        var headers_ = System.Linq.Enumerable.ToDictionary(response_.Headers, h_ => h_.Key, h_ => h_.Value);\n                        foreach (var item_ in response_.Content.Headers)\n                            headers_[item_.Key] = item_.Value;\n\n                        ProcessResponse(client_, response_);\n\n                        var status_ = ((int)response_.StatusCode).ToString();\n                        if (status_ == \"200\")\n                        {\n                            var responseData_ = await response_.Content.ReadAsStringAsync().ConfigureAwait(false);\n                            var result_ = default(LnrpcChannelBalanceResponse);\n                            try\n                            {\n                                result_ = Newtonsoft.Json.JsonConvert.DeserializeObject<LnrpcChannelBalanceResponse>(responseData_, _settings.Value);\n                                return result_;\n                            }\n                            catch (System.Exception exception)\n                            {\n                                throw new SwaggerException(\"Could not deserialize the response body.\", status_, responseData_, headers_, exception);\n                            }\n                        }\n                        else\n                        if (status_ != \"200\" && status_ != \"204\")\n                        {\n                            var responseData_ = await response_.Content.ReadAsStringAsync().ConfigureAwait(false);\n                            throw new SwaggerException(\"The HTTP status code of the response was not expected (\" + (int)response_.StatusCode + \").\", status_, responseData_, headers_, null);\n                        }\n\n                        return default(LnrpcChannelBalanceResponse);\n                    }\n                    finally\n                    {\n                        if (response_ != null)\n                            response_.Dispose();\n                    }\n                }\n            }\n            finally\n            {\n            }\n        }\n"
+        }
+      ],
+      "restMapping": {
+        "source": "lightningYaml",
+        "line": 12,
+        "text": "    - selector: lnrpc.Lightning.ChannelBalance\n      get: \"/v1/balance/channels\"\n"
+      },
+      "permissions": [
+        "offchain:read"
+      ],
+      "permissionsSource": {
+        "source": "rpc",
+        "line": 379,
+        "text": "\"/lnrpc.Lightning/ChannelBalance\": {{\n\t\t\tEntity: \"offchain\",\n\t\t\tAction: \"read\",\n\t\t}},"
+      },
+      "lncli": {
+        "args": [
+          "channelbalance"
+        ]
+      }
+    },
+    {
+      "method": "/lnrpc.Lightning/ConnectPeer",
+      "entry": "ConnectTo -> ConnectPeer -> ConnectPeerAsync",
+      "helper": "ConnectPeer",
+      "direct": null,
+      "clientLocations": [
+        {
+          "source": "client",
+          "line": 933,
+          "text": "            return await SwaggerClient.ConnectPeer(new LnrpcConnectPeerRequest"
+        }
+      ],
+      "endpointSources": [
+        {
+          "source": "swagger",
+          "line": 2289,
+          "text": "public async System.Threading.Tasks.Task<ConnectionResult> ConnectPeer(LnrpcConnectPeerRequest body, System.Threading.CancellationToken cancellationToken)\n        {\n            try\n            {\n                await ConnectPeerAsync(body, cancellationToken);\n                return ConnectionResult.Ok;\n            }\n            catch (SwaggerException ex) when (ex.AsLNDError() is LNDError err && err.Error.Contains(\"already connected\"))\n\t\t\t{\n                return ConnectionResult.Ok;\n\t\t\t}\n            catch (SwaggerException ex) when (ex.AsLNDError() is LNDError err)\n            {\n                // Already connected error\n                return ConnectionResult.CouldNotConnect;\n            }\n        }\n"
+        },
+        {
+          "source": "swagger",
+          "line": 2313,
+          "text": "public async System.Threading.Tasks.Task ConnectPeerAsync(LnrpcConnectPeerRequest body, System.Threading.CancellationToken cancellationToken)\n        {\n            var urlBuilder_ = new System.Text.StringBuilder();\n            urlBuilder_.Append(BaseUrl).Append(\"/v1/peers\");\n\n            var client_ = _httpClient;\n            try\n            {\n                using (var request_ = new System.Net.Http.HttpRequestMessage())\n                {\n                    var content_ = new System.Net.Http.StringContent(Newtonsoft.Json.JsonConvert.SerializeObject(body, _settings.Value));\n                    content_.Headers.ContentType.MediaType = \"application/json\";\n                    request_.Content = content_;\n                    request_.Method = new System.Net.Http.HttpMethod(\"POST\");\n                    request_.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue(\"application/json\"));\n\n                    PrepareRequest(client_, request_, urlBuilder_);\n                    var url_ = urlBuilder_.ToString();\n                    request_.RequestUri = new System.Uri(url_, System.UriKind.RelativeOrAbsolute);\n                    PrepareRequest(client_, request_, url_);\n\n                    var response_ = await client_.SendAsync(request_, System.Net.Http.HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);\n                    try\n                    {\n                        var headers_ = System.Linq.Enumerable.ToDictionary(response_.Headers, h_ => h_.Key, h_ => h_.Value);\n                        foreach (var item_ in response_.Content.Headers)\n                            headers_[item_.Key] = item_.Value;\n\n                        ProcessResponse(client_, response_);\n\n                        var status_ = ((int)response_.StatusCode).ToString();\n                        if (status_ == \"200\")\n                        {\n                            var responseData_ = await response_.Content.ReadAsStringAsync().ConfigureAwait(false);\n                            var result_ = default(object);\n                            try\n                            {\n                                result_ = Newtonsoft.Json.JsonConvert.DeserializeObject<object>(responseData_, _settings.Value);\n                                return;\n                            }\n                            catch (System.Exception exception)\n                            {\n                                throw new SwaggerException(\"Could not deserialize the response body.\", status_, responseData_, headers_, exception);\n                            }\n                        }\n                        else\n                        if (status_ != \"200\" && status_ != \"204\")\n                        {\n                            var responseData_ = await response_.Content.ReadAsStringAsync().ConfigureAwait(false);\n                            throw new SwaggerException(\"The HTTP status code of the response was not expected (\" + (int)response_.StatusCode + \").\", status_, responseData_, headers_, null);\n                        }\n\n                        return;\n                    }\n                    finally\n                    {\n                        if (response_ != null)\n                            response_.Dispose();\n                    }\n                }\n            }\n            finally\n            {\n            }\n        }\n"
+        }
+      ],
+      "restMapping": {
+        "source": "lightningYaml",
+        "line": 36,
+        "text": "    - selector: lnrpc.Lightning.ConnectPeer\n      post: \"/v1/peers\"\n      body: \"*\"\n"
+      },
+      "permissions": [
+        "peers:write"
+      ],
+      "permissionsSource": {
+        "source": "rpc",
+        "line": 306,
+        "text": "\"/lnrpc.Lightning/ConnectPeer\": {{\n\t\t\tEntity: \"peers\",\n\t\t\tAction: \"write\",\n\t\t}},"
+      },
+      "lncli": {
+        "args": [
+          "connect",
+          "{nodePubkey}@127.0.0.1:1",
+          "--timeout=1s"
+        ]
+      }
+    },
+    {
+      "method": "/lnrpc.Lightning/GetInfo",
+      "entry": "GetInfo",
+      "helper": "GetInfoAsync",
+      "direct": null,
+      "clientLocations": [
+        {
+          "source": "client",
+          "line": 443,
+          "text": "                var resp = await SwaggerClient.GetInfoAsync(cancellation);"
+        }
+      ],
+      "endpointSources": [
+        {
+          "source": "swagger",
+          "line": 993,
+          "text": "public async System.Threading.Tasks.Task<LnrpcGetInfoResponse> GetInfoAsync(System.Threading.CancellationToken cancellationToken)\n        {\n            var urlBuilder_ = new System.Text.StringBuilder();\n            urlBuilder_.Append(BaseUrl).Append(\"/v1/getinfo\");\n\n            var client_ = _httpClient;\n            try\n            {\n                using (var request_ = new System.Net.Http.HttpRequestMessage())\n                {\n                    request_.Method = new System.Net.Http.HttpMethod(\"GET\");\n                    request_.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue(\"application/json\"));\n\n                    PrepareRequest(client_, request_, urlBuilder_);\n                    var url_ = urlBuilder_.ToString();\n                    request_.RequestUri = new System.Uri(url_, System.UriKind.RelativeOrAbsolute);\n                    PrepareRequest(client_, request_, url_);\n\n                    var response_ = await client_.SendAsync(request_, System.Net.Http.HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);\n                    try\n                    {\n                        var headers_ = System.Linq.Enumerable.ToDictionary(response_.Headers, h_ => h_.Key, h_ => h_.Value);\n                        foreach (var item_ in response_.Content.Headers)\n                            headers_[item_.Key] = item_.Value;\n\n                        ProcessResponse(client_, response_);\n\n                        var status_ = ((int)response_.StatusCode).ToString();\n                        if (status_ == \"200\")\n                        {\n                            var responseData_ = await response_.Content.ReadAsStringAsync().ConfigureAwait(false);\n                            var result_ = default(LnrpcGetInfoResponse);\n                            try\n                            {\n                                result_ = Newtonsoft.Json.JsonConvert.DeserializeObject<LnrpcGetInfoResponse>(responseData_, _settings.Value);\n                                return result_;\n                            }\n                            catch (System.Exception exception)\n                            {\n                                throw new SwaggerException(\"Could not deserialize the response body.\", status_, responseData_, headers_, exception);\n                            }\n                        }\n                        else\n                        if (status_ != \"200\" && status_ != \"204\")\n                        {\n                            var responseData_ = await response_.Content.ReadAsStringAsync().ConfigureAwait(false);\n                            throw new SwaggerException(\"The HTTP status code of the response was not expected (\" + (int)response_.StatusCode + \").\", status_, responseData_, headers_, null);\n                        }\n\n                        return default(LnrpcGetInfoResponse);\n                    }\n                    finally\n                    {\n                        if (response_ != null)\n                            response_.Dispose();\n                    }\n                }\n            }\n            finally\n            {\n            }\n        }\n"
+        }
+      ],
+      "restMapping": {
+        "source": "lightningYaml",
+        "line": 45,
+        "text": "    - selector: lnrpc.Lightning.GetInfo\n      get: \"/v1/getinfo\"\n"
+      },
+      "permissions": [
+        "info:read"
+      ],
+      "permissionsSource": {
+        "source": "rpc",
+        "line": 346,
+        "text": "\"/lnrpc.Lightning/GetInfo\": {{\n\t\t\tEntity: \"info\",\n\t\t\tAction: \"read\",\n\t\t}},"
+      },
+      "lncli": {
+        "args": [
+          "getinfo"
+        ]
+      }
+    },
+    {
+      "method": "/lnrpc.Lightning/ListChannels",
+      "entry": "ListChannels",
+      "helper": "ListChannelsAsync",
+      "direct": null,
+      "clientLocations": [
+        {
+          "source": "client",
+          "line": 421,
+          "text": "            var resp = await SwaggerClient.ListChannelsAsync(false, false, false, false, cancellation);"
+        }
+      ],
+      "endpointSources": [
+        {
+          "source": "swagger",
+          "line": 208,
+          "text": "public async System.Threading.Tasks.Task<LnrpcListChannelsResponse> ListChannelsAsync(bool? active_only, bool? inactive_only, bool? public_only, bool? private_only, System.Threading.CancellationToken cancellationToken)\n        {\n            var urlBuilder_ = new System.Text.StringBuilder();\n            urlBuilder_.Append(BaseUrl).Append(\"/v1/channels?\");\n            if (active_only != null) urlBuilder_.Append(\"active_only=\").Append(System.Uri.EscapeDataString(System.Convert.ToString(active_only.Value, System.Globalization.CultureInfo.InvariantCulture))).Append(\"&\");\n            if (inactive_only != null) urlBuilder_.Append(\"inactive_only=\").Append(System.Uri.EscapeDataString(System.Convert.ToString(inactive_only.Value, System.Globalization.CultureInfo.InvariantCulture))).Append(\"&\");\n            if (public_only != null) urlBuilder_.Append(\"public_only=\").Append(System.Uri.EscapeDataString(System.Convert.ToString(public_only.Value, System.Globalization.CultureInfo.InvariantCulture))).Append(\"&\");\n            if (private_only != null) urlBuilder_.Append(\"private_only=\").Append(System.Uri.EscapeDataString(System.Convert.ToString(private_only.Value, System.Globalization.CultureInfo.InvariantCulture))).Append(\"&\");\n            urlBuilder_.Length--;\n\n            var client_ = _httpClient;\n            try\n            {\n                using (var request_ = new System.Net.Http.HttpRequestMessage())\n                {\n                    request_.Method = new System.Net.Http.HttpMethod(\"GET\");\n                    request_.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue(\"application/json\"));\n\n                    PrepareRequest(client_, request_, urlBuilder_);\n                    var url_ = urlBuilder_.ToString();\n                    request_.RequestUri = new System.Uri(url_, System.UriKind.RelativeOrAbsolute);\n                    PrepareRequest(client_, request_, url_);\n\n                    var response_ = await client_.SendAsync(request_, System.Net.Http.HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);\n                    try\n                    {\n                        var headers_ = System.Linq.Enumerable.ToDictionary(response_.Headers, h_ => h_.Key, h_ => h_.Value);\n                        foreach (var item_ in response_.Content.Headers)\n                            headers_[item_.Key] = item_.Value;\n\n                        ProcessResponse(client_, response_);\n\n                        var status_ = ((int)response_.StatusCode).ToString();\n                        if (status_ == \"200\")\n                        {\n                            var responseData_ = await response_.Content.ReadAsStringAsync().ConfigureAwait(false);\n                            var result_ = default(LnrpcListChannelsResponse);\n                            try\n                            {\n                                result_ = Newtonsoft.Json.JsonConvert.DeserializeObject<LnrpcListChannelsResponse>(responseData_, _settings.Value);\n                                return result_;\n                            }\n                            catch (System.Exception exception)\n                            {\n                                throw new SwaggerException(\"Could not deserialize the response body.\", status_, responseData_, headers_, exception);\n                            }\n                        }\n                        else\n                        if (status_ != \"200\" && status_ != \"204\")\n                        {\n                            var responseData_ = await response_.Content.ReadAsStringAsync().ConfigureAwait(false);\n                            throw new SwaggerException(\"The HTTP status code of the response was not expected (\" + (int)response_.StatusCode + \").\", status_, responseData_, headers_, null);\n                        }\n\n                        return default(LnrpcListChannelsResponse);\n                    }\n                    finally\n                    {\n                        if (response_ != null)\n                            response_.Dispose();\n                    }\n                }\n            }\n            finally\n            {\n            }\n        }\n"
+        }
+      ],
+      "restMapping": {
+        "source": "lightningYaml",
+        "line": 53,
+        "text": "    - selector: lnrpc.Lightning.ListChannels\n      get: \"/v1/channels\"\n"
+      },
+      "permissions": [
+        "offchain:read"
+      ],
+      "permissionsSource": {
+        "source": "rpc",
+        "line": 387,
+        "text": "\"/lnrpc.Lightning/ListChannels\": {{\n\t\t\tEntity: \"offchain\",\n\t\t\tAction: \"read\",\n\t\t}},"
+      },
+      "lncli": {
+        "args": [
+          "listchannels"
+        ]
+      }
+    },
+    {
+      "method": "/lnrpc.Lightning/ListInvoices",
+      "entry": "ListInvoices overloads",
+      "helper": "ListInvoicesAsync",
+      "direct": null,
+      "clientLocations": [
+        {
+          "source": "client",
+          "line": 559,
+          "text": "            var resp = await SwaggerClient.ListInvoicesAsync(request?.PendingOnly, request?.OffsetIndex, cancellation);"
+        }
+      ],
+      "endpointSources": [
+        {
+          "source": "swagger",
+          "line": 1666,
+          "text": "public async System.Threading.Tasks.Task<LnrpcListInvoiceResponse> ListInvoicesAsync(bool? pending_only, long? index_offset, System.Threading.CancellationToken cancellationToken)\n        {\n            var urlBuilder_ = new System.Text.StringBuilder();\n            urlBuilder_.Append(BaseUrl).Append(\"/v1/invoices?\");\n            if (pending_only.HasValue) urlBuilder_.Append(\"pending_only=\").Append(System.Uri.EscapeDataString(System.Convert.ToString(pending_only.Value, System.Globalization.CultureInfo.InvariantCulture))).Append(\"&\");\n            if (index_offset.HasValue) urlBuilder_.Append(\"index_offset=\").Append(System.Uri.EscapeDataString(System.Convert.ToString(index_offset.Value, System.Globalization.CultureInfo.InvariantCulture))).Append(\"&\");\n            urlBuilder_.Length--;\n\n            var client_ = _httpClient;\n            try\n            {\n                using (var request_ = new System.Net.Http.HttpRequestMessage())\n                {\n                    request_.Method = new System.Net.Http.HttpMethod(\"GET\");\n                    request_.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue(\"application/json\"));\n\n                    PrepareRequest(client_, request_, urlBuilder_);\n                    var url_ = urlBuilder_.ToString();\n                    request_.RequestUri = new System.Uri(url_, System.UriKind.RelativeOrAbsolute);\n                    PrepareRequest(client_, request_, url_);\n\n                    var response_ = await client_.SendAsync(request_, System.Net.Http.HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);\n                    try\n                    {\n                        var headers_ = System.Linq.Enumerable.ToDictionary(response_.Headers, h_ => h_.Key, h_ => h_.Value);\n                        foreach (var item_ in response_.Content.Headers)\n                            headers_[item_.Key] = item_.Value;\n\n                        ProcessResponse(client_, response_);\n\n                        var status_ = ((int)response_.StatusCode).ToString();\n                        if (status_ == \"200\")\n                        {\n                            var responseData_ = await response_.Content.ReadAsStringAsync().ConfigureAwait(false);\n                            var result_ = default(LnrpcListInvoiceResponse);\n                            try\n                            {\n                                result_ = Newtonsoft.Json.JsonConvert.DeserializeObject<LnrpcListInvoiceResponse>(responseData_, _settings.Value);\n                                return result_;\n                            }\n                            catch (System.Exception exception)\n                            {\n                                throw new SwaggerException(\"Could not deserialize the response body.\", status_, responseData_, headers_, exception);\n                            }\n                        }\n                        else\n                        if (status_ != \"200\" && status_ != \"204\")\n                        {\n                            var responseData_ = await response_.Content.ReadAsStringAsync().ConfigureAwait(false);\n                            throw new SwaggerException(\"The HTTP status code of the response was not expected (\" + (int)response_.StatusCode + \").\", status_, responseData_, headers_, null);\n                        }\n\n                        return default(LnrpcListInvoiceResponse);\n                    }\n                    finally\n                    {\n                        if (response_ != null)\n                            response_.Dispose();\n                    }\n                }\n            }\n            finally\n            {\n            }\n        }\n"
+        }
+      ],
+      "restMapping": {
+        "source": "lightningYaml",
+        "line": 81,
+        "text": "    - selector: lnrpc.Lightning.ListInvoices\n      get: \"/v1/invoices\"\n"
+      },
+      "permissions": [
+        "invoices:read"
+      ],
+      "permissionsSource": {
+        "source": "rpc",
+        "line": 407,
+        "text": "\"/lnrpc.Lightning/ListInvoices\": {{\n\t\t\tEntity: \"invoices\",\n\t\t\tAction: \"read\",\n\t\t}},"
+      },
+      "lncli": {
+        "args": [
+          "listinvoices"
+        ]
+      }
+    },
+    {
+      "method": "/lnrpc.Lightning/ListPayments",
+      "entry": "ListPayments overloads",
+      "helper": "ListPaymentsAsync",
+      "direct": null,
+      "clientLocations": [
+        {
+          "source": "client",
+          "line": 595,
+          "text": "            var resp = await SwaggerClient.ListPaymentsAsync(request?.IncludePending, null, cancellation);"
+        }
+      ],
+      "endpointSources": [
+        {
+          "source": "swagger",
+          "line": 1985,
+          "text": "public async System.Threading.Tasks.Task<LnrpcListPaymentsResponse> ListPaymentsAsync(bool? include_pending, long? index_offset, System.Threading.CancellationToken cancellationToken)\n        {\n            var urlBuilder_ = new System.Text.StringBuilder();\n            urlBuilder_.Append(BaseUrl).Append(\"/v1/payments?\");\n            if (include_pending.HasValue) urlBuilder_.Append(\"pending_only=\").Append(System.Uri.EscapeDataString(System.Convert.ToString(include_pending.Value, System.Globalization.CultureInfo.InvariantCulture))).Append(\"&\");\n            if (index_offset.HasValue) urlBuilder_.Append(\"index_offset=\").Append(System.Uri.EscapeDataString(System.Convert.ToString(index_offset.Value, System.Globalization.CultureInfo.InvariantCulture))).Append(\"&\");\n            urlBuilder_.Length--;\n\n            var client_ = _httpClient;\n            try\n            {\n                using (var request_ = new System.Net.Http.HttpRequestMessage())\n                {\n                    request_.Method = new System.Net.Http.HttpMethod(\"GET\");\n                    request_.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue(\"application/json\"));\n\n                    PrepareRequest(client_, request_, urlBuilder_);\n                    var url_ = urlBuilder_.ToString();\n                    request_.RequestUri = new System.Uri(url_, System.UriKind.RelativeOrAbsolute);\n                    PrepareRequest(client_, request_, url_);\n\n                    var response_ = await client_.SendAsync(request_, System.Net.Http.HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);\n                    try\n                    {\n                        var headers_ = System.Linq.Enumerable.ToDictionary(response_.Headers, h_ => h_.Key, h_ => h_.Value);\n                        foreach (var item_ in response_.Content.Headers)\n                            headers_[item_.Key] = item_.Value;\n\n                        ProcessResponse(client_, response_);\n\n                        var status_ = ((int)response_.StatusCode).ToString();\n                        if (status_ == \"200\")\n                        {\n                            var responseData_ = await response_.Content.ReadAsStringAsync().ConfigureAwait(false);\n                            var result_ = default(LnrpcListPaymentsResponse);\n                            try\n                            {\n                                result_ = Newtonsoft.Json.JsonConvert.DeserializeObject<LnrpcListPaymentsResponse>(responseData_, _settings.Value);\n                                return result_;\n                            }\n                            catch (System.Exception exception)\n                            {\n                                throw new SwaggerException(\"Could not deserialize the response body.\", status_, responseData_, headers_, exception);\n                            }\n                        }\n                        else\n                        if (status_ != \"200\" && status_ != \"204\")\n                        {\n                            var responseData_ = await response_.Content.ReadAsStringAsync().ConfigureAwait(false);\n                            throw new SwaggerException(\"The HTTP status code of the response was not expected (\" + (int)response_.StatusCode + \").\", status_, responseData_, headers_, null);\n                        }\n\n                        return default(LnrpcListPaymentsResponse);\n                    }\n                    finally\n                    {\n                        if (response_ != null)\n                            response_.Dispose();\n                    }\n                }\n            }\n            finally\n            {\n            }\n        }\n"
+        }
+      ],
+      "restMapping": {
+        "source": "lightningYaml",
+        "line": 93,
+        "text": "    - selector: lnrpc.Lightning.ListPayments\n      get: \"/v1/payments\"\n"
+      },
+      "permissions": [
+        "offchain:read"
+      ],
+      "permissionsSource": {
+        "source": "rpc",
+        "line": 459,
+        "text": "\"/lnrpc.Lightning/ListPayments\": {{\n\t\t\tEntity: \"offchain\",\n\t\t\tAction: \"read\",\n\t\t}},"
+      },
+      "lncli": {
+        "args": [
+          "listpayments"
+        ]
+      }
+    },
+    {
+      "method": "/lnrpc.Lightning/LookupInvoice",
+      "entry": "GetInvoice overloads -> GetInvoice(byte[])",
+      "helper": "LookupInvoiceAsync",
+      "direct": null,
+      "clientLocations": [
+        {
+          "source": "client",
+          "line": 512,
+          "text": "                var resp = await SwaggerClient.LookupInvoiceAsync(invoiceId, cancellation);"
+        }
+      ],
+      "endpointSources": [
+        {
+          "source": "swagger",
+          "line": 1581,
+          "text": "public async System.Threading.Tasks.Task<LnrpcInvoice> LookupInvoiceAsync(byte[] r_hash, System.Threading.CancellationToken cancellationToken)\n        {\n            if (r_hash is null)\n                throw new ArgumentNullException(nameof(r_hash));\n            var urlBuilder_ = new System.Text.StringBuilder();\n            urlBuilder_.Append(BaseUrl).Append($\"/v1/invoice/?\");\n            var b64 = Convert.ToBase64String(r_hash);\n            urlBuilder_.Append(\"r_hash=\").Append(b64.Replace(\"+\", \"-\").Replace(\"/\", \"_\")).Append(\"&\");\n            urlBuilder_.Length--;\n\n            var client_ = _httpClient;\n            try\n            {\n                using (var request_ = new System.Net.Http.HttpRequestMessage())\n                {\n                    request_.Method = new System.Net.Http.HttpMethod(\"GET\");\n                    request_.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue(\"application/json\"));\n\n                    PrepareRequest(client_, request_, urlBuilder_);\n                    var url_ = urlBuilder_.ToString();\n                    request_.RequestUri = new System.Uri(url_, System.UriKind.RelativeOrAbsolute);\n                    PrepareRequest(client_, request_, url_);\n\n                    var response_ = await client_.SendAsync(request_, System.Net.Http.HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);\n                    try\n                    {\n                        var headers_ = System.Linq.Enumerable.ToDictionary(response_.Headers, h_ => h_.Key, h_ => h_.Value);\n                        foreach (var item_ in response_.Content.Headers)\n                            headers_[item_.Key] = item_.Value;\n\n                        ProcessResponse(client_, response_);\n\n                        var status_ = ((int)response_.StatusCode).ToString();\n                        if (status_ == \"200\")\n                        {\n                            var responseData_ = await response_.Content.ReadAsStringAsync().ConfigureAwait(false);\n                            var result_ = default(LnrpcInvoice);\n                            try\n                            {\n                                result_ = Newtonsoft.Json.JsonConvert.DeserializeObject<LnrpcInvoice>(responseData_, _settings.Value);\n                                return result_;\n                            }\n                            catch (System.Exception exception)\n                            {\n                                throw new SwaggerException(\"Could not deserialize the response body.\", status_, responseData_, headers_, exception);\n                            }\n                        }\n                        else\n                        if (status_ != \"200\" && status_ != \"204\")\n                        {\n                            var responseData_ = await response_.Content.ReadAsStringAsync().ConfigureAwait(false);\n                            throw new SwaggerException(\"The HTTP status code of the response was not expected (\" + (int)response_.StatusCode + \").\", status_, responseData_, headers_, null);\n                        }\n\n                        return default(LnrpcInvoice);\n                    }\n                    finally\n                    {\n                        if (response_ != null)\n                            response_.Dispose();\n                    }\n                }\n            }\n            finally\n            {\n            }\n        }\n"
+        }
+      ],
+      "restMapping": {
+        "source": "lightningYaml",
+        "line": 83,
+        "text": "    - selector: lnrpc.Lightning.LookupInvoice\n      get: \"/v1/invoice/{r_hash_str}\"\n"
+      },
+      "permissions": [
+        "invoices:read"
+      ],
+      "permissionsSource": {
+        "source": "rpc",
+        "line": 403,
+        "text": "\"/lnrpc.Lightning/LookupInvoice\": {{\n\t\t\tEntity: \"invoices\",\n\t\t\tAction: \"read\",\n\t\t}},"
+      },
+      "lncli": {
+        "args": [
+          "lookupinvoice",
+          "{invoiceHash}"
+        ]
+      }
+    },
+    {
+      "method": "/lnrpc.Lightning/NewAddress",
+      "entry": "GetDepositAddress -> NewWitnessAddressAsync",
+      "helper": "NewWitnessAddressAsync",
+      "direct": null,
+      "clientLocations": [
+        {
+          "source": "client",
+          "line": 928,
+          "text": "            return BitcoinAddress.Create((await SwaggerClient.NewWitnessAddressAsync(cancellation)).Address, Network);"
+        }
+      ],
+      "endpointSources": [
+        {
+          "source": "swagger",
+          "line": 1905,
+          "text": "public async System.Threading.Tasks.Task<LnrpcNewAddressResponse> NewWitnessAddressAsync(System.Threading.CancellationToken cancellationToken)\n        {\n            var urlBuilder_ = new System.Text.StringBuilder();\n            urlBuilder_.Append(BaseUrl).Append(\"/v1/newaddress\");\n\n            var client_ = _httpClient;\n            try\n            {\n                using (var request_ = new System.Net.Http.HttpRequestMessage())\n                {\n                    request_.Method = new System.Net.Http.HttpMethod(\"GET\");\n                    request_.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue(\"application/json\"));\n\n                    PrepareRequest(client_, request_, urlBuilder_);\n                    var url_ = urlBuilder_.ToString();\n                    request_.RequestUri = new System.Uri(url_, System.UriKind.RelativeOrAbsolute);\n                    PrepareRequest(client_, request_, url_);\n\n                    var response_ = await client_.SendAsync(request_, System.Net.Http.HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);\n                    try\n                    {\n                        var headers_ = System.Linq.Enumerable.ToDictionary(response_.Headers, h_ => h_.Key, h_ => h_.Value);\n                        foreach (var item_ in response_.Content.Headers)\n                            headers_[item_.Key] = item_.Value;\n\n                        ProcessResponse(client_, response_);\n\n                        var status_ = ((int)response_.StatusCode).ToString();\n                        if (status_ == \"200\")\n                        {\n                            var responseData_ = await response_.Content.ReadAsStringAsync().ConfigureAwait(false);\n                            var result_ = default(LnrpcNewAddressResponse);\n                            try\n                            {\n                                result_ = Newtonsoft.Json.JsonConvert.DeserializeObject<LnrpcNewAddressResponse>(responseData_, _settings.Value);\n                                return result_;\n                            }\n                            catch (System.Exception exception)\n                            {\n                                throw new SwaggerException(\"Could not deserialize the response body.\", status_, responseData_, headers_, exception);\n                            }\n                        }\n                        else\n                        if (status_ != \"200\" && status_ != \"204\")\n                        {\n                            var responseData_ = await response_.Content.ReadAsStringAsync().ConfigureAwait(false);\n                            throw new SwaggerException(\"The HTTP status code of the response was not expected (\" + (int)response_.StatusCode + \").\", status_, responseData_, headers_, null);\n                        }\n\n                        return default(LnrpcNewAddressResponse);\n                    }\n                    finally\n                    {\n                        if (response_ != null)\n                            response_.Dispose();\n                    }\n                }\n            }\n            finally\n            {\n            }\n        }\n"
+        }
+      ],
+      "restMapping": {
+        "source": "lightningYaml",
+        "line": 28,
+        "text": "    - selector: lnrpc.Lightning.NewAddress\n      get: \"/v1/newaddress\"\n"
+      },
+      "permissions": [
+        "address:write"
+      ],
+      "permissionsSource": {
+        "source": "rpc",
+        "line": 294,
+        "text": "\"/lnrpc.Lightning/NewAddress\": {{\n\t\t\tEntity: \"address\",\n\t\t\tAction: \"write\",\n\t\t}},"
+      },
+      "lncli": {
+        "args": [
+          "newaddress",
+          "p2wkh"
+        ]
+      }
+    },
+    {
+      "method": "/lnrpc.Lightning/OpenChannelSync",
+      "entry": "OpenChannel",
+      "helper": "OpenChannelSyncAsync",
+      "direct": null,
+      "clientLocations": [
+        {
+          "source": "client",
+          "line": 871,
+          "text": "                var result = await this.SwaggerClient.OpenChannelSyncAsync(req, cancellation);"
+        }
+      ],
+      "endpointSources": [
+        {
+          "source": "swagger",
+          "line": 294,
+          "text": "public async System.Threading.Tasks.Task<LnrpcChannelPoint> OpenChannelSyncAsync(LnrpcOpenChannelRequest body, System.Threading.CancellationToken cancellationToken)\n        {\n            var urlBuilder_ = new System.Text.StringBuilder();\n            urlBuilder_.Append(BaseUrl).Append(\"/v1/channels\");\n\n            var client_ = _httpClient;\n            try\n            {\n                using (var request_ = new System.Net.Http.HttpRequestMessage())\n                {\n                    var content_ = new System.Net.Http.StringContent(Newtonsoft.Json.JsonConvert.SerializeObject(body, _settings.Value));\n                    content_.Headers.ContentType.MediaType = \"application/json\";\n                    request_.Content = content_;\n                    request_.Method = new System.Net.Http.HttpMethod(\"POST\");\n                    request_.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue(\"application/json\"));\n\n                    PrepareRequest(client_, request_, urlBuilder_);\n                    var url_ = urlBuilder_.ToString();\n                    request_.RequestUri = new System.Uri(url_, System.UriKind.RelativeOrAbsolute);\n                    PrepareRequest(client_, request_, url_);\n\n                    var response_ = await client_.SendAsync(request_, System.Net.Http.HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);\n                    try\n                    {\n                        var headers_ = System.Linq.Enumerable.ToDictionary(response_.Headers, h_ => h_.Key, h_ => h_.Value);\n                        foreach (var item_ in response_.Content.Headers)\n                            headers_[item_.Key] = item_.Value;\n\n                        ProcessResponse(client_, response_);\n\n                        var status_ = ((int)response_.StatusCode).ToString();\n                        if (status_ == \"200\")\n                        {\n                            var responseData_ = await response_.Content.ReadAsStringAsync().ConfigureAwait(false);\n                            var result_ = default(LnrpcChannelPoint);\n                            try\n                            {\n                                result_ = Newtonsoft.Json.JsonConvert.DeserializeObject<LnrpcChannelPoint>(responseData_, _settings.Value);\n                                return result_;\n                            }\n                            catch (System.Exception exception)\n                            {\n                                throw new SwaggerException(\"Could not deserialize the response body.\", status_, responseData_, headers_, exception);\n                            }\n                        }\n                        else\n                        if (status_ != \"200\" && status_ != \"204\")\n                        {\n                            var responseData_ = await response_.Content.ReadAsStringAsync().ConfigureAwait(false);\n                            throw new SwaggerException(\"The HTTP status code of the response was not expected (\" + (int)response_.StatusCode + \").\", status_, responseData_, headers_, null);\n                        }\n\n                        return default(LnrpcChannelPoint);\n                    }\n                    finally\n                    {\n                        if (response_ != null)\n                            response_.Dispose();\n                    }\n                }\n            }\n            finally\n            {\n            }\n        }\n"
+        }
+      ],
+      "restMapping": {
+        "source": "lightningYaml",
+        "line": 59,
+        "text": "    - selector: lnrpc.Lightning.OpenChannelSync\n      post: \"/v1/channels\"\n      body: \"*\"\n"
+      },
+      "permissions": [
+        "onchain:write",
+        "offchain:write"
+      ],
+      "permissionsSource": {
+        "source": "rpc",
+        "line": 328,
+        "text": "\"/lnrpc.Lightning/OpenChannelSync\": {{\n\t\t\tEntity: \"onchain\",\n\t\t\tAction: \"write\",\n\t\t}, {\n\t\t\tEntity: \"offchain\",\n\t\t\tAction: \"write\",\n\t\t}},"
+      },
+      "lncli": {
+        "args": null,
+        "blocker": "Pinned lncli openchannel invokes OpenChannel, not OpenChannelSync."
+      }
+    },
+    {
+      "method": "/lnrpc.Lightning/PendingChannels",
+      "entry": "GetBalance; OpenChannel error-177 fallback",
+      "helper": "PendingChannelsAsync",
+      "direct": null,
+      "clientLocations": [
+        {
+          "source": "client",
+          "line": 480,
+          "text": "            var pendingChannels = SwaggerClient.PendingChannelsAsync(cancellation);"
+        },
+        {
+          "source": "client",
+          "line": 891,
+          "text": "                var pendingChannels = await this.SwaggerClient.PendingChannelsAsync(cancellation);"
+        }
+      ],
+      "endpointSources": [
+        {
+          "source": "swagger",
+          "line": 378,
+          "text": "public async System.Threading.Tasks.Task<LnrpcPendingChannelsResponse> PendingChannelsAsync(System.Threading.CancellationToken cancellationToken)\n        {\n            var urlBuilder_ = new System.Text.StringBuilder();\n            urlBuilder_.Append(BaseUrl).Append(\"/v1/channels/pending\");\n\n            var client_ = _httpClient;\n            try\n            {\n                using (var request_ = new System.Net.Http.HttpRequestMessage())\n                {\n                    request_.Method = new System.Net.Http.HttpMethod(\"GET\");\n                    request_.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue(\"application/json\"));\n\n                    PrepareRequest(client_, request_, urlBuilder_);\n                    var url_ = urlBuilder_.ToString();\n                    request_.RequestUri = new System.Uri(url_, System.UriKind.RelativeOrAbsolute);\n                    PrepareRequest(client_, request_, url_);\n\n                    var response_ = await client_.SendAsync(request_, System.Net.Http.HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);\n                    try\n                    {\n                        var headers_ = System.Linq.Enumerable.ToDictionary(response_.Headers, h_ => h_.Key, h_ => h_.Value);\n                        foreach (var item_ in response_.Content.Headers)\n                            headers_[item_.Key] = item_.Value;\n\n                        ProcessResponse(client_, response_);\n\n                        var status_ = ((int)response_.StatusCode).ToString();\n                        if (status_ == \"200\")\n                        {\n                            var responseData_ = await response_.Content.ReadAsStringAsync().ConfigureAwait(false);\n                            var result_ = default(LnrpcPendingChannelsResponse);\n                            try\n                            {\n                                result_ = Newtonsoft.Json.JsonConvert.DeserializeObject<LnrpcPendingChannelsResponse>(responseData_, _settings.Value);\n                                return result_;\n                            }\n                            catch (System.Exception exception)\n                            {\n                                throw new SwaggerException(\"Could not deserialize the response body.\", status_, responseData_, headers_, exception);\n                            }\n                        }\n                        else\n                        if (status_ != \"200\" && status_ != \"204\")\n                        {\n                            var responseData_ = await response_.Content.ReadAsStringAsync().ConfigureAwait(false);\n                            throw new SwaggerException(\"The HTTP status code of the response was not expected (\" + (int)response_.StatusCode + \").\", status_, responseData_, headers_, null);\n                        }\n\n                        return default(LnrpcPendingChannelsResponse);\n                    }\n                    finally\n                    {\n                        if (response_ != null)\n                            response_.Dispose();\n                    }\n                }\n            }\n            finally\n            {\n            }\n        }\n"
+        }
+      ],
+      "restMapping": {
+        "source": "lightningYaml",
+        "line": 51,
+        "text": "    - selector: lnrpc.Lightning.PendingChannels\n      get: \"/v1/channels/pending\"\n"
+      },
+      "permissions": [
+        "offchain:read"
+      ],
+      "permissionsSource": {
+        "source": "rpc",
+        "line": 383,
+        "text": "\"/lnrpc.Lightning/PendingChannels\": {{\n\t\t\tEntity: \"offchain\",\n\t\t\tAction: \"read\",\n\t\t}},"
+      },
+      "lncli": {
+        "args": [
+          "pendingchannels"
+        ]
+      }
+    },
+    {
+      "method": "/lnrpc.Lightning/SubscribeInvoices",
+      "entry": "Listen -> LndInvoiceClientSession.StartListening",
+      "helper": null,
+      "direct": "v1/invoices/subscribe",
+      "clientLocations": [
+        {
+          "source": "client",
+          "line": 46,
+          "text": "                    var request = new HttpRequestMessage(HttpMethod.Get, WithTrailingSlash(_Parent.BaseUrl) + \"v1/invoices/subscribe\");"
+        }
+      ],
+      "endpointSources": [],
+      "restMapping": {
+        "source": "lightningYaml",
+        "line": 85,
+        "text": "    - selector: lnrpc.Lightning.SubscribeInvoices\n      get: \"/v1/invoices/subscribe\"\n"
+      },
+      "permissions": [
+        "invoices:read"
+      ],
+      "permissionsSource": {
+        "source": "rpc",
+        "line": 411,
+        "text": "\"/lnrpc.Lightning/SubscribeInvoices\": {{\n\t\t\tEntity: \"invoices\",\n\t\t\tAction: \"read\",\n\t\t}},"
+      },
+      "lncli": {
+        "args": null,
+        "blocker": "Pinned lncli has no SubscribeInvoices invocation."
+      }
+    },
+    {
+      "method": "/lnrpc.Lightning/WalletBalance",
+      "entry": "GetBalance",
+      "helper": "WalletBalanceAsync",
+      "direct": null,
+      "clientLocations": [
+        {
+          "source": "client",
+          "line": 478,
+          "text": "            var walletBalance = SwaggerClient.WalletBalanceAsync(cancellation);"
+        }
+      ],
+      "endpointSources": [
+        {
+          "source": "swagger",
+          "line": 54,
+          "text": "public async System.Threading.Tasks.Task<LnrpcWalletBalanceResponse> WalletBalanceAsync(System.Threading.CancellationToken cancellationToken)\n        {\n            var urlBuilder_ = new System.Text.StringBuilder();\n            urlBuilder_.Append(BaseUrl).Append(\"/v1/balance/blockchain\");\n\n            var client_ = _httpClient;\n            try\n            {\n                using (var request_ = new System.Net.Http.HttpRequestMessage())\n                {\n                    request_.Method = new System.Net.Http.HttpMethod(\"GET\");\n                    request_.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue(\"application/json\"));\n\n                    PrepareRequest(client_, request_, urlBuilder_);\n                    var url_ = urlBuilder_.ToString();\n                    request_.RequestUri = new System.Uri(url_, System.UriKind.RelativeOrAbsolute);\n                    PrepareRequest(client_, request_, url_);\n\n                    var response_ = await client_.SendAsync(request_, System.Net.Http.HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);\n                    try\n                    {\n                        var headers_ = System.Linq.Enumerable.ToDictionary(response_.Headers, h_ => h_.Key, h_ => h_.Value);\n                        foreach (var item_ in response_.Content.Headers)\n                            headers_[item_.Key] = item_.Value;\n\n                        ProcessResponse(client_, response_);\n\n                        var status_ = ((int)response_.StatusCode).ToString();\n                        if (status_ == \"200\")\n                        {\n                            var responseData_ = await response_.Content.ReadAsStringAsync().ConfigureAwait(false);\n                            var result_ = default(LnrpcWalletBalanceResponse);\n                            try\n                            {\n                                result_ = Newtonsoft.Json.JsonConvert.DeserializeObject<LnrpcWalletBalanceResponse>(responseData_, _settings.Value);\n                                return result_;\n                            }\n                            catch (System.Exception exception)\n                            {\n                                throw new SwaggerException(\"Could not deserialize the response body.\", status_, responseData_, headers_, exception);\n                            }\n                        }\n                        else\n                        if (status_ != \"200\" && status_ != \"204\")\n                        {\n                            var responseData_ = await response_.Content.ReadAsStringAsync().ConfigureAwait(false);\n                            throw new SwaggerException(\"The HTTP status code of the response was not expected (\" + (int)response_.StatusCode + \").\", status_, responseData_, headers_, null);\n                        }\n\n                        return default(LnrpcWalletBalanceResponse);\n                    }\n                    finally\n                    {\n                        if (response_ != null)\n                            response_.Dispose();\n                    }\n                }\n            }\n            finally\n            {\n            }\n        }\n"
+        }
+      ],
+      "restMapping": {
+        "source": "lightningYaml",
+        "line": 10,
+        "text": "    - selector: lnrpc.Lightning.WalletBalance\n      get: \"/v1/balance/blockchain\"\n"
+      },
+      "permissions": [
+        "onchain:read"
+      ],
+      "permissionsSource": {
+        "source": "rpc",
+        "line": 371,
+        "text": "\"/lnrpc.Lightning/WalletBalance\": {{\n\t\t\tEntity: \"onchain\",\n\t\t\tAction: \"read\",\n\t\t}},"
+      },
+      "lncli": {
+        "args": [
+          "walletbalance"
+        ]
+      }
+    },
+    {
+      "method": "/routerrpc.Router/SendPaymentV2",
+      "entry": "Pay overloads -> PayAsync -> LndPaymentClientSession(sendRequest)",
+      "helper": null,
+      "direct": "v2/router/send",
+      "clientLocations": [
+        {
+          "source": "client",
+          "line": 202,
+          "text": "            // Sends a payment: POST /v2/router/send (SendPaymentV2). This replaces the"
+        },
+        {
+          "source": "client",
+          "line": 211,
+          "text": "                    var request = new HttpRequestMessage(HttpMethod.Post, WithTrailingSlash(_Parent.BaseUrl) + \"v2/router/send\")"
+        },
+        {
+          "source": "client",
+          "line": 775,
+          "text": "        // Builds the routerrpc.SendPaymentRequest body (JSON) for POST /v2/router/send."
+        }
+      ],
+      "endpointSources": [],
+      "restMapping": {
+        "source": "routerYaml",
+        "line": 6,
+        "text": "    - selector: routerrpc.Router.SendPaymentV2\n      post: \"/v2/router/send\"\n      body: \"*\"\n"
+      },
+      "permissions": [
+        "offchain:write"
+      ],
+      "permissionsSource": {
+        "source": "router",
+        "line": 91,
+        "text": "\"/routerrpc.Router/SendPaymentV2\": {{\n\t\t\tEntity: \"offchain\",\n\t\t\tAction: \"write\",\n\t\t}},"
+      },
+      "lncli": {
+        "args": [
+          "sendpayment",
+          "--dest={nodePubkey}",
+          "--amt=1",
+          "--payment_hash={unknownHash}",
+          "--final_cltv_delta=40",
+          "--timeout=1s",
+          "--json",
+          "--force"
+        ]
+      }
+    },
+    {
+      "method": "/routerrpc.Router/TrackPaymentV2",
+      "entry": "GetPayment -> LndPaymentClientSession(paymentHash)",
+      "helper": null,
+      "direct": "v2/router/track/{hash}",
+      "clientLocations": [
+        {
+          "source": "client",
+          "line": 196,
+          "text": "                    var request = new HttpRequestMessage(HttpMethod.Get, WithTrailingSlash(_Parent.BaseUrl) + $\"v2/router/track/{hash}\");"
+        }
+      ],
+      "endpointSources": [],
+      "restMapping": {
+        "source": "routerYaml",
+        "line": 9,
+        "text": "    - selector: routerrpc.Router.TrackPaymentV2\n      get: \"/v2/router/track/{payment_hash}\"\n"
+      },
+      "permissions": [
+        "offchain:read"
+      ],
+      "permissionsSource": {
+        "source": "router",
+        "line": 99,
+        "text": "\"/routerrpc.Router/TrackPaymentV2\": {{\n\t\t\tEntity: \"offchain\",\n\t\t\tAction: \"read\",\n\t\t}},"
+      },
+      "lncli": {
+        "args": [
+          "trackpayment",
+          "--json",
+          "{unknownHash}"
+        ]
+      }
+    }
+  ],
+  "permissions": [
+    "uri:/invoicesrpc.Invoices/CancelInvoice",
+    "uri:/lnrpc.Lightning/AddInvoice",
+    "uri:/lnrpc.Lightning/ChannelBalance",
+    "uri:/lnrpc.Lightning/ConnectPeer",
+    "uri:/lnrpc.Lightning/GetInfo",
+    "uri:/lnrpc.Lightning/ListChannels",
+    "uri:/lnrpc.Lightning/ListInvoices",
+    "uri:/lnrpc.Lightning/ListPayments",
+    "uri:/lnrpc.Lightning/LookupInvoice",
+    "uri:/lnrpc.Lightning/NewAddress",
+    "uri:/lnrpc.Lightning/OpenChannelSync",
+    "uri:/lnrpc.Lightning/PendingChannels",
+    "uri:/lnrpc.Lightning/SubscribeInvoices",
+    "uri:/lnrpc.Lightning/WalletBalance",
+    "uri:/routerrpc.Router/SendPaymentV2",
+    "uri:/routerrpc.Router/TrackPaymentV2"
+  ],
+  "expectedGrade": "SPEND",
+  "snapshotSha256": "80458e2ed811ce8fc9f98a8a92d4adce48fdec998c58c2fdc66466db62fbe2ed",
+  "commandInventory": [
+    {
+      "source": "lncli-arg_parse.go",
+      "rpcCalls": [],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-autopilotrpc_active.go",
+      "rpcCalls": [
+        {
+          "method": "Status",
+          "line": 35
+        },
+        {
+          "method": "ModifyStatus",
+          "line": 68
+        },
+        {
+          "method": "ModifyStatus",
+          "line": 87
+        },
+        {
+          "method": "QueryScores",
+          "line": 136
+        }
+      ],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-autopilotrpc_default.go",
+      "rpcCalls": [],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-chainrpc_active.go",
+      "rpcCalls": [
+        {
+          "method": "GetBlock",
+          "line": 95
+        },
+        {
+          "method": "GetBlockHeader",
+          "line": 146
+        },
+        {
+          "method": "GetBestBlock",
+          "line": 171
+        },
+        {
+          "method": "GetBlockHash",
+          "line": 243
+        }
+      ],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-chainrpc_default.go",
+      "rpcCalls": [],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-cmd_custom.go",
+      "rpcCalls": [
+        {
+          "method": "SendCustomMessage",
+          "line": 46
+        },
+        {
+          "method": "SubscribeCustomMessages",
+          "line": 72
+        }
+      ],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-cmd_debug.go",
+      "rpcCalls": [
+        {
+          "method": "GetDebugInfo",
+          "line": 46
+        },
+        {
+          "method": "GetInfo",
+          "line": 242
+        },
+        {
+          "method": "GetDebugInfo",
+          "line": 247
+        },
+        {
+          "method": "GetNetworkInfo",
+          "line": 256
+        },
+        {
+          "method": "ListPeers",
+          "line": 292
+        },
+        {
+          "method": "ListUnspent",
+          "line": 304
+        },
+        {
+          "method": "GetTransactions",
+          "line": 312
+        },
+        {
+          "method": "ListChannels",
+          "line": 325
+        },
+        {
+          "method": "PendingChannels",
+          "line": 332
+        },
+        {
+          "method": "ClosedChannels",
+          "line": 339
+        }
+      ],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-cmd_import_mission_control.go",
+      "rpcCalls": [
+        {
+          "method": "XImportMissionControl",
+          "line": 101
+        },
+        {
+          "method": "XImportMissionControl",
+          "line": 225
+        }
+      ],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-cmd_invoice.go",
+      "rpcCalls": [
+        {
+          "method": "AddInvoice",
+          "line": 198
+        },
+        {
+          "method": "LookupInvoice",
+          "line": 311
+        },
+        {
+          "method": "ListInvoices",
+          "line": 393
+        },
+        {
+          "method": "DecodePayReq",
+          "line": 434
+        },
+        {
+          "method": "DeleteCanceledInvoice",
+          "line": 488
+        }
+      ],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-cmd_macaroon.go",
+      "rpcCalls": [
+        {
+          "method": "BakeMacaroon",
+          "line": 212
+        },
+        {
+          "method": "ListMacaroonIDs",
+          "line": 270
+        },
+        {
+          "method": "DeleteMacaroonID",
+          "line": 327
+        },
+        {
+          "method": "ListPermissions",
+          "line": 350
+        }
+      ],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-cmd_mission_control.go",
+      "rpcCalls": [
+        {
+          "method": "GetMissionControlConfig",
+          "line": 32
+        },
+        {
+          "method": "GetMissionControlConfig",
+          "line": 127
+        },
+        {
+          "method": "SetMissionControlConfig",
+          "line": 263
+        },
+        {
+          "method": "QueryMissionControl",
+          "line": 287
+        },
+        {
+          "method": "QueryProbability",
+          "line": 344
+        },
+        {
+          "method": "ResetMissionControl",
+          "line": 369
+        }
+      ],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-cmd_open_channel.go",
+      "rpcCalls": [
+        {
+          "method": "ConnectPeer",
+          "line": 386
+        },
+        {
+          "method": "OpenChannel",
+          "line": 486
+        },
+        {
+          "method": "OpenChannel",
+          "line": 614
+        },
+        {
+          "method": "BatchOpenChannel",
+          "line": 921
+        },
+        {
+          "method": "FundingStateStep",
+          "line": 1100
+        }
+      ],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-cmd_payments.go",
+      "rpcCalls": [
+        {
+          "method": "SendPaymentV2",
+          "line": 513
+        },
+        {
+          "method": "DecodePayReq",
+          "line": 601
+        },
+        {
+          "method": "TrackPaymentV2",
+          "line": 702
+        },
+        {
+          "method": "GetNodeInfo",
+          "line": 799
+        },
+        {
+          "method": "SendToRouteV2",
+          "line": 1110
+        },
+        {
+          "method": "QueryRoutes",
+          "line": 1306
+        },
+        {
+          "method": "ListPayments",
+          "line": 1525
+        },
+        {
+          "method": "ForwardingHistory",
+          "line": 1690
+        },
+        {
+          "method": "BuildRoute",
+          "line": 1797
+        },
+        {
+          "method": "DeletePayment",
+          "line": 1903
+        },
+        {
+          "method": "DeleteAllPayments",
+          "line": 1925
+        },
+        {
+          "method": "DeleteForwardingHistory",
+          "line": 2053
+        },
+        {
+          "method": "EstimateRouteFee",
+          "line": 2143
+        }
+      ],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-cmd_profile.go",
+      "rpcCalls": [],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-cmd_state.go",
+      "rpcCalls": [
+        {
+          "method": "SubscribeState",
+          "line": 34
+        }
+      ],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-cmd_update_chan_status.go",
+      "rpcCalls": [
+        {
+          "method": "UpdateChanStatus",
+          "line": 90
+        }
+      ],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-cmd_version.go",
+      "rpcCalls": [
+        {
+          "method": "GetVersion",
+          "line": 43
+        }
+      ],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-cmd_walletunlocker.go",
+      "rpcCalls": [
+        {
+          "method": "GenSeed",
+          "line": 370
+        },
+        {
+          "method": "InitWallet",
+          "line": 414
+        },
+        {
+          "method": "UnlockWallet",
+          "line": 595
+        },
+        {
+          "method": "SubscribeState",
+          "line": 620
+        },
+        {
+          "method": "ChangePassword",
+          "line": 832
+        },
+        {
+          "method": "InitWallet",
+          "line": 991
+        }
+      ],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-commands.go",
+      "rpcCalls": [
+        {
+          "method": "NewAddress",
+          "line": 364
+        },
+        {
+          "method": "EstimateFee",
+          "line": 444
+        },
+        {
+          "method": "WalletBalance",
+          "line": 614
+        },
+        {
+          "method": "ListUnspent",
+          "line": 639
+        },
+        {
+          "method": "SendCoins",
+          "line": 686
+        },
+        {
+          "method": "ListUnspent",
+          "line": 797
+        },
+        {
+          "method": "SendMany",
+          "line": 897
+        },
+        {
+          "method": "ConnectPeer",
+          "line": 967
+        },
+        {
+          "method": "DisconnectPeer",
+          "line": 1011
+        },
+        {
+          "method": "CloseChannel",
+          "line": 1200
+        },
+        {
+          "method": "ListChannels",
+          "line": 1334
+        },
+        {
+          "method": "AbandonChannel",
+          "line": 1578
+        },
+        {
+          "method": "ListPeers",
+          "line": 1657
+        },
+        {
+          "method": "WalletBalance",
+          "line": 1689
+        },
+        {
+          "method": "ChannelBalance",
+          "line": 1712
+        },
+        {
+          "method": "GetInfo",
+          "line": 1768
+        },
+        {
+          "method": "GetRecoveryInfo",
+          "line": 1789
+        },
+        {
+          "method": "PendingChannels",
+          "line": 1821
+        },
+        {
+          "method": "ListAliases",
+          "line": 1882
+        },
+        {
+          "method": "ListChannels",
+          "line": 1924
+        },
+        {
+          "method": "ClosedChannels",
+          "line": 1986
+        },
+        {
+          "method": "DescribeGraph",
+          "line": 2028
+        },
+        {
+          "method": "GetNodeMetrics",
+          "line": 2054
+        },
+        {
+          "method": "GetChanInfo",
+          "line": 2126
+        },
+        {
+          "method": "GetNodeInfo",
+          "line": 2185
+        },
+        {
+          "method": "GetNetworkInfo",
+          "line": 2211
+        },
+        {
+          "method": "DebugLevel",
+          "line": 2249
+        },
+        {
+          "method": "GetTransactions",
+          "line": 2343
+        },
+        {
+          "method": "StopDaemon",
+          "line": 2366
+        },
+        {
+          "method": "SignMessage",
+          "line": 2411
+        },
+        {
+          "method": "VerifyMessage",
+          "line": 2476
+        },
+        {
+          "method": "FeeReport",
+          "line": 2501
+        },
+        {
+          "method": "UpdateChannelPolicy",
+          "line": 2802
+        },
+        {
+          "method": "ExportChannelBackup",
+          "line": 2936
+        },
+        {
+          "method": "ExportAllChannelBackups",
+          "line": 2979
+        },
+        {
+          "method": "VerifyChanBackup",
+          "line": 3080
+        },
+        {
+          "method": "RestoreChannelBackups",
+          "line": 3244
+        }
+      ],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-devrpc_active.go",
+      "rpcCalls": [
+        {
+          "method": "ImportGraph",
+          "line": 55
+        }
+      ],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-devrpc_default.go",
+      "rpcCalls": [],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-invoicesrpc_active.go",
+      "rpcCalls": [
+        {
+          "method": "SettleInvoice",
+          "line": 79
+        },
+        {
+          "method": "CancelInvoice",
+          "line": 133
+        },
+        {
+          "method": "AddHoldInvoice",
+          "line": 256
+        }
+      ],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-invoicesrpc_default.go",
+      "rpcCalls": [],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-macaroon_jar.go",
+      "rpcCalls": [],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-main.go",
+      "rpcCalls": [],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-neutrino_active.go",
+      "rpcCalls": [
+        {
+          "method": "Status",
+          "line": 38
+        },
+        {
+          "method": "AddPeer",
+          "line": 75
+        },
+        {
+          "method": "DisconnectPeer",
+          "line": 113
+        },
+        {
+          "method": "IsBanned",
+          "line": 148
+        },
+        {
+          "method": "GetBlockHeader",
+          "line": 184
+        },
+        {
+          "method": "GetCFilter",
+          "line": 218
+        }
+      ],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-neutrino_default.go",
+      "rpcCalls": [],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-peersrpc_active.go",
+      "rpcCalls": [
+        {
+          "method": "UpdateNodeAnnouncement",
+          "line": 154
+        }
+      ],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-peersrpc_default.go",
+      "rpcCalls": [],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-profile.go",
+      "rpcCalls": [],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-routerrpc.go",
+      "rpcCalls": [],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-walletrpc_active.go",
+      "rpcCalls": [
+        {
+          "method": "EstimateFee",
+          "line": 161
+        },
+        {
+          "method": "PendingSweeps",
+          "line": 208
+        },
+        {
+          "method": "BumpFee",
+          "line": 360
+        },
+        {
+          "method": "ListSweeps",
+          "line": 589
+        }
+      ],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-walletrpc_default.go",
+      "rpcCalls": [],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-walletrpc_types.go",
+      "rpcCalls": [],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-watchtower_active.go",
+      "rpcCalls": [
+        {
+          "method": "GetInfo",
+          "line": 48
+        }
+      ],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-watchtower_default.go",
+      "rpcCalls": [],
+      "unavailableMethodCalls": []
+    },
+    {
+      "source": "lncli-wtclient.go",
+      "rpcCalls": [
+        {
+          "method": "AddTower",
+          "line": 81
+        },
+        {
+          "method": "DeactivateTower",
+          "line": 118
+        },
+        {
+          "method": "RemoveTower",
+          "line": 177
+        },
+        {
+          "method": "ListTowers",
+          "line": 223
+        },
+        {
+          "method": "GetTowerInfo",
+          "line": 280
+        },
+        {
+          "method": "Stats",
+          "line": 308
+        },
+        {
+          "method": "Policy",
+          "line": 369
+        },
+        {
+          "method": "TerminateSession",
+          "line": 410
+        }
+      ],
+      "unavailableMethodCalls": []
+    }
+  ],
+  "forbidden": {
+    "method": "/lnrpc.Lightning/ListMacaroonIDs",
+    "args": [
+      "listmacaroonids"
+    ],
+    "permissions": [
+      "macaroon:read"
+    ]
+  }
+}

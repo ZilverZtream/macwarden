@@ -1,0 +1,11 @@
+{
+  "source": "CP-033 contract and docs/spec.md bake presets; prepared before fixture execution",
+  "apps": [
+    { "label": "btcpay", "preset": "invoice-only", "grade": "RECEIVE", "permissions": ["info:read", "invoices:read", "invoices:write"] },
+    { "label": "dashboard", "preset": "read-only", "grade": "READ", "permissions": ["info:read", "onchain:read", "offchain:read", "address:read", "invoices:read", "peers:read"] },
+    { "label": "invoice-service", "preset": "invoice-only", "grade": "RECEIVE", "permissions": ["info:read", "invoices:read", "invoices:write"] }
+  ],
+  "installedFile": "app.macaroon",
+  "expectedRootKeyZeroFindings": 0,
+  "scope": "Only the three explicitly scanned app config directories; no claim about other locations or encodings"
+}

@@ -1,0 +1,299 @@
+{
+  "source": "lightninglabs/lnd:v0.21.4-beta@sha256:04d06edcc0f6e99a5e797ea34959f330add222226f840cd86afbc31f8f29627d",
+  "fixture": {
+    "network": "regtest",
+    "version": "0.21.4-beta commit=v0.21.4-beta",
+    "baselineRootKeyIds": [
+      "0"
+    ]
+  },
+  "fixtureBasics": {
+    "defaults": [
+      {
+        "name": "admin",
+        "location": "lnd",
+        "rootKeyId": "0",
+        "permissionCount": 19,
+        "caveatCount": 0
+      },
+      {
+        "name": "readonly",
+        "location": "lnd",
+        "rootKeyId": "0",
+        "permissionCount": 9,
+        "caveatCount": 0
+      },
+      {
+        "name": "invoice",
+        "location": "lnd",
+        "rootKeyId": "0",
+        "permissionCount": 5,
+        "caveatCount": 0
+      }
+    ],
+    "bakedLocation": "lnd",
+    "bakedRootKeyId": "15002",
+    "methodCount": 164,
+    "snapshotMatches": true,
+    "uriGetInfo": [
+      "info:read"
+    ]
+  },
+  "rootKeyIdsType": {
+    "status": 200,
+    "values": [
+      "0",
+      "15002"
+    ],
+    "types": [
+      "string",
+      "string"
+    ]
+  },
+  "deleteNextRequest": {
+    "rootKeyId": "15001",
+    "before": "accepted",
+    "deleted": true,
+    "after": "rejected"
+  },
+  "restDeleteError": {
+    "status": 400,
+    "code": 3,
+    "message": "root key with id 15001 doesn't exist"
+  },
+  "bakeEdgeFacts": {
+    "maxRootKeyId": "18446744073709551615",
+    "maxProbe": "accepted",
+    "externalWithoutFlagExit": 1,
+    "externalWithFlag": [
+      "remotesigner:generate"
+    ]
+  },
+  "bakeRestAndUri": {
+    "invalidStatus": 500,
+    "invalidCode": 2,
+    "unknownUriWithoutFlagExit": 1,
+    "unknownUriWithFlag": [
+      "uri:/example.Unknown/Method"
+    ]
+  },
+  "restCaveatAddress": {
+    "caveat": "ipaddr 127.0.0.1",
+    "hostRestStatus": 200,
+    "containerRestExit": 0,
+    "annotation": "REST proxy"
+  },
+  "permissionOrder": {
+    "input": [
+      "invoices:write",
+      "info:read",
+      "invoices:read"
+    ],
+    "printed": [
+      "info:read",
+      "invoices:read",
+      "invoices:write"
+    ],
+    "source": "lncli printmacaroon in pinned fixture",
+    "sourceCitation": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/cmd_macaroon.go#L449-L456",
+    "referenceConflict": "docs/architecture.md says printmacaroon permissions are sorted; pinned source preserves serialized op/action order, as the hand-made permission-order-reversed observation shows."
+  },
+  "emptyPermissionCheck": {
+    "expired": {
+      "status": 200,
+      "valid": true,
+      "code": null
+    },
+    "corrupted": {
+      "status": 200,
+      "valid": true,
+      "code": null
+    },
+    "expiredAtProbe": true,
+    "corruptRejectedByOrdinaryRpc": true
+  },
+  "invoicePreparation": {
+    "regtestBlocksMined": 6
+  },
+  "preimageRead": {
+    "invoiceFound": true,
+    "preimagePresent": true,
+    "preimageMatchesKnown": true,
+    "preimageAllZero": false,
+    "offchainListPaymentsAccepted": true,
+    "offchainPaymentCount": 0,
+    "offchainReadConfirmed": false
+  },
+  "streamAfterDelete": {
+    "status": 200,
+    "firstDelivered": true,
+    "deleted": true,
+    "afterDeleteDelivered": true,
+    "nextRequest": "rejected",
+    "chunkCount": 2,
+    "responseLength": 2364,
+    "containsHashField": true,
+    "createdHashType": "string",
+    "createdKeys": [
+      "add_index",
+      "payment_addr",
+      "payment_request",
+      "r_hash"
+    ]
+  },
+  "decodeEdgeReference": [
+    {
+      "name": "duplicate-ops",
+      "source": "hand-made",
+      "fingerprint": "fp:99c997b56ac3bb36",
+      "permissions": [
+        "signer:read",
+        "signer:read"
+      ],
+      "location": "lnd",
+      "caveatCount": 0,
+      "lndAcceptanceClaim": false
+    },
+    {
+      "name": "third-party",
+      "source": "hand-made",
+      "fingerprint": "fp:c372bb029fb7dc5a",
+      "permissions": [
+        "signer:read"
+      ],
+      "location": "lnd",
+      "caveatCount": 1,
+      "lndAcceptanceClaim": false
+    },
+    {
+      "name": "trailing-bytes",
+      "source": "hand-made",
+      "fingerprint": "fp:9fcb4e94ba7a691b",
+      "permissions": [
+        "signer:read"
+      ],
+      "location": "lnd",
+      "caveatCount": 0,
+      "lndAcceptanceClaim": false
+    }
+  ],
+  "handMadeAuditReferences": [
+    {
+      "name": "first-party-location",
+      "audit": "B1",
+      "source": "hand-made",
+      "fingerprint": "fp:8114119de91e7969",
+      "printAccepted": false,
+      "location": null,
+      "permissions": null,
+      "caveats": null,
+      "lndAcceptanceClaim": false
+    },
+    {
+      "name": "empty-verification-id",
+      "audit": "B2",
+      "source": "hand-made",
+      "fingerprint": "fp:c7040410196d9ae3",
+      "printAccepted": true,
+      "location": "lnd",
+      "permissions": [
+        "signer:read"
+      ],
+      "caveats": [
+        "fixture-third-party"
+      ],
+      "lndAcceptanceClaim": false
+    },
+    {
+      "name": "malformed-utf8-location",
+      "audit": "B4",
+      "source": "hand-made",
+      "fingerprint": "fp:bcffbb9055bfbc32",
+      "printAccepted": true,
+      "location": "�",
+      "permissions": [
+        "signer:read"
+      ],
+      "caveats": null,
+      "lndAcceptanceClaim": false
+    },
+    {
+      "name": "malformed-utf8-entity",
+      "audit": "B4",
+      "source": "hand-made",
+      "fingerprint": "fp:415576dad44b65d1",
+      "printAccepted": false,
+      "location": null,
+      "permissions": null,
+      "caveats": null,
+      "lndAcceptanceClaim": false
+    },
+    {
+      "name": "protobuf-max-field",
+      "audit": "B4",
+      "source": "hand-made",
+      "fingerprint": "fp:c2f21aab01ce25d8",
+      "printAccepted": true,
+      "location": "lnd",
+      "permissions": [
+        "signer:read"
+      ],
+      "caveats": null,
+      "lndAcceptanceClaim": false
+    },
+    {
+      "name": "protobuf-over-max-field",
+      "audit": "B4",
+      "source": "hand-made",
+      "fingerprint": "fp:b83a0627d3dda49e",
+      "printAccepted": false,
+      "location": null,
+      "permissions": null,
+      "caveats": null,
+      "lndAcceptanceClaim": false
+    },
+    {
+      "name": "permission-order-reversed",
+      "audit": "B15",
+      "source": "hand-made",
+      "fingerprint": "fp:49ca65519f1b21e4",
+      "printAccepted": true,
+      "location": "lnd",
+      "permissions": [
+        "invoices:read",
+        "invoices:write",
+        "info:read"
+      ],
+      "caveats": null,
+      "lndAcceptanceClaim": false
+    }
+  ],
+  "regenerationInvalidates": {
+    "cliExit": 1,
+    "cliTtyRequired": true,
+    "changeStatus": 200,
+    "changeCode": null,
+    "oldMacaroonRejected": true,
+    "rootZeroRejected": true,
+    "rejectionKind": "signature-mismatch"
+  },
+  "leakCheck": {
+    "clear": true
+  },
+  "referenceConflicts": [
+    {
+      "statement": "docs/architecture.md#verified-lnd-behaviour-the-commands-rely-on says printmacaroon permissions are sorted",
+      "reference": "Pinned cmd_macaroon.go lines 449-456 preserves serialized operation order; hand-made permission-order-reversed prints an unsorted list",
+      "settled": false
+    },
+    {
+      "statement": "docs/architecture.md#macaroon-decoding says first-party caveats have no location and no verification ID",
+      "reference": "Pinned go-macaroon v2.0.0 treats a present but empty verification ID as first-party even when a location packet is present",
+      "settled": false
+    }
+  ],
+  "unresolved": [
+    "offchain:read preimage exposure: pinned ListPayments is permitted but this no-channel fixture has zero outgoing payments",
+    "lncli changepassword requires a TTY; equivalent pinned REST ChangePassword after an isolated unlocker restart established invalidation of root key 0 and a nonzero key"
+  ]
+}

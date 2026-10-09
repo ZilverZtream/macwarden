@@ -1,0 +1,408 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ZilverZtream/macwarden/blob/main/schemas/output/rotate.schema.json",
+  "title": "macwarden rotate --json output",
+  "description": "Normative source: docs/spec.md, Commands > 6. rotate. Stage and finish each return a plan (dry run) or their result.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "command",
+    "ok",
+    "warnings",
+    "result",
+    "error"
+  ],
+  "properties": {
+    "schema": {
+      "const": 1
+    },
+    "command": {
+      "const": "rotate"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/warning"
+      }
+    },
+    "result": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/result"
+        },
+        {
+          "$ref": "#/$defs/help"
+        }
+      ]
+    },
+    "error": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/error"
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "ok": {
+            "const": true
+          }
+        },
+        "required": [
+          "ok"
+        ]
+      },
+      "then": {
+        "properties": {
+          "result": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/result"
+              },
+              {
+                "$ref": "#/$defs/help"
+              }
+            ]
+          },
+          "error": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "result": {
+            "type": "null"
+          },
+          "error": {
+            "$ref": "#/$defs/error"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "step",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8
+        },
+        "step": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "warning": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message"
+          ],
+          "properties": {
+            "code": {
+              "type": "string",
+              "minLength": 1
+            },
+            "message": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "rootKeyId": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,19})$",
+      "description": "uint64 as a canonical decimal string (range up to 18446744073709551615 is enforced by the decoder)."
+    },
+    "grade": {
+      "enum": [
+        "ADMIN",
+        "SPEND",
+        "OPERATE",
+        "RECEIVE",
+        "READ",
+        "UNASSESSED"
+      ]
+    },
+    "registryEntry": {
+      "type": "object",
+      "required": [
+        "nodePubkey",
+        "label",
+        "rootKeyId",
+        "permissions",
+        "caveats",
+        "grade",
+        "fingerprint",
+        "outPath",
+        "createdAt",
+        "verified",
+        "status",
+        "revokedAt",
+        "revokeEvidence",
+        "replaces",
+        "replacedBy"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "nodePubkey": {
+          "type": "string",
+          "pattern": "^0[23][0-9a-fA-F]{64}$"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z][A-Za-z0-9._-]{0,63}$"
+        },
+        "rootKeyId": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$"
+        },
+        "permissions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "caveats": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "grade": {
+          "enum": [
+            "ADMIN",
+            "SPEND",
+            "OPERATE",
+            "RECEIVE",
+            "READ",
+            "UNASSESSED"
+          ]
+        },
+        "fingerprint": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^fp:[0-9a-f]{16}$"
+        },
+        "outPath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "verified": {
+          "type": "boolean"
+        },
+        "status": {
+          "enum": [
+            "active",
+            "revoked"
+          ]
+        },
+        "revokedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revokeEvidence": {
+          "enum": [
+            "rejected",
+            "by-id-only",
+            null
+          ]
+        },
+        "replaces": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^(0|[1-9][0-9]*)$"
+        },
+        "replacedBy": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^(0|[1-9][0-9]*)$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "fingerprint": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "verified": {
+                "const": false
+              },
+              "outPath": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "help": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "usage"
+      ],
+      "properties": {
+        "usage": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^macwarden rotate "
+          }
+        }
+      }
+    },
+    "result": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "dryRun",
+            "old",
+            "permissions",
+            "grade",
+            "stage"
+          ],
+          "properties": {
+            "dryRun": {
+              "const": true
+            },
+            "old": {
+              "$ref": "#/$defs/registryEntry"
+            },
+            "permissions": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "grade": {
+              "$ref": "#/$defs/grade"
+            },
+            "stage": {
+              "enum": [
+                "stage",
+                "finish"
+              ]
+            },
+            "permissionsProven": {
+              "type": "boolean"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "stage",
+            "old",
+            "new"
+          ],
+          "properties": {
+            "stage": {
+              "const": "staged"
+            },
+            "old": {
+              "$ref": "#/$defs/registryEntry"
+            },
+            "new": {
+              "$ref": "#/$defs/registryEntry"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "stage",
+            "old",
+            "new",
+            "evidence",
+            "repaired"
+          ],
+          "properties": {
+            "stage": {
+              "const": "finished"
+            },
+            "old": {
+              "$ref": "#/$defs/registryEntry"
+            },
+            "new": {
+              "$ref": "#/$defs/registryEntry"
+            },
+            "evidence": {
+              "enum": [
+                "rejected",
+                "by-id-only"
+              ]
+            },
+            "repaired": {
+              "type": "boolean"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

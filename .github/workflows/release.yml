@@ -1,0 +1,39 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          # Trusted publishing (OIDC) needs Node >= 22.14 and npm >= 11.5.1; the package needs
+          # a July 2026 security release (engines in package.json).
+          node-version: '22.23.2'
+          registry-url: https://registry.npmjs.org
+      - run: npm install --global npm@11.6.2
+      - run: npm ci
+      - run: npm test
+      - run: npm run lint
+      - run: npm run build
+      - name: Publish
+        env:
+          # Fallback only: trusted publishing needs no token. If the package is not yet
+          # configured as a trusted publisher on npm, set the NPM_TOKEN repository secret.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # A prerelease version (one containing -, such as 1.0.0-rc.1) is published to the
+        # next dist-tag so it never becomes latest. The tag must match package.json.
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then echo "tag $GITHUB_REF_NAME does not match package.json version $version" >&2; exit 1; fi
+          case "$version" in *-*) tag=next ;; *) tag=latest ;; esac
+          npm publish --provenance --tag "$tag"

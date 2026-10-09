@@ -1,0 +1,232 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ZilverZtream/macwarden/blob/main/schemas/output/watch-event.schema.json",
+  "title": "macwarden watch --json event line",
+  "description": "Normative source: docs/spec.md, Output and Commands > 8. watch. With --json, watch prints one of these objects per line while it runs, then its final document (watch.schema.json, the only line with a \"command\" field) as the last line.",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "event",
+        "time",
+        "method",
+        "rootKeyId",
+        "credential",
+        "label"
+      ],
+      "properties": {
+        "schema": {
+          "const": 1
+        },
+        "time": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "event": {
+          "enum": [
+            "call",
+            "error"
+          ]
+        },
+        "method": {
+          "type": "string"
+        },
+        "rootKeyId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/rootKeyId"
+            },
+            {
+              "const": "none"
+            }
+          ]
+        },
+        "credential": {
+          "type": "string",
+          "pattern": "^id:([0-9a-f]{16}|none|undecodable)$"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "event",
+        "time",
+        "method",
+        "rootKeyId",
+        "credential",
+        "label",
+        "denied"
+      ],
+      "properties": {
+        "schema": {
+          "const": 1
+        },
+        "time": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "event": {
+          "const": "canary"
+        },
+        "method": {
+          "type": "string"
+        },
+        "rootKeyId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/rootKeyId"
+            },
+            {
+              "const": "none"
+            }
+          ]
+        },
+        "credential": {
+          "type": "string",
+          "pattern": "^id:([0-9a-f]{16}|none|undecodable)$"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "denied": {
+          "const": true
+        },
+        "repeats": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "event",
+        "time",
+        "status",
+        "canaries",
+        "readOnly"
+      ],
+      "properties": {
+        "schema": {
+          "const": 1
+        },
+        "time": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "event": {
+          "const": "status"
+        },
+        "status": {
+          "enum": [
+            "registered",
+            "reconnecting"
+          ]
+        },
+        "canaries": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "readOnly": {
+          "const": true
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "event",
+        "time",
+        "status",
+        "dropped"
+      ],
+      "properties": {
+        "schema": {
+          "const": 1
+        },
+        "time": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "event": {
+          "const": "status"
+        },
+        "status": {
+          "const": "output-dropped"
+        },
+        "dropped": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "event",
+        "time",
+        "status",
+        "rootKeyId",
+        "label"
+      ],
+      "properties": {
+        "schema": {
+          "const": 1
+        },
+        "time": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "event": {
+          "const": "status"
+        },
+        "status": {
+          "const": "alert-failed"
+        },
+        "rootKeyId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/rootKeyId"
+            },
+            {
+              "const": "none"
+            }
+          ]
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "rootKeyId": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,19})$",
+      "description": "uint64 as a canonical decimal string (range up to 18446744073709551615 is enforced by the decoder)."
+    }
+  }
+}

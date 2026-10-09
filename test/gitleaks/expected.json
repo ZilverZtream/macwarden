@@ -1,0 +1,20 @@
+{
+  "source": "test/scan-fixtures/full/manifest.json",
+  "items": [
+    { "path": "admin.macaroon", "status": "excluded", "reason": "binary macaroon files are outside gitleaks text scanning" },
+    { "path": "ro.macaroon", "status": "excluded", "reason": "binary macaroon files are outside gitleaks text scanning" },
+    { "path": "inv.macaroon", "status": "excluded", "reason": "binary macaroon files are outside gitleaks text scanning" },
+    { "path": "app.env", "line": 1, "kind": "macaroon-hex", "status": "expected" },
+    { "path": "app.env", "line": 2, "kind": "macaroon-base64", "status": "expected" },
+    { "path": "app.env", "line": 3, "kind": "lndconnect", "status": "expected" },
+    { "path": "app.env", "line": 4, "kind": "nwc", "status": "expected" },
+    { "path": "app.json", "line": 2, "kind": "macaroon-hex", "status": "expected" },
+    { "path": "app.json", "line": 3, "kind": "macaroon-base64", "status": "expected" },
+    { "path": "app.json", "line": 4, "kind": "lndconnect", "status": "expected" },
+    { "path": "app.json", "line": 5, "kind": "nwc", "status": "expected" },
+    { "path": "app.yml", "line": 1, "kind": "macaroon-hex", "status": "expected" },
+    { "path": "app.yml", "line": 2, "kind": "macaroon-base64", "status": "expected" },
+    { "path": "app.yml", "line": 3, "kind": "lndconnect", "status": "expected" },
+    { "path": "app.yml", "line": 4, "kind": "nwc", "status": "expected" }
+  ]
+}

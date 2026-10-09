@@ -1,0 +1,5 @@
+services:
+  lnd:
+    entrypoint: ["lnd", "--rpclisten=0.0.0.0:10009"]
+    ports:
+      - 127.0.0.1:18009:10009

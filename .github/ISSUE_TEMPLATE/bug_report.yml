@@ -1,0 +1,60 @@
+name: Bug report
+description: Report a defect in MacWarden. For a security vulnerability, use private reporting instead (see SECURITY.md).
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never include a real credential.** Do not paste a macaroon, `lndconnect://` URI, Nostr Wallet Connect string, TLS key or seed in any encoding, including in logs or screenshots. A fingerprint printed by MacWarden, a redacted excerpt or a regtest reproduction is enough.
+
+        If the problem could let someone obtain or misuse a credential, report it privately instead: https://github.com/ZilverZtream/macwarden/security/advisories/new
+  - type: input
+    id: version
+    attributes:
+      label: MacWarden version
+      description: Output of `macwarden --version`.
+      placeholder: 1.1.1
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, Node.js version (`node --version`) and, for online commands, the LND version.
+      placeholder: Ubuntu 24.04, Node.js 22.23.2, LND 0.21.4-beta
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: The exact command and flags, with paths and credentials replaced by placeholders.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      description: What you expected, ideally with a reference to docs/spec.md.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: What happened, including the exit code and the output (redacted). `--json` output is welcome.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Preferably against a disposable regtest node or with the repository's test vectors.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Credential safety
+      options:
+        - label: This report contains no real macaroon, lndconnect URI, NWC string, TLS key or seed.
+          required: true

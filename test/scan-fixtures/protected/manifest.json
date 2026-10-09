@@ -1,0 +1,38 @@
+{
+  "reference": "docs/spec.md#2-scan-offline-safe-07",
+  "protected": [
+    "macaroons.db", "MaCaRoOnS.Db", "wallet.db", "WALLET.DB",
+    "tls.key", "TLS.KEY", "secret.KEY", "wallet.db:side", "WALLET.DB:side",
+    "macaroons.db:side", "TLS.KEY:side", "password:side", "passwd:side", "seed:side",
+    "walletpassword", "WALLETPASSWORD", "wallet_password", "wallet.password.bak",
+    "wallet-password.txt", "walletpassword:side", "WALLET_PASSWORD.dat:side",
+    "seeds", "SEEDS.TXT", "seed.txt", "seeds:side", "SEEDS.TXT:side",
+    "tlskey", "TLS-PRIVKEY", "tls_privkey.pem", "tls.key.pem",
+    "TLS-PRIVKEY:side", "tls.key.pem:side",
+    "password", "PASSWORD",
+    "passwd", "PaSsWd", "seed", "SEED",
+    "wallet_passwd.dat", "backup.seed", "seed-backup.txt",
+    "dir/macaroons.db/ordinary.macaroon", "dir/WALLET.DB/ordinary.macaroon",
+    "dir/TLS.KEY/ordinary.macaroon", "dir/wallet_password/ordinary.macaroon",
+    "dir/passwd-store/ordinary.macaroon", "dir/seed.backup/ordinary.macaroon",
+    "dir/WALLETPASSWORD/ordinary.macaroon", "dir/seeds.txt/ordinary.macaroon",
+    "dir/tls-privkey/ordinary.macaroon"
+  ],
+  "resolvedTargets": [
+    { "supplied": "linked-macaroon", "resolved": "private/MACAROONS.DB" },
+    { "supplied": "linked-wallet", "resolved": "private/wallet.db" },
+    { "supplied": "linked-key", "resolved": "private/tls.KEY" },
+    { "supplied": "linked-credential-a", "resolved": "private/password.txt" },
+    { "supplied": "linked-credential-b", "resolved": "private/passwd_store/ordinary.macaroon" },
+    { "supplied": "linked-credential-c", "resolved": "private/seed-file/ordinary.macaroon" },
+    { "supplied": "linked-credential-d", "resolved": "private/walletpassword" },
+    { "supplied": "linked-credential-e", "resolved": "private/SEEDS.TXT" },
+    { "supplied": "linked-credential-f", "resolved": "private/TLS-PRIVKEY/ordinary.macaroon" }
+  ],
+  "ordinary": [
+    "seedling.txt", "passwords.txt", "passwdlist.txt", "wallet.dbx",
+    "macaroons.dbx", "tls.keyed", "myseed.txt", "dir/seedlings/ordinary.macaroon",
+    "walletpasswords.txt", "walletpasswordx", "seedsman.txt", "tls-keyed",
+    "tlsprivkeys.txt", "dir/walletpasswords/ordinary.macaroon"
+  ]
+}

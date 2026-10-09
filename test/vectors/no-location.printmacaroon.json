@@ -1,0 +1,9 @@
+{
+  "version": 2,
+  "location": "",
+  "root_key_id": "0",
+  "permissions": [
+    "signer:read"
+  ],
+  "caveats": null
+}

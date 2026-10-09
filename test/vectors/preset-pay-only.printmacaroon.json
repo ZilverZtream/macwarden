@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "location": "lnd",
+  "root_key_id": "0",
+  "permissions": [
+    "info:read",
+    "uri:/lnrpc.Lightning/DecodePayReq",
+    "uri:/routerrpc.Router/SendPaymentV2",
+    "uri:/routerrpc.Router/TrackPaymentV2"
+  ],
+  "caveats": null
+}

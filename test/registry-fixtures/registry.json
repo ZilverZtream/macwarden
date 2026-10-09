@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "entries": [
+    {
+      "nodePubkey": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "label": "btcpay",
+      "rootKeyId": "18446744073709551615",
+      "permissions": ["info:read", "invoices:read", "invoices:write"],
+      "caveats": [{ "type": "time-before", "value": "2027-01-01T00:00:00Z", "requested": "90d" }],
+      "grade": "RECEIVE",
+      "fingerprint": "fp:fab2bae47e567b11",
+      "outPath": "/operator/btcpay.macaroon",
+      "createdAt": "2026-10-02T09:00:00Z",
+      "verified": true,
+      "status": "active",
+      "revokedAt": null,
+      "revokeEvidence": null,
+      "replaces": null,
+      "replacedBy": null
+    },
+    {
+      "nodePubkey": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "label": null,
+      "rootKeyId": "4831990234117",
+      "permissions": ["info:read"],
+      "caveats": [],
+      "grade": "READ",
+      "fingerprint": "fp:4e7f80baa57e6e1d",
+      "outPath": null,
+      "createdAt": "2026-10-02T08:00:00Z",
+      "verified": false,
+      "status": "revoked",
+      "revokedAt": "2026-10-03T08:00:00Z",
+      "revokeEvidence": "rejected",
+      "replaces": null,
+      "replacedBy": null
+    },
+    {
+      "nodePubkey": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "label": "btcpay",
+      "rootKeyId": "18446744073709551615",
+      "permissions": ["info:read"],
+      "caveats": [],
+      "grade": "READ",
+      "fingerprint": "fp:4e7f80baa57e6e1d",
+      "outPath": null,
+      "createdAt": "2026-10-02T10:00:00Z",
+      "verified": false,
+      "status": "active",
+      "revokedAt": null,
+      "revokeEvidence": null,
+      "replaces": null,
+      "replacedBy": null
+    }
+  ]
+}

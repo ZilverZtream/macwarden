@@ -1,0 +1,176 @@
+{
+  "source": "test/vectors/manifest.json and stored printmacaroon facts; fixed NWC 32-byte sentinel",
+  "files": [
+    {
+      "path": "admin.macaroon",
+      "findings": [
+        {
+          "line": null,
+          "column": null,
+          "kind": "macaroon-file",
+          "fingerprint": "fp:c1034ad4f2a2a06f",
+          "grade": "ADMIN"
+        }
+      ]
+    },
+    {
+      "path": "app.env",
+      "findings": [
+        {
+          "line": 1,
+          "column": 3,
+          "kind": "macaroon-hex",
+          "fingerprint": "fp:4e7f80baa57e6e1d",
+          "grade": "READ"
+        },
+        {
+          "line": 2,
+          "column": 3,
+          "kind": "macaroon-base64",
+          "fingerprint": "fp:fab2bae47e567b11",
+          "grade": "RECEIVE"
+        },
+        {
+          "line": 3,
+          "column": 3,
+          "kind": "lndconnect",
+          "fingerprint": "fp:19cac7566efaa785",
+          "grade": "SPEND"
+        },
+        {
+          "line": 4,
+          "column": 3,
+          "kind": "nwc",
+          "fingerprint": "fp:02d449a31fbb267c",
+          "grade": null
+        }
+      ]
+    },
+    {
+      "path": "app.json",
+      "findings": [
+        {
+          "line": 2,
+          "column": 6,
+          "kind": "macaroon-hex",
+          "fingerprint": "fp:4e7f80baa57e6e1d",
+          "grade": "READ"
+        },
+        {
+          "line": 3,
+          "column": 6,
+          "kind": "macaroon-base64",
+          "fingerprint": "fp:fab2bae47e567b11",
+          "grade": "RECEIVE"
+        },
+        {
+          "line": 4,
+          "column": 6,
+          "kind": "lndconnect",
+          "fingerprint": "fp:19cac7566efaa785",
+          "grade": "SPEND"
+        },
+        {
+          "line": 5,
+          "column": 6,
+          "kind": "nwc",
+          "fingerprint": "fp:02d449a31fbb267c",
+          "grade": null
+        }
+      ]
+    },
+    {
+      "path": "app.yml",
+      "findings": [
+        {
+          "line": 1,
+          "column": 4,
+          "kind": "macaroon-hex",
+          "fingerprint": "fp:4e7f80baa57e6e1d",
+          "grade": "READ"
+        },
+        {
+          "line": 2,
+          "column": 4,
+          "kind": "macaroon-base64",
+          "fingerprint": "fp:fab2bae47e567b11",
+          "grade": "RECEIVE"
+        },
+        {
+          "line": 3,
+          "column": 4,
+          "kind": "lndconnect",
+          "fingerprint": "fp:19cac7566efaa785",
+          "grade": "SPEND"
+        },
+        {
+          "line": 4,
+          "column": 4,
+          "kind": "nwc",
+          "fingerprint": "fp:02d449a31fbb267c",
+          "grade": null
+        }
+      ]
+    },
+    {
+      "path": "inv.macaroon",
+      "findings": [
+        {
+          "line": null,
+          "column": null,
+          "kind": "macaroon-file",
+          "fingerprint": "fp:fab2bae47e567b11",
+          "grade": "RECEIVE"
+        }
+      ]
+    },
+    {
+      "path": "manifest.json",
+      "findings": []
+    },
+    {
+      "path": "ro.macaroon",
+      "findings": [
+        {
+          "line": null,
+          "column": null,
+          "kind": "macaroon-file",
+          "fingerprint": "fp:4e7f80baa57e6e1d",
+          "grade": "READ"
+        }
+      ]
+    }
+  ],
+  "skipped": [
+    {
+      "path": "binary.dat",
+      "reason": "binary"
+    },
+    {
+      "path": "node_modules",
+      "reason": "excluded-dir"
+    },
+    {
+      "path": "private.key",
+      "reason": "never-open"
+    }
+  ],
+  "summary": {
+    "filesScanned": 7,
+    "filesSkipped": 3,
+    "dropped": 0,
+    "ignored": 0,
+    "findings": 15,
+    "distinct": 5,
+    "byGrade": {
+      "ADMIN": 1,
+      "SPEND": 3,
+      "OPERATE": 0,
+      "RECEIVE": 4,
+      "READ": 4,
+      "UNASSESSED": 0,
+      "NWC": 3,
+      "UNDECODABLE": 0
+    }
+  }
+}

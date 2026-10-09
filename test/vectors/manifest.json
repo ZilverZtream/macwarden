@@ -1,0 +1,422 @@
+{
+  "vectors": [
+    {
+      "name": "default-admin",
+      "file": "default-admin.macaroon",
+      "purpose": "LND default-admin file",
+      "source": "lncli",
+      "expectedGrade": "ADMIN",
+      "fingerprint": "fp:c1034ad4f2a2a06f",
+      "canonicalLength": 293,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "default-readonly",
+      "file": "default-readonly.macaroon",
+      "purpose": "LND default-readonly file",
+      "source": "lncli",
+      "expectedGrade": "READ",
+      "fingerprint": "fp:4e7f80baa57e6e1d",
+      "canonicalLength": 217,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "default-invoice",
+      "file": "default-invoice.macaroon",
+      "purpose": "LND default-invoice file",
+      "source": "lncli",
+      "expectedGrade": "RECEIVE",
+      "fingerprint": "fp:fab2bae47e567b11",
+      "canonicalLength": 132,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "preset-read-only",
+      "file": "preset-read-only.macaroon",
+      "purpose": "read-only preset",
+      "source": "lncli",
+      "expectedGrade": "READ",
+      "fingerprint": "fp:8c142f8ae9cf05d7",
+      "canonicalLength": 165,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "preset-invoice-only",
+      "file": "preset-invoice-only.macaroon",
+      "purpose": "invoice-only preset",
+      "source": "lncli",
+      "expectedGrade": "RECEIVE",
+      "fingerprint": "fp:6cd6e876f0fe55f7",
+      "canonicalLength": 105,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "preset-pay-only",
+      "file": "preset-pay-only.macaroon",
+      "purpose": "pay-only preset",
+      "source": "lncli",
+      "expectedGrade": "SPEND",
+      "fingerprint": "fp:19cac7566efaa785",
+      "canonicalLength": 186,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "grade-admin-set",
+      "file": "grade-admin-set.macaroon",
+      "purpose": "SPEC grade row admin-set",
+      "source": "lncli",
+      "expectedGrade": "ADMIN",
+      "fingerprint": "fp:446dcb3bdaa7693d",
+      "canonicalLength": 102,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "grade-spend-pair",
+      "file": "grade-spend-pair.macaroon",
+      "purpose": "SPEC grade row spend-pair",
+      "source": "lncli",
+      "expectedGrade": "SPEND",
+      "fingerprint": "fp:9233b02627ceaba4",
+      "canonicalLength": 91,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "grade-signer-read",
+      "file": "grade-signer-read.macaroon",
+      "purpose": "SPEC grade row signer-read",
+      "source": "lncli",
+      "expectedGrade": "READ",
+      "fingerprint": "fp:f7ab6cbca0cd437d",
+      "canonicalLength": 82,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "grade-info-write",
+      "file": "grade-info-write.macaroon",
+      "purpose": "SPEC grade row info-write",
+      "source": "lncli",
+      "expectedGrade": "OPERATE",
+      "fingerprint": "fp:f76b771b2c41b544",
+      "canonicalLength": 81,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "grade-onchain-generate",
+      "file": "grade-onchain-generate.macaroon",
+      "purpose": "SPEC grade row onchain-generate",
+      "source": "lncli",
+      "expectedGrade": "SPEND",
+      "fingerprint": "fp:568599972ea2a309",
+      "canonicalLength": 87,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "grade-peers-pair",
+      "file": "grade-peers-pair.macaroon",
+      "purpose": "SPEC grade row peers-pair",
+      "source": "lncli",
+      "expectedGrade": "OPERATE",
+      "fingerprint": "fp:a646e3df17a82bbe",
+      "canonicalLength": 88,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "grade-uri-disconnect",
+      "file": "grade-uri-disconnect.macaroon",
+      "purpose": "SPEC grade row uri-disconnect",
+      "source": "lncli",
+      "expectedGrade": "OPERATE",
+      "fingerprint": "fp:063c4f0ed99084a4",
+      "canonicalLength": 106,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "grade-invoice-send",
+      "file": "grade-invoice-send.macaroon",
+      "purpose": "SPEC grade row invoice-send",
+      "source": "lncli",
+      "expectedGrade": "SPEND",
+      "fingerprint": "fp:5149a6fbbc6c62c8",
+      "canonicalLength": 124,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "grade-uri-read-pair",
+      "file": "grade-uri-read-pair.macaroon",
+      "purpose": "SPEC grade row uri-read-pair",
+      "source": "lncli",
+      "expectedGrade": "READ",
+      "fingerprint": "fp:158b61077edadecd",
+      "canonicalLength": 130,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "grade-uri-add-invoice",
+      "file": "grade-uri-add-invoice.macaroon",
+      "purpose": "SPEC grade row uri-add-invoice",
+      "source": "lncli",
+      "expectedGrade": "RECEIVE",
+      "fingerprint": "fp:d396fc8747627596",
+      "canonicalLength": 102,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "grade-unknown-uri",
+      "file": "grade-unknown-uri.macaroon",
+      "purpose": "SPEC grade row unknown-uri",
+      "source": "lncli",
+      "expectedGrade": "UNASSESSED",
+      "fingerprint": "fp:2448855641949bf0",
+      "canonicalLength": 98,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "grade-unknown-entity",
+      "file": "grade-unknown-entity.macaroon",
+      "purpose": "SPEC grade row unknown-entity",
+      "source": "lncli",
+      "expectedGrade": "UNASSESSED",
+      "fingerprint": "fp:e61a00e7555f82ee",
+      "canonicalLength": 95,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "grade-remote-signer",
+      "file": "grade-remote-signer.macaroon",
+      "purpose": "SPEC grade row remote-signer",
+      "source": "lncli",
+      "expectedGrade": "UNASSESSED",
+      "fingerprint": "fp:64bc1ae1a1c31a0e",
+      "canonicalLength": 92,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "grade-admin-unknown",
+      "file": "grade-admin-unknown.macaroon",
+      "purpose": "SPEC grade row admin-unknown",
+      "source": "lncli",
+      "expectedGrade": "ADMIN",
+      "fingerprint": "fp:92f2cef4c9a6e2f6",
+      "canonicalLength": 103,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "grade-unknown-action",
+      "file": "grade-unknown-action.macaroon",
+      "purpose": "SPEC grade row unknown-action",
+      "source": "lncli",
+      "expectedGrade": "UNASSESSED",
+      "fingerprint": "fp:82f5027e5723a2f6",
+      "canonicalLength": 82,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "grade-malformed-case",
+      "file": "grade-malformed-case.macaroon",
+      "purpose": "SPEC grade row malformed-case",
+      "source": "lncli",
+      "expectedGrade": "UNASSESSED",
+      "fingerprint": "fp:a14a077cbb3b6cf3",
+      "canonicalLength": 80,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "grade-malformed-uri-read",
+      "file": "grade-malformed-uri-read.macaroon",
+      "purpose": "SPEC grade row malformed-uri-read",
+      "source": "lncli",
+      "expectedGrade": "UNASSESSED",
+      "fingerprint": "fp:3230941d123251cd",
+      "canonicalLength": 79,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "grade-duplicate-info",
+      "file": "grade-duplicate-info.macaroon",
+      "purpose": "SPEC grade row duplicate-info",
+      "source": "lncli",
+      "expectedGrade": "READ",
+      "fingerprint": "fp:4c9fcc7d3b68ca0d",
+      "canonicalLength": 80,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "root-max",
+      "file": "root-max.macaroon",
+      "purpose": "Maximum uint64 root key ID",
+      "source": "lncli",
+      "expectedGrade": "READ",
+      "fingerprint": "fp:aacc20defc4fbd90",
+      "canonicalLength": 99,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "time-before",
+      "file": "time-before.macaroon",
+      "purpose": "time-before caveat",
+      "source": "lncli",
+      "expectedGrade": "READ",
+      "fingerprint": "fp:94bdce2f35d6d9be",
+      "canonicalLength": 127,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "ipaddr",
+      "file": "ipaddr.macaroon",
+      "purpose": "ipaddr caveat",
+      "source": "lncli",
+      "expectedGrade": "READ",
+      "fingerprint": "fp:9a09f247936f663b",
+      "canonicalLength": 101,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "third-party",
+      "file": "third-party.macaroon",
+      "purpose": "third-party caveat at fixture-location",
+      "source": "hand-made",
+      "expectedGrade": "READ",
+      "fingerprint": "fp:c372bb029fb7dc5a",
+      "canonicalLength": 127,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "unknown-condition",
+      "file": "unknown-condition.macaroon",
+      "purpose": "unknown condition",
+      "source": "hand-made",
+      "expectedGrade": "READ",
+      "fingerprint": "fp:a4c69467a3fa13e9",
+      "canonicalLength": 98,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "iprange",
+      "file": "iprange.macaroon",
+      "purpose": "iprange condition",
+      "source": "hand-made",
+      "expectedGrade": "READ",
+      "fingerprint": "fp:a8c6f4ece2542881",
+      "canonicalLength": 104,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "lnd-custom",
+      "file": "lnd-custom.macaroon",
+      "purpose": "lnd-custom condition",
+      "source": "hand-made",
+      "expectedGrade": "READ",
+      "fingerprint": "fp:c47b61cb90fac841",
+      "canonicalLength": 107,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "time-nanosecond",
+      "file": "time-nanosecond.macaroon",
+      "purpose": "nanosecond time-before",
+      "source": "hand-made",
+      "expectedGrade": "READ",
+      "fingerprint": "fp:c44df469adb580ca",
+      "canonicalLength": 127,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "time-unparseable",
+      "file": "time-unparseable.macaroon",
+      "purpose": "unparseable time-before",
+      "source": "hand-made",
+      "expectedGrade": "READ",
+      "fingerprint": "fp:eddba67f0416b0e3",
+      "canonicalLength": 105,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "duplicate-ops",
+      "file": "duplicate-ops.macaroon",
+      "purpose": "duplicate operation",
+      "source": "hand-made",
+      "expectedGrade": "READ",
+      "fingerprint": "fp:99c997b56ac3bb36",
+      "canonicalLength": 98,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "no-location",
+      "file": "no-location.macaroon",
+      "purpose": "missing location",
+      "source": "hand-made",
+      "expectedGrade": "READ",
+      "fingerprint": "fp:034ad6d9996d9ff5",
+      "canonicalLength": 77,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    },
+    {
+      "name": "trailing-bytes",
+      "file": "trailing-bytes.macaroon",
+      "purpose": "trailing bytes",
+      "source": "hand-made",
+      "expectedGrade": "READ",
+      "fingerprint": "fp:f7ab6cbca0cd437d",
+      "canonicalLength": 82,
+      "network": "regtest",
+      "lndVersion": "0.21.4-beta commit=v0.21.4-beta"
+    }
+  ],
+  "notBakeable": [
+    {
+      "row": "grade-malformed-info",
+      "reason": "[lncli] unable to parse permission tuple: info"
+    },
+    {
+      "row": "grade-malformed-info-empty",
+      "reason": "[lncli] invalid permission [info:]. action cannot be empty"
+    },
+    {
+      "row": "grade-malformed-empty-read",
+      "reason": "[lncli] invalid permission [:read]. entity cannot be empty"
+    },
+    {
+      "row": "grade-malformed-uri-empty",
+      "reason": "[lncli] invalid permission [uri:]. action cannot be empty"
+    },
+    {
+      "row": "grade-empty",
+      "reason": "LND REST BakeMacaroon: permission list cannot be empty. specify at least one action/entity pair. supported actions are [read write generate], supported entities are [onchain offchain address message peers info invoices signer macaroon uri]"
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
+  <metadata>
+    <id>BTCPayServer.Lightning.All</id>
+    <version>1.7.8</version>
+    <authors>BTCPayServer.Lightning.All</authors>
+    <license type="expression">MIT</license>
+    <licenseUrl>https://licenses.nuget.org/MIT</licenseUrl>
+    <readme>README.md</readme>
+    <projectUrl>https://github.com/btcpayserver/BTCPayServer.Lightning</projectUrl>
+    <description>Client library for lightning network implementations to build Lightning Network Apps in C#.</description>
+    <tags>lightning bitcoin clightning lnd charge lapps</tags>
+    <repository type="git" url="https://github.com/btcpayserver/BTCPayServer.Lightning" commit="cb7b9af178d829424d7ce203bdef049b28368ba1" />
+    <dependencies>
+      <group targetFramework="net10.0">
+        <dependency id="BTCPayServer.Lightning.CLightning" version="1.7.7" exclude="Build,Analyzers" />
+        <dependency id="BTCPayServer.Lightning.Eclair" version="1.7.2" exclude="Build,Analyzers" />
+        <dependency id="BTCPayServer.Lightning.LND" version="1.7.2" exclude="Build,Analyzers" />
+        <dependency id="BTCPayServer.Lightning.LNDhub" version="1.7.2" exclude="Build,Analyzers" />
+        <dependency id="BTCPayServer.Lightning.Phoenixd" version="1.7.2" exclude="Build,Analyzers" />
+      </group>
+      <group targetFramework=".NETStandard2.0">
+        <dependency id="BTCPayServer.Lightning.CLightning" version="1.7.7" exclude="Build,Analyzers" />
+        <dependency id="BTCPayServer.Lightning.Eclair" version="1.7.2" exclude="Build,Analyzers" />
+        <dependency id="BTCPayServer.Lightning.LND" version="1.7.2" exclude="Build,Analyzers" />
+        <dependency id="BTCPayServer.Lightning.LNDhub" version="1.7.2" exclude="Build,Analyzers" />
+        <dependency id="BTCPayServer.Lightning.Phoenixd" version="1.7.2" exclude="Build,Analyzers" />
+      </group>
+    </dependencies>
+  </metadata>
+</package>

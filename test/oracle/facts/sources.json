@@ -1,0 +1,27 @@
+{
+  "fixture": {
+    "image": "lightninglabs/lnd:v0.21.4-beta@sha256:04d06edcc0f6e99a5e797ea34959f330add222226f840cd86afbc31f8f29627d",
+    "lndRevision": "390b2d2b7bdcc335c183962e483f5daeceb8f0e7",
+    "rpcPermissions": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/rpcserver.go#L459-L462",
+    "printMacaroonOrder": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/cmd/commands/cmd_macaroon.go#L449-L456",
+    "invoicePreimageField": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/lnrpc/lightning.proto#L3836",
+    "goModuleVersions": "https://github.com/lightningnetwork/lnd/blob/390b2d2b7bdcc335c183962e483f5daeceb8f0e7/go.mod"
+  },
+  "macaroon": {
+    "moduleVersion": "gopkg.in/macaroon.v2 v2.0.0",
+    "revision": "bed2a428da6e56d950bed5b41fcbae3141e5b0d0",
+    "source": "https://github.com/go-macaroon/macaroon/blob/bed2a428da6e56d950bed5b41fcbae3141e5b0d0/marshal-v2.go#L151-L196",
+    "verificationIdClassification": "https://github.com/go-macaroon/macaroon/blob/bed2a428da6e56d950bed5b41fcbae3141e5b0d0/macaroon.go#L50-L56"
+  },
+  "goTime": {
+    "version": "go1.26.8",
+    "source": "https://github.com/golang/go/blob/go1.26.8/src/time/format.go",
+    "referenceTest": "https://github.com/golang/go/blob/go1.26.8/src/time/format_test.go",
+    "fact": "Parse accepts a maximal fractional digit run and truncates beyond nanoseconds."
+  },
+  "protobuf": {
+    "lndModuleVersion": "google.golang.org/protobuf v1.36.11, replaced by github.com/lightninglabs/protobuf-go-hex-display v1.33.0-hex-display",
+    "fieldNumberLimit": "https://protobuf.dev/programming-guides/proto3/#assigning-field-numbers",
+    "fact": "Normal field numbers range from 1 through 536870911."
+  }
+}

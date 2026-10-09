@@ -1,0 +1,27 @@
+# macwarden detectors as TruffleHog custom detectors.
+# Usage: trufflehog filesystem . --config rules/trufflehog.yaml --no-verification
+#        trufflehog git file://. --config rules/trufflehog.yaml --no-verification
+# The regexes are byte-identical to docs/spec.md and rules/gitleaks.toml (a test enforces it).
+# TruffleHog prints matched secrets in its output: store its results only where a
+# leaked Lightning credential may be read, and rotate anything it finds (macwarden rotate).
+detectors:
+  - name: macwarden-macaroon-hex
+    keywords:
+      - '0201036c6e6402'
+    regex:
+      macaroon: '(?i)0201036c6e6402[0-9a-f]{40,}'
+  - name: macwarden-macaroon-base64
+    keywords:
+      - 'AgEDbG5kA'
+    regex:
+      macaroon: 'AgEDbG5kA[A-Za-z0-9+/_-]{40,}={0,2}'
+  - name: macwarden-lndconnect
+    keywords:
+      - 'lndconnect://'
+    regex:
+      uri: '(?i)lndconnect://[^\s"''<>]+'
+  - name: macwarden-nwc
+    keywords:
+      - 'walletconnect'
+    regex:
+      uri: '(?i)(?:nostr\+walletconnect|nostrwalletconnect):(?://)?[0-9a-f]{64}/?\?[^\s"''<>]*?secret=[0-9a-f]{64}(?:[^0-9a-f]|$)'

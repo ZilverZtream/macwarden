@@ -1,0 +1,80 @@
+import * as fs from 'node:fs/promises';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { hostname, tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { expect, it } from 'vitest';
+import { acquireLock, type Deps } from '../src/commands/watch.js';
+
+const depsFor = (pid: number, files: typeof fs) => ({ fs: files, env: {}, clock: () => new Date(), emit: () => undefined,
+  hostname: () => hostname(), pid, processDomain: async () => null }) as unknown as Deps;
+// A same-host owner PID that does not exist: the lock is stale.
+const staleRecord = `${JSON.stringify({ pid: 2_147_483_000, hostname: hostname() })}\n`;
+
+// Two watches start at the same moment against a stale lock. The race the final gate found:
+// both read the stale record, A replaces the lock, then B acts on its stale read. Unlinking
+// by path, B deleted A's fresh lock and created its own: both ran. This forces exactly that
+// interleaving: the second reader of the lock waits until A's fresh lock exists. Owner
+// records are read through one descriptor bound to the checked file (MW110-04), so the
+// interception is at that open: B opens the stale record, then is held until A's lock
+// replaced it, and reads the stale record from its descriptor afterwards.
+it('WATCH/lock-race a watch acting on a stale read never removes the lock another watch just took', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mw-lock-race-'));
+  try {
+    for (let round = 0; round < 20; round++) {
+      const path = join(dir, `r${round}.watch.lock`);
+      writeFileSync(path, staleRecord);
+      let reads = 0;
+      let heldStale = false;
+      const files = { ...fs, async open(...args: Parameters<typeof fs.open>) {
+        const handle = await fs.open(...args);
+        if (String(args[0]) !== path || args[1] === 'wx') return handle;
+        const read = ++reads;
+        if (read === 1) {
+          // A: wait until B has opened the same stale record too, so both act on it.
+          for (const until = performance.now() + 10_000; reads < 2 && performance.now() < until;)
+            await new Promise(resolve => setTimeout(resolve, 1));
+        } else if (read === 2) {
+          // B: opened the stale record, then wait until A's own lock replaced it.
+          // The path is briefly absent while A moves the stale record aside, and empty until
+          // A has written its owner record.
+          const replaced = () => {
+            try { const text = readFileSync(path, 'utf8'); return text !== '' && text !== staleRecord; }
+            catch { return false; }
+          };
+          for (const until = performance.now() + 10_000; !replaced() && performance.now() < until;)
+            await new Promise(resolve => setTimeout(resolve, 1));
+          const probe = Buffer.alloc(256);
+          const { bytesRead } = await handle.read(probe, 0, probe.length, 0);
+          heldStale = probe.subarray(0, bytesRead).toString('utf8') === staleRecord;
+        }
+        return handle;
+      } } as typeof fs;
+      const results = await Promise.allSettled([acquireLock(path, depsFor(1_000_001, files)),
+        acquireLock(path, depsFor(1_000_002, files))]);
+      // The interleaving really happened: B held the stale record while A replaced it.
+      expect(heldStale).toBe(true);
+      expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+      for (const result of results) if (result.status === 'fulfilled') await result.value();
+      expect(existsSync(path)).toBe(false);
+    }
+    expect(readdirSync(dir).filter(name => name.includes('.stale-'))).toEqual([]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 60_000);
+
+it('WATCH/lock-race two watches starting at once against a stale lock never both run', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mw-lock-race-'));
+  try {
+    for (let round = 0; round < 200; round++) {
+      const path = join(dir, `r${round}.watch.lock`);
+      writeFileSync(path, staleRecord);
+      const results = await Promise.allSettled([acquireLock(path, depsFor(1_000_001, fs)), acquireLock(path, depsFor(1_000_002, fs))]);
+      expect(results.filter(result => result.status === 'fulfilled').length).toBeLessThanOrEqual(1);
+      for (const result of results) if (result.status === 'fulfilled') await result.value();
+    }
+    expect(readdirSync(dir).filter(name => name.includes('.stale-'))).toEqual([]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 60_000);

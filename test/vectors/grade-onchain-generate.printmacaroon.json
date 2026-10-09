@@ -1,0 +1,9 @@
+{
+  "version": 2,
+  "location": "lnd",
+  "root_key_id": "0",
+  "permissions": [
+    "onchain:generate"
+  ],
+  "caveats": null
+}

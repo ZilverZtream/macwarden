@@ -1,0 +1,40 @@
+services:
+  bitcoind:
+    image: lightninglabs/bitcoin-core:31.1@sha256:86e15e4348869a86343aacbbd1aff38e96cffddd87b61644694b1e1358d737cd
+    command:
+      - -regtest
+      - -server=1
+      - -txindex=1
+      - -rpcuser=fixture
+      - -rpcpassword=fixture-only-disposable
+      - -rpcbind=0.0.0.0
+      - -rpcallowip=0.0.0.0/0
+      - -zmqpubrawblock=tcp://0.0.0.0:28332
+      - -zmqpubrawtx=tcp://0.0.0.0:28333
+    volumes:
+      - bitcoin-data:/home/bitcoin/.bitcoin
+  lnd:
+    image: lightninglabs/lnd:v0.21.4-beta@sha256:04d06edcc0f6e99a5e797ea34959f330add222226f840cd86afbc31f8f29627d
+    depends_on:
+      - bitcoind
+    ports:
+      - 127.0.0.1:18080:8080
+    command:
+      - --bitcoin.active
+      - --bitcoin.regtest
+      - --bitcoin.node=bitcoind
+      - --bitcoind.rpchost=bitcoind:18443
+      - --bitcoind.rpcuser=fixture
+      - --bitcoind.rpcpass=fixture-only-disposable
+      - --bitcoind.zmqpubrawblock=tcp://bitcoind:28332
+      - --bitcoind.zmqpubrawtx=tcp://bitcoind:28333
+      - --noseedbackup
+      - --restlisten=0.0.0.0:8080
+      - --tlsextradomain=localhost
+      # macwarden watch registers a read-only RPC middleware; never addmandatory.
+      - --rpcmiddleware.enable
+    volumes:
+      - lnd-data:/root/.lnd
+volumes:
+  bitcoin-data:
+  lnd-data:

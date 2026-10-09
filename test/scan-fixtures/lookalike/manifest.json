@@ -1,0 +1,39 @@
+{
+  "source": "literal planted look-alikes",
+  "files": [
+    {
+      "path": "almost.env",
+      "findings": [],
+      "dropped": 1
+    },
+    {
+      "path": "almost.yml",
+      "findings": [],
+      "dropped": 0
+    },
+    {
+      "path": "manifest.json",
+      "findings": [],
+      "dropped": 0
+    }
+  ],
+  "skipped": [],
+  "summary": {
+    "filesScanned": 3,
+    "filesSkipped": 0,
+    "dropped": 1,
+    "ignored": 0,
+    "findings": 0,
+    "distinct": 0,
+    "byGrade": {
+      "ADMIN": 0,
+      "SPEND": 0,
+      "OPERATE": 0,
+      "RECEIVE": 0,
+      "READ": 0,
+      "UNASSESSED": 0,
+      "NWC": 0,
+      "UNDECODABLE": 0
+    }
+  }
+}

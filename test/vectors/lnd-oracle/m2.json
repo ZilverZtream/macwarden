@@ -1,0 +1,1207 @@
+{
+ "source": "LND v0.21.4-beta macaroon oracle (test/vectors/lnd-oracle/oracle)",
+ "rootKey": "macwarden-fuzz-root-key-0123456",
+ "clock": "2026-10-08T12:00:00Z",
+ "cases": [
+  {
+   "name": "extra op with empty entity",
+   "sha256": "208647bf036a5be5119d2c5f3e72f17e97c019e0c20e163e2ab0fb833eca369f",
+   "length": 175,
+   "lnd": {
+    "parse": true,
+    "verify": true,
+    "error": null,
+    "location": "lnd",
+    "identifierSha256": "c21b28aa8ccd96c786671ef073af96bbd169af37f98dbd03332eee392b451296",
+    "canonicalSha256": "208647bf036a5be5119d2c5f3e72f17e97c019e0c20e163e2ab0fb833eca369f",
+    "storageId": "0",
+    "ops": [
+     [
+      "macaroon:generate",
+      1
+     ],
+     [
+      "macaroon:read",
+      1
+     ],
+     [
+      "macaroon:write",
+      1
+     ],
+     [
+      "onchain:read",
+      1
+     ],
+     [
+      "onchain:write",
+      1
+     ],
+     [
+      "offchain:read",
+      1
+     ],
+     [
+      "offchain:write",
+      1
+     ],
+     [
+      "info:read",
+      1
+     ],
+     [
+      ":read",
+      1
+     ]
+    ],
+    "caveats": [],
+    "allow": {
+     "info:read": true,
+     "invoices:write": false,
+     "macaroon:generate": true,
+     "offchain:write": true,
+     "onchain:write": true,
+     "uri:/lnrpc.Lightning/GetInfo": false
+    }
+   }
+  },
+  {
+   "name": "extra op with no actions",
+   "sha256": "9de155f64a7c738f4885b728f913fdc60df7c85fc799062eab1baefd2f6a263d",
+   "length": 173,
+   "lnd": {
+    "parse": true,
+    "verify": true,
+    "error": null,
+    "location": "lnd",
+    "identifierSha256": "f43acead01d4668ff931222924121c7d83a762e162f84f4bd0825060cea85926",
+    "canonicalSha256": "9de155f64a7c738f4885b728f913fdc60df7c85fc799062eab1baefd2f6a263d",
+    "storageId": "0",
+    "ops": [
+     [
+      "macaroon:generate",
+      1
+     ],
+     [
+      "macaroon:read",
+      1
+     ],
+     [
+      "macaroon:write",
+      1
+     ],
+     [
+      "onchain:read",
+      1
+     ],
+     [
+      "onchain:write",
+      1
+     ],
+     [
+      "offchain:read",
+      1
+     ],
+     [
+      "offchain:write",
+      1
+     ],
+     [
+      "info:read",
+      1
+     ]
+    ],
+    "caveats": [],
+    "allow": {
+     "info:read": true,
+     "invoices:write": false,
+     "macaroon:generate": true,
+     "offchain:write": true,
+     "onchain:write": true,
+     "uri:/lnrpc.Lightning/GetInfo": false
+    }
+   }
+  },
+  {
+   "name": "extra empty op",
+   "sha256": "ea5d096382354e97131bc2dbf0c90b76564d259a757f24bca173485edf61b76d",
+   "length": 166,
+   "lnd": {
+    "parse": true,
+    "verify": true,
+    "error": null,
+    "location": "lnd",
+    "identifierSha256": "18d1ea09e53d8f0864443990e56c4e8b091e1ed85a6285f7b54591a0924e17fa",
+    "canonicalSha256": "ea5d096382354e97131bc2dbf0c90b76564d259a757f24bca173485edf61b76d",
+    "storageId": "0",
+    "ops": [
+     [
+      "macaroon:generate",
+      1
+     ],
+     [
+      "macaroon:read",
+      1
+     ],
+     [
+      "macaroon:write",
+      1
+     ],
+     [
+      "onchain:read",
+      1
+     ],
+     [
+      "onchain:write",
+      1
+     ],
+     [
+      "offchain:read",
+      1
+     ],
+     [
+      "offchain:write",
+      1
+     ],
+     [
+      "info:read",
+      1
+     ]
+    ],
+    "caveats": [],
+    "allow": {
+     "info:read": true,
+     "invoices:write": false,
+     "macaroon:generate": true,
+     "offchain:write": true,
+     "onchain:write": true,
+     "uri:/lnrpc.Lightning/GetInfo": false
+    }
+   }
+  },
+  {
+   "name": "first op with empty entity",
+   "sha256": "945bdbbc75e025d6b59b4e4c7a6be7b63fc3a8bd303387d003da3dc70d3e4d5d",
+   "length": 175,
+   "lnd": {
+    "parse": true,
+    "verify": true,
+    "error": null,
+    "location": "lnd",
+    "identifierSha256": "e02c3553f8854a5ec05d35bfcd4974e28d08cb812138d1d9ff0b01eda8008023",
+    "canonicalSha256": "945bdbbc75e025d6b59b4e4c7a6be7b63fc3a8bd303387d003da3dc70d3e4d5d",
+    "storageId": "0",
+    "ops": [
+     [
+      ":read",
+      1
+     ],
+     [
+      "macaroon:generate",
+      1
+     ],
+     [
+      "macaroon:read",
+      1
+     ],
+     [
+      "macaroon:write",
+      1
+     ],
+     [
+      "onchain:read",
+      1
+     ],
+     [
+      "onchain:write",
+      1
+     ],
+     [
+      "offchain:read",
+      1
+     ],
+     [
+      "offchain:write",
+      1
+     ],
+     [
+      "info:read",
+      1
+     ]
+    ],
+    "caveats": [],
+    "allow": {
+     "info:read": true,
+     "invoices:write": false,
+     "macaroon:generate": true,
+     "offchain:write": true,
+     "onchain:write": true,
+     "uri:/lnrpc.Lightning/GetInfo": false
+    }
+   }
+  },
+  {
+   "name": "first op with no actions (rejected)",
+   "sha256": "19a7fdf8a0d09b3de8e8412383fad0d719497481e751392ab96880b966897207",
+   "length": 173,
+   "lnd": {
+    "parse": true,
+    "verify": false,
+    "error": "no operations found in macaroon",
+    "location": "lnd",
+    "identifierSha256": "22249f57fd04d084e8e2cd5d1da50688017faf14bac526f3d92e188c295d6a27",
+    "canonicalSha256": "19a7fdf8a0d09b3de8e8412383fad0d719497481e751392ab96880b966897207",
+    "storageId": null,
+    "ops": null,
+    "caveats": [],
+    "allow": null
+   }
+  },
+  {
+   "name": "first op empty (rejected)",
+   "sha256": "501550443bdeba0609f46820786054eed660f902da8a22d11c68b71a12bc742b",
+   "length": 148,
+   "lnd": {
+    "parse": true,
+    "verify": false,
+    "error": "no operations found in macaroon",
+    "location": "lnd",
+    "identifierSha256": "9b1d1db2845df077822dc703c2ed5e5f7dbb6c5d4f2801309ad8e54eb110951b",
+    "canonicalSha256": "501550443bdeba0609f46820786054eed660f902da8a22d11c68b71a12bc742b",
+    "storageId": null,
+    "ops": null,
+    "caveats": [],
+    "allow": null
+   }
+  },
+  {
+   "name": "unknown group field",
+   "sha256": "115b9d46a96967471251d029c5d9fd8cd4c027fdb783f50acd61a79851ff6b8f",
+   "length": 166,
+   "lnd": {
+    "parse": true,
+    "verify": true,
+    "error": null,
+    "location": "lnd",
+    "identifierSha256": "24f2059ff761bae270f0a336ded0576038929cd14db4c8c73ab80a5c6b1ec1ad",
+    "canonicalSha256": "115b9d46a96967471251d029c5d9fd8cd4c027fdb783f50acd61a79851ff6b8f",
+    "storageId": "0",
+    "ops": [
+     [
+      "macaroon:generate",
+      1
+     ],
+     [
+      "macaroon:read",
+      1
+     ],
+     [
+      "macaroon:write",
+      1
+     ],
+     [
+      "onchain:read",
+      1
+     ],
+     [
+      "onchain:write",
+      1
+     ],
+     [
+      "offchain:read",
+      1
+     ],
+     [
+      "offchain:write",
+      1
+     ],
+     [
+      "info:read",
+      1
+     ]
+    ],
+    "caveats": [],
+    "allow": {
+     "info:read": true,
+     "invoices:write": false,
+     "macaroon:generate": true,
+     "offchain:write": true,
+     "onchain:write": true,
+     "uri:/lnrpc.Lightning/GetInfo": false
+    }
+   }
+  },
+  {
+   "name": "unknown group field with members",
+   "sha256": "01310e3d50808fd4da2fab8068af13d4caaf393ffc22fff011bc754fa757ad6c",
+   "length": 186,
+   "lnd": {
+    "parse": true,
+    "verify": true,
+    "error": null,
+    "location": "lnd",
+    "identifierSha256": "b2c700112e0e6fc2e010cdcab4107a87a8a4beab154f06d8feb469d312889f22",
+    "canonicalSha256": "01310e3d50808fd4da2fab8068af13d4caaf393ffc22fff011bc754fa757ad6c",
+    "storageId": "0",
+    "ops": [
+     [
+      "macaroon:generate",
+      1
+     ],
+     [
+      "macaroon:read",
+      1
+     ],
+     [
+      "macaroon:write",
+      1
+     ],
+     [
+      "onchain:read",
+      1
+     ],
+     [
+      "onchain:write",
+      1
+     ],
+     [
+      "offchain:read",
+      1
+     ],
+     [
+      "offchain:write",
+      1
+     ],
+     [
+      "info:read",
+      1
+     ]
+    ],
+    "caveats": [],
+    "allow": {
+     "info:read": true,
+     "invoices:write": false,
+     "macaroon:generate": true,
+     "offchain:write": true,
+     "onchain:write": true,
+     "uri:/lnrpc.Lightning/GetInfo": false
+    }
+   }
+  },
+  {
+   "name": "ops field sent as a group",
+   "sha256": "f28d04a18aebdf119f821a8822190e8a485919d211404e17cf4879f217a9f907",
+   "length": 177,
+   "lnd": {
+    "parse": true,
+    "verify": true,
+    "error": null,
+    "location": "lnd",
+    "identifierSha256": "dccdf1b1efc77f15df90bc8ced3d9557d5b969195c95f75abcd88a6e7bab20a9",
+    "canonicalSha256": "f28d04a18aebdf119f821a8822190e8a485919d211404e17cf4879f217a9f907",
+    "storageId": "0",
+    "ops": [
+     [
+      "macaroon:generate",
+      1
+     ],
+     [
+      "macaroon:read",
+      1
+     ],
+     [
+      "macaroon:write",
+      1
+     ],
+     [
+      "onchain:read",
+      1
+     ],
+     [
+      "onchain:write",
+      1
+     ],
+     [
+      "offchain:read",
+      1
+     ],
+     [
+      "offchain:write",
+      1
+     ],
+     [
+      "info:read",
+      1
+     ]
+    ],
+    "caveats": [],
+    "allow": {
+     "info:read": true,
+     "invoices:write": false,
+     "macaroon:generate": true,
+     "offchain:write": true,
+     "onchain:write": true,
+     "uri:/lnrpc.Lightning/GetInfo": false
+    }
+   }
+  },
+  {
+   "name": "group inside an op",
+   "sha256": "4519d6fa0b328a6a56e3b7faa58f9f99b5f68d38ac316367e43381a4e6a9d8a3",
+   "length": 187,
+   "lnd": {
+    "parse": true,
+    "verify": true,
+    "error": null,
+    "location": "lnd",
+    "identifierSha256": "748320418f96520c3bc809020917aa7ae2c619629eee5b1eb798538e980903d7",
+    "canonicalSha256": "4519d6fa0b328a6a56e3b7faa58f9f99b5f68d38ac316367e43381a4e6a9d8a3",
+    "storageId": "0",
+    "ops": [
+     [
+      "macaroon:generate",
+      1
+     ],
+     [
+      "macaroon:read",
+      1
+     ],
+     [
+      "macaroon:write",
+      1
+     ],
+     [
+      "onchain:read",
+      1
+     ],
+     [
+      "onchain:write",
+      1
+     ],
+     [
+      "offchain:read",
+      1
+     ],
+     [
+      "offchain:write",
+      1
+     ],
+     [
+      "info:read",
+      1
+     ],
+     [
+      "onchain:write",
+      1
+     ]
+    ],
+    "caveats": [],
+    "allow": {
+     "info:read": true,
+     "invoices:write": false,
+     "macaroon:generate": true,
+     "offchain:write": true,
+     "onchain:write": true,
+     "uri:/lnrpc.Lightning/GetInfo": false
+    }
+   }
+  },
+  {
+   "name": "groups nested 10001 deep",
+   "sha256": "f4c1c365d90bae6e076555a47d4acc0e4fbcf1a6450ee3bdd06cf1d397cc9e05",
+   "length": 20168,
+   "lnd": {
+    "parse": true,
+    "verify": true,
+    "error": null,
+    "location": "lnd",
+    "identifierSha256": "54b9fd555bc62558311a4daf94ebd799def8c407df0537e99d1e8d3e9a62fee7",
+    "canonicalSha256": "f4c1c365d90bae6e076555a47d4acc0e4fbcf1a6450ee3bdd06cf1d397cc9e05",
+    "storageId": "0",
+    "ops": [
+     [
+      "macaroon:generate",
+      1
+     ],
+     [
+      "macaroon:read",
+      1
+     ],
+     [
+      "macaroon:write",
+      1
+     ],
+     [
+      "onchain:read",
+      1
+     ],
+     [
+      "onchain:write",
+      1
+     ],
+     [
+      "offchain:read",
+      1
+     ],
+     [
+      "offchain:write",
+      1
+     ],
+     [
+      "info:read",
+      1
+     ]
+    ],
+    "caveats": [],
+    "allow": {
+     "info:read": true,
+     "invoices:write": false,
+     "macaroon:generate": true,
+     "offchain:write": true,
+     "onchain:write": true,
+     "uri:/lnrpc.Lightning/GetInfo": false
+    }
+   }
+  },
+  {
+   "name": "groups nested 10002 deep (rejected)",
+   "sha256": "636faa4599ba31acdf2804614386f67f940a7758d2dcd337b094ca5caa4e8810",
+   "length": 20170,
+   "lnd": {
+    "parse": true,
+    "verify": false,
+    "error": "cannot unmarshal macaroon id: proto: cannot parse invalid wire-format data",
+    "location": "lnd",
+    "identifierSha256": "7434d70aa75dcb28c57049f94e9742dee7432101d5c2290074675db0ce3acb4a",
+    "canonicalSha256": "636faa4599ba31acdf2804614386f67f940a7758d2dcd337b094ca5caa4e8810",
+    "storageId": null,
+    "ops": null,
+    "caveats": [],
+    "allow": null
+   }
+  },
+  {
+   "name": "unterminated group (rejected)",
+   "sha256": "e0dc3fb67a914594fd972cc6c286a4d9af489bd7f95d2dbdcda50e0e0953a884",
+   "length": 165,
+   "lnd": {
+    "parse": true,
+    "verify": false,
+    "error": "cannot unmarshal macaroon id: proto: cannot parse invalid wire-format data",
+    "location": "lnd",
+    "identifierSha256": "8d355737c2c501086e1f39bdff4d26ad68e1d54a48e06e0e9c6fad7d761a5bda",
+    "canonicalSha256": "e0dc3fb67a914594fd972cc6c286a4d9af489bd7f95d2dbdcda50e0e0953a884",
+    "storageId": null,
+    "ops": null,
+    "caveats": [],
+    "allow": null
+   }
+  },
+  {
+   "name": "mismatched end group (rejected)",
+   "sha256": "630fce1b14757f28dabbdc100fa6ad9e289771b4119beb981bb8b5a9abcb207e",
+   "length": 166,
+   "lnd": {
+    "parse": true,
+    "verify": false,
+    "error": "cannot unmarshal macaroon id: proto: cannot parse invalid wire-format data",
+    "location": "lnd",
+    "identifierSha256": "1fb93419c4bd28a9a6b2edb807c43c7cea2194a62994a6611df4616c1547afaa",
+    "canonicalSha256": "630fce1b14757f28dabbdc100fa6ad9e289771b4119beb981bb8b5a9abcb207e",
+    "storageId": null,
+    "ops": null,
+    "caveats": [],
+    "allow": null
+   }
+  },
+  {
+   "name": "lone end group (rejected)",
+   "sha256": "8b9e9e3cdc93fbf98bfc977851325d99005ea268a781de730310bff6b8dd9eb6",
+   "length": 165,
+   "lnd": {
+    "parse": true,
+    "verify": false,
+    "error": "cannot unmarshal macaroon id: proto: cannot parse invalid wire-format data",
+    "location": "lnd",
+    "identifierSha256": "5abc79111e85abb02b3953b292e70384a8da598d92a87f1bbdfab00129bc377d",
+    "canonicalSha256": "8b9e9e3cdc93fbf98bfc977851325d99005ea268a781de730310bff6b8dd9eb6",
+    "storageId": null,
+    "ops": null,
+    "caveats": [],
+    "allow": null
+   }
+  },
+  {
+   "name": "group member field 2^31 (rejected)",
+   "sha256": "adc6869d54aee1f1d15c2bf8d72f0fa7bf5a1b5eb0dd0b1181c9029ac177a882",
+   "length": 173,
+   "lnd": {
+    "parse": true,
+    "verify": false,
+    "error": "cannot unmarshal macaroon id: proto: cannot parse invalid wire-format data",
+    "location": "lnd",
+    "identifierSha256": "ec93c7eb4a7b8f6b65b58e502b3105c12927149eccd87fe2b430c2ffd5101ad1",
+    "canonicalSha256": "adc6869d54aee1f1d15c2bf8d72f0fa7bf5a1b5eb0dd0b1181c9029ac177a882",
+    "storageId": null,
+    "ops": null,
+    "caveats": [],
+    "allow": null
+   }
+  },
+  {
+   "name": "non-minimal protobuf tag",
+   "sha256": "5fe260ad1b1add5313e4cb01f79b3ec3107a7f9f155c55d364f05eee851dd591",
+   "length": 167,
+   "lnd": {
+    "parse": true,
+    "verify": true,
+    "error": null,
+    "location": "lnd",
+    "identifierSha256": "f1e70117584fe016ea910879cfa1762ac1be93da7475b1bba76bb323c24c5c61",
+    "canonicalSha256": "5fe260ad1b1add5313e4cb01f79b3ec3107a7f9f155c55d364f05eee851dd591",
+    "storageId": "0",
+    "ops": [
+     [
+      "macaroon:generate",
+      1
+     ],
+     [
+      "macaroon:read",
+      1
+     ],
+     [
+      "macaroon:write",
+      1
+     ],
+     [
+      "onchain:read",
+      1
+     ],
+     [
+      "onchain:write",
+      1
+     ],
+     [
+      "offchain:read",
+      1
+     ],
+     [
+      "offchain:write",
+      1
+     ],
+     [
+      "info:read",
+      1
+     ]
+    ],
+    "caveats": [],
+    "allow": {
+     "info:read": true,
+     "invoices:write": false,
+     "macaroon:generate": true,
+     "offchain:write": true,
+     "onchain:write": true,
+     "uri:/lnrpc.Lightning/GetInfo": false
+    }
+   }
+  },
+  {
+   "name": "protobuf tag padded to 10 bytes",
+   "sha256": "06e55623a02b6afcfd54501f6b517d07286eea63284195ab8201d981ed8eb3a4",
+   "length": 176,
+   "lnd": {
+    "parse": true,
+    "verify": true,
+    "error": null,
+    "location": "lnd",
+    "identifierSha256": "163eb7d5b598043b3983a85054dbc48aaa97b1fd2604e2f66b93bb11fee57045",
+    "canonicalSha256": "06e55623a02b6afcfd54501f6b517d07286eea63284195ab8201d981ed8eb3a4",
+    "storageId": "0",
+    "ops": [
+     [
+      "macaroon:generate",
+      1
+     ],
+     [
+      "macaroon:read",
+      1
+     ],
+     [
+      "macaroon:write",
+      1
+     ],
+     [
+      "onchain:read",
+      1
+     ],
+     [
+      "onchain:write",
+      1
+     ],
+     [
+      "offchain:read",
+      1
+     ],
+     [
+      "offchain:write",
+      1
+     ],
+     [
+      "info:read",
+      1
+     ]
+    ],
+    "caveats": [],
+    "allow": {
+     "info:read": true,
+     "invoices:write": false,
+     "macaroon:generate": true,
+     "offchain:write": true,
+     "onchain:write": true,
+     "uri:/lnrpc.Lightning/GetInfo": false
+    }
+   }
+  },
+  {
+   "name": "extra op with 17-byte entity",
+   "sha256": "e810c9f50a51cdfdd64cb6fdff374b6bd689dd4fc1a2a7583c6d5af30c221e4a",
+   "length": 192,
+   "lnd": {
+    "parse": true,
+    "verify": true,
+    "error": null,
+    "location": "lnd",
+    "identifierSha256": "ccb5ffd3cb018b3046fbe81695e7c070a9d382fefd4bbe579b7f6e882f833b5a",
+    "canonicalSha256": "e810c9f50a51cdfdd64cb6fdff374b6bd689dd4fc1a2a7583c6d5af30c221e4a",
+    "storageId": "0",
+    "ops": [
+     [
+      "macaroon:generate",
+      1
+     ],
+     [
+      "macaroon:read",
+      1
+     ],
+     [
+      "macaroon:write",
+      1
+     ],
+     [
+      "onchain:read",
+      1
+     ],
+     [
+      "onchain:write",
+      1
+     ],
+     [
+      "offchain:read",
+      1
+     ],
+     [
+      "offchain:write",
+      1
+     ],
+     [
+      "info:read",
+      1
+     ],
+     [
+      "xxxxxxxxxxxxxxxxx:read",
+      1
+     ]
+    ],
+    "caveats": [],
+    "allow": {
+     "info:read": true,
+     "invoices:write": false,
+     "macaroon:generate": true,
+     "offchain:write": true,
+     "onchain:write": true,
+     "uri:/lnrpc.Lightning/GetInfo": false
+    }
+   }
+  },
+  {
+   "name": "extra op with 300-byte action",
+   "sha256": "46f8bfd881034af05f691af8ffd0be609742a73bc7307c7717daf2a5003cd9c3",
+   "length": 477,
+   "lnd": {
+    "parse": true,
+    "verify": true,
+    "error": null,
+    "location": "lnd",
+    "identifierSha256": "c0c012e5c300ab289b7785d04c17a7b8e2c6e8752ee67443d5d19b0b1078cf91",
+    "canonicalSha256": "46f8bfd881034af05f691af8ffd0be609742a73bc7307c7717daf2a5003cd9c3",
+    "storageId": "0",
+    "ops": [
+     [
+      "macaroon:generate",
+      1
+     ],
+     [
+      "macaroon:read",
+      1
+     ],
+     [
+      "macaroon:write",
+      1
+     ],
+     [
+      "onchain:read",
+      1
+     ],
+     [
+      "onchain:write",
+      1
+     ],
+     [
+      "offchain:read",
+      1
+     ],
+     [
+      "offchain:write",
+      1
+     ],
+     [
+      "info:read",
+      1
+     ],
+     [
+      "sha256:9614baed9ad1c0f08b0e32b8622ee5edd0f2dfcea14a71006bb2005b3f4f8d78:305",
+      1
+     ]
+    ],
+    "caveats": [],
+    "allow": {
+     "info:read": true,
+     "invoices:write": false,
+     "macaroon:generate": true,
+     "offchain:write": true,
+     "onchain:write": true,
+     "uri:/lnrpc.Lightning/GetInfo": false
+    }
+   }
+  },
+  {
+   "name": "257 ops",
+   "sha256": "d2ca90253be29db0264189e7df0ebd24da01910996e60cd0e5a4713996cb0e8a",
+   "length": 3763,
+   "lnd": {
+    "parse": true,
+    "verify": true,
+    "error": null,
+    "location": "lnd",
+    "identifierSha256": "00ae82eac5212c1f093bf8881037efbc38233135c8b92cfbab416f3d31fa8261",
+    "canonicalSha256": "d2ca90253be29db0264189e7df0ebd24da01910996e60cd0e5a4713996cb0e8a",
+    "storageId": "0",
+    "ops": [
+     [
+      "macaroon:generate",
+      1
+     ],
+     [
+      "macaroon:read",
+      1
+     ],
+     [
+      "macaroon:write",
+      1
+     ],
+     [
+      "onchain:read",
+      1
+     ],
+     [
+      "onchain:write",
+      1
+     ],
+     [
+      "offchain:read",
+      1
+     ],
+     [
+      "offchain:write",
+      1
+     ],
+     [
+      "info:read",
+      258
+     ]
+    ],
+    "caveats": [],
+    "allow": {
+     "info:read": true,
+     "invoices:write": false,
+     "macaroon:generate": true,
+     "offchain:write": true,
+     "onchain:write": true,
+     "uri:/lnrpc.Lightning/GetInfo": false
+    }
+   }
+  },
+  {
+   "name": "600 actions in one op",
+   "sha256": "7962aac6cc9a24988a0937f329c24af03fbf3871f47c37e8fdb76172ecc2dd8b",
+   "length": 3774,
+   "lnd": {
+    "parse": true,
+    "verify": true,
+    "error": null,
+    "location": "lnd",
+    "identifierSha256": "41150f51d70a2a91a4ebb3b9e848c8aa4fe3c43b783004d44d9bb1e18be549f7",
+    "canonicalSha256": "7962aac6cc9a24988a0937f329c24af03fbf3871f47c37e8fdb76172ecc2dd8b",
+    "storageId": "0",
+    "ops": [
+     [
+      "macaroon:generate",
+      1
+     ],
+     [
+      "macaroon:read",
+      1
+     ],
+     [
+      "macaroon:write",
+      1
+     ],
+     [
+      "onchain:read",
+      1
+     ],
+     [
+      "onchain:write",
+      1
+     ],
+     [
+      "offchain:read",
+      1
+     ],
+     [
+      "offchain:write",
+      1
+     ],
+     [
+      "info:read",
+      601
+     ]
+    ],
+    "caveats": [],
+    "allow": {
+     "info:read": true,
+     "invoices:write": false,
+     "macaroon:generate": true,
+     "offchain:write": true,
+     "onchain:write": true,
+     "uri:/lnrpc.Lightning/GetInfo": false
+    }
+   }
+  },
+  {
+   "name": "2000 ops (exceeds 1,024 permissions)",
+   "sha256": "ce91da635934ea922ece8fdc68b695b2aae17c006be86253ac8c6af945dfcc24",
+   "length": 28166,
+   "lnd": {
+    "parse": true,
+    "verify": true,
+    "error": null,
+    "location": "lnd",
+    "identifierSha256": "39e1ffd8a8a184d528ddd37aa742491290408a6232463c3f52459c9cf933d63d",
+    "canonicalSha256": "ce91da635934ea922ece8fdc68b695b2aae17c006be86253ac8c6af945dfcc24",
+    "storageId": "0",
+    "ops": [
+     [
+      "macaroon:generate",
+      1
+     ],
+     [
+      "macaroon:read",
+      1
+     ],
+     [
+      "macaroon:write",
+      1
+     ],
+     [
+      "onchain:read",
+      1
+     ],
+     [
+      "onchain:write",
+      1
+     ],
+     [
+      "offchain:read",
+      1
+     ],
+     [
+      "offchain:write",
+      1
+     ],
+     [
+      "info:read",
+      2001
+     ]
+    ],
+    "caveats": [],
+    "allow": {
+     "info:read": true,
+     "invoices:write": false,
+     "macaroon:generate": true,
+     "offchain:write": true,
+     "onchain:write": true,
+     "uri:/lnrpc.Lightning/GetInfo": false
+    }
+   }
+  },
+  {
+   "name": "admin after 1,024 permissions",
+   "sha256": "bb838d971dfbae88ed0aeb851287843a41c0a63c5308a6095d10cf9b63fefc2b",
+   "length": 6242,
+   "lnd": {
+    "parse": true,
+    "verify": true,
+    "error": null,
+    "location": "lnd",
+    "identifierSha256": "e38b976885c549175fe0a1d75b986e1ed758f7626f8c2cfa39bcf84166cfbce7",
+    "canonicalSha256": "bb838d971dfbae88ed0aeb851287843a41c0a63c5308a6095d10cf9b63fefc2b",
+    "storageId": "0",
+    "ops": [
+     [
+      "info:read",
+      1024
+     ],
+     [
+      "macaroon:generate",
+      1
+     ]
+    ],
+    "caveats": [],
+    "allow": {
+     "info:read": true,
+     "invoices:write": false,
+     "macaroon:generate": true,
+     "offchain:write": false,
+     "onchain:write": false,
+     "uri:/lnrpc.Lightning/GetInfo": false
+    }
+   }
+  },
+  {
+   "name": "admin after 64 KiB of permission text",
+   "sha256": "2b7bc34e6cf3c4d7a6c2a59dc8248d148e314849f9cdb9ae2948359cb66dc80e",
+   "length": 65631,
+   "lnd": {
+    "parse": true,
+    "verify": true,
+    "error": null,
+    "location": "lnd",
+    "identifierSha256": "073ff7e9df55bc75176f866fdce70685cca87591f84d22b3bb8aa019033e7bb4",
+    "canonicalSha256": "2b7bc34e6cf3c4d7a6c2a59dc8248d148e314849f9cdb9ae2948359cb66dc80e",
+    "storageId": "0",
+    "ops": [
+     [
+      "sha256:a81a785709cc12983ba21aa8fee3e1e1f0710c4ac51c8a1da085bec38d293ddd:65535",
+      1
+     ],
+     [
+      "offchain:write",
+      1
+     ]
+    ],
+    "caveats": [],
+    "allow": {
+     "info:read": false,
+     "invoices:write": false,
+     "macaroon:generate": false,
+     "offchain:write": true,
+     "onchain:write": false,
+     "uri:/lnrpc.Lightning/GetInfo": false
+    }
+   }
+  },
+  {
+   "name": "invalid UTF-8 in an op beyond the bounds (rejected)",
+   "sha256": "12945157784e71f14225256e1c44c10fbc7cb1d15c59d2f798bb383197c8c1de",
+   "length": 6688,
+   "lnd": {
+    "parse": true,
+    "verify": false,
+    "error": "cannot unmarshal macaroon id: string field contains invalid UTF-8",
+    "location": "lnd",
+    "identifierSha256": "591b06ffdbc9bd9ce8c53713e607acb7e64b7e5842e6928cf3d415f558d4b6a2",
+    "canonicalSha256": "12945157784e71f14225256e1c44c10fbc7cb1d15c59d2f798bb383197c8c1de",
+    "storageId": null,
+    "ops": null,
+    "caveats": [],
+    "allow": null
+   }
+  },
+  {
+   "name": "4097 caveats",
+   "sha256": "b0db4cf5686a8b2339c99c05c5b3704e2fe32bed71384786a74424604d5b5246",
+   "length": 143559,
+   "lnd": {
+    "parse": true,
+    "verify": true,
+    "error": null,
+    "location": "lnd",
+    "identifierSha256": "285efc48785e247b8d263400444d6d8c2c7932e38dd012eba480a0bbf134e04b",
+    "canonicalSha256": "b0db4cf5686a8b2339c99c05c5b3704e2fe32bed71384786a74424604d5b5246",
+    "storageId": "0",
+    "ops": [
+     [
+      "macaroon:generate",
+      1
+     ],
+     [
+      "macaroon:read",
+      1
+     ],
+     [
+      "macaroon:write",
+      1
+     ],
+     [
+      "onchain:read",
+      1
+     ],
+     [
+      "onchain:write",
+      1
+     ],
+     [
+      "offchain:read",
+      1
+     ],
+     [
+      "offchain:write",
+      1
+     ],
+     [
+      "info:read",
+      1
+     ]
+    ],
+    "caveats": [
+     [
+      {
+       "location": "",
+       "id": "time-before 2030-01-01T00:00:00Z",
+       "vidLength": 0
+      },
+      4097
+     ]
+    ],
+    "allow": {
+     "info:read": true,
+     "invoices:write": false,
+     "macaroon:generate": true,
+     "offchain:write": true,
+     "onchain:write": true,
+     "uri:/lnrpc.Lightning/GetInfo": false
+    }
+   }
+  }
+ ]
+}

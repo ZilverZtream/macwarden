@@ -1,0 +1,4 @@
+* text=auto eol=lf
+*.macaroon binary
+test/vectors/** -text
+test/scan-fixtures/** -text

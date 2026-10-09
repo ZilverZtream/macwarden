@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "macwarden inspect --json output",
+  "description": "The single JSON document `macwarden inspect --json` prints to stdout. Normative source: docs/spec.md, Global conventions > Output and Commands > 1. inspect. A Nostr Wallet Connect (NIP-47) input yields the nwcResult shape; its connection secret never appears.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "command", "ok", "warnings", "result", "error"],
+  "properties": {
+    "schema": { "const": 1 },
+    "command": { "const": "inspect" },
+    "ok": { "type": "boolean" },
+    "warnings": {
+      "type": "array",
+      "items": { "enum": ["unsafe-arg"] },
+      "uniqueItems": true
+    },
+    "result": {
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/result" }, { "$ref": "#/$defs/nwcResult" }, { "$ref": "#/$defs/help" }]
+    },
+    "error": {
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/error" }]
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "ok": { "const": true } }, "required": ["ok"] },
+      "then": {
+        "properties": {
+          "result": { "oneOf": [{ "$ref": "#/$defs/result" }, { "$ref": "#/$defs/nwcResult" }, { "$ref": "#/$defs/help" }] },
+          "error": { "type": "null" }
+        }
+      },
+      "else": {
+        "properties": {
+          "result": { "type": "null" },
+          "error": { "$ref": "#/$defs/error" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "help": {
+      "description": "macwarden inspect --help --json: the command synopsis lines (docs/spec.md, Output > Help).",
+      "type": "object", "additionalProperties": false, "required": ["usage"],
+      "properties": { "usage": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^macwarden inspect " } } }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "step", "message"],
+      "properties": {
+        "code": { "enum": [2, 3, 8] },
+        "step": {
+          "description": "null for exit 2; the input or decoding stage for exit 3; internal for exit 8.",
+          "oneOf": [
+            { "type": "null" },
+            {
+              "enum": [
+                "input-read",
+                "input-form",
+                "v2-header",
+                "packet",
+                "identifier-version",
+                "identifier-proto",
+                "identifier-limits",
+                "identifier-root-key-id",
+                "nwc-uri",
+                "nwc-wallet-pubkey",
+                "nwc-relay",
+                "nwc-secret",
+                "nwc-lud16",
+                "internal"
+              ]
+            }
+          ]
+        },
+        "message": { "type": "string" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "code": { "const": 2 } } },
+          "then": { "properties": { "step": { "type": "null" } } }
+        },
+        {
+          "if": { "properties": { "code": { "const": 3 } } },
+          "then": { "properties": { "step": { "type": "string", "not": { "const": "internal" } } } }
+        },
+        {
+          "if": { "properties": { "code": { "const": 8 } } },
+          "then": { "properties": { "step": { "const": "internal" } } }
+        }
+      ]
+    },
+    "rootKeyId": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,19})$",
+      "description": "uint64 as a canonical decimal string (range up to 18446744073709551615 is enforced by the decoder)."
+    },
+    "fingerprint": { "type": "string", "pattern": "^fp:[0-9a-f]{16}$" },
+    "grade": { "enum": ["ADMIN", "SPEND", "OPERATE", "RECEIVE", "READ", "UNASSESSED"] },
+    "macaroonWarning": {
+      "enum": [
+        "root-key-0",
+        "trailing-bytes",
+        "bad-time-before",
+        "identifier-exceeds-bounds",
+        "caveats-exceed-bounds",
+        "unassessed-uri",
+        "unassessed-permission",
+        "no-permissions",
+        "preimage-exposure"
+      ]
+    },
+    "caveat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "value"],
+      "properties": {
+        "type": { "enum": ["time-before", "ipaddr", "iprange", "lnd-custom", "third-party", "unknown"] },
+        "value": { "type": "string" },
+        "expired": { "type": "boolean" }
+      },
+      "if": { "properties": { "type": { "const": "time-before" } } },
+      "else": { "properties": { "expired": false } }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fingerprint",
+        "location",
+        "rootKeyId",
+        "permissions",
+        "caveats",
+        "grade",
+        "reasons",
+        "warnings",
+        "unassessed",
+        "snapshot"
+      ],
+      "properties": {
+        "fingerprint": { "$ref": "#/$defs/fingerprint" },
+        "location": { "type": ["string", "null"] },
+        "rootKeyId": { "$ref": "#/$defs/rootKeyId" },
+        "permissions": { "type": "array", "items": { "type": "string" } },
+        "caveats": { "type": "array", "items": { "$ref": "#/$defs/caveat" } },
+        "grade": { "$ref": "#/$defs/grade" },
+        "reasons": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "warnings": { "type": "array", "items": { "$ref": "#/$defs/macaroonWarning" }, "uniqueItems": true },
+        "unassessed": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "snapshot": { "type": "string", "minLength": 1, "description": "LND version the bundled permission snapshot came from, e.g. 0.21.4-beta." }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "grade": { "const": "UNASSESSED" } } },
+          "then": { "properties": { "reasons": { "type": "array", "maxItems": 0 } } }
+        }
+      ]
+    },
+    "pubkey": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "nwcResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "NIP-47 connection facts. The grade is always SPEND: permissions and budget are set by the wallet service and are not visible.",
+      "required": ["kind", "fingerprint", "walletPubkey", "clientPubkey", "relays", "lud16", "grade", "reasons", "warnings"],
+      "properties": {
+        "kind": { "const": "nwc" },
+        "fingerprint": { "$ref": "#/$defs/fingerprint" },
+        "walletPubkey": { "$ref": "#/$defs/pubkey" },
+        "clientPubkey": { "$ref": "#/$defs/pubkey", "description": "x-only secp256k1 public key derived from the connection secret; wallet services list the connection under it." },
+        "relays": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "type": "string", "pattern": "^wss?://" } },
+        "lud16": { "type": ["string", "null"] },
+        "grade": { "const": "SPEND" },
+        "reasons": { "type": "array", "minItems": 1, "maxItems": 1, "items": { "const": "nwc-wallet-side-limits" } },
+        "warnings": { "type": "array", "items": { "enum": ["relay-details-removed"] }, "uniqueItems": true }
+      }
+    }
+  }
+}

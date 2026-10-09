@@ -1,0 +1,31 @@
+{
+  "source": "test/vectors/manifest.json and stored lncli printmacaroon JSON; NWC secret is 32 bytes of 0x11",
+  "files": [
+    { "path": "base64.env", "dropped": 0, "findings": [{ "line": 1, "column": 5, "kind": "macaroon-base64", "fingerprint": "fp:fab2bae47e567b11", "grade": "RECEIVE" }] },
+    { "path": "base64.json", "dropped": 0, "findings": [{ "line": 1, "column": 7, "kind": "macaroon-base64", "fingerprint": "fp:fab2bae47e567b11", "grade": "RECEIVE" }] },
+    { "path": "base64.yml", "dropped": 0, "findings": [{ "line": 1, "column": 6, "kind": "macaroon-base64", "fingerprint": "fp:fab2bae47e567b11", "grade": "RECEIVE" }] },
+    { "path": "dropped-invalid.env", "dropped": 1, "findings": [] },
+    { "path": "dropped-missing.env", "dropped": 1, "findings": [] },
+    { "path": "hex.env", "dropped": 0, "findings": [{ "line": 2, "column": 14, "kind": "macaroon-hex", "fingerprint": "fp:4e7f80baa57e6e1d", "grade": "READ" }] },
+    { "path": "hex.json", "dropped": 0, "findings": [{ "line": 1, "column": 9, "kind": "macaroon-hex", "fingerprint": "fp:4e7f80baa57e6e1d", "grade": "READ" }] },
+    { "path": "hex.yml", "dropped": 0, "findings": [{ "line": 1, "column": 13, "kind": "macaroon-hex", "fingerprint": "fp:4e7f80baa57e6e1d", "grade": "READ" }] },
+    { "path": "lndconnect.env", "dropped": 0, "findings": [{ "line": 1, "column": 6, "kind": "lndconnect", "fingerprint": "fp:19cac7566efaa785", "grade": "SPEND" }] },
+    { "path": "lndconnect.json", "dropped": 0, "findings": [{ "line": 1, "column": 9, "kind": "lndconnect", "fingerprint": "fp:19cac7566efaa785", "grade": "SPEND" }] },
+    { "path": "lndconnect.yml", "dropped": 0, "findings": [{ "line": 1, "column": 12, "kind": "lndconnect", "fingerprint": "fp:19cac7566efaa785", "grade": "SPEND" }] },
+    { "path": "lookalike.txt", "dropped": 0, "findings": [] },
+    { "path": "nwc.env", "dropped": 0, "findings": [{ "line": 1, "column": 5, "kind": "nwc", "fingerprint": "fp:02d449a31fbb267c", "grade": null }] },
+    { "path": "nwc.json", "dropped": 0, "findings": [{ "line": 1, "column": 9, "kind": "nwc", "fingerprint": "fp:02d449a31fbb267c", "grade": null }] },
+    { "path": "nwc.yml", "dropped": 0, "findings": [{ "line": 1, "column": 7, "kind": "nwc", "fingerprint": "fp:02d449a31fbb267c", "grade": null }] },
+    { "path": "wrapped-base64.txt", "dropped": 0, "findings": [{ "line": 1, "column": 1, "kind": "undecodable-candidate", "fingerprint": "fp:b6fc5597770d32da", "grade": null }] },
+    { "path": "wrapped-hex.txt", "dropped": 0, "findings": [{ "line": 1, "column": 1, "kind": "undecodable-candidate", "fingerprint": "fp:a535b349376dea86", "grade": null }] }
+  ],
+  "summary": {
+    "filesScanned": 17,
+    "filesSkipped": 0,
+    "dropped": 2,
+    "ignored": 0,
+    "findings": 14,
+    "distinct": 6,
+    "byGrade": { "ADMIN": 0, "SPEND": 3, "OPERATE": 0, "RECEIVE": 3, "READ": 3, "UNASSESSED": 0, "NWC": 3, "UNDECODABLE": 2 }
+  }
+}

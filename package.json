@@ -1,0 +1,71 @@
+{
+  "name": "macwarden",
+  "version": "1.1.1",
+  "description": "Lightning credential hygiene for LND: inspect, scan (incl. git history), inventory, bake, revoke, rotate and attenuate macaroons",
+  "keywords": [
+    "lightning",
+    "lnd",
+    "macaroon",
+    "bitcoin",
+    "secret-scanning",
+    "credentials",
+    "nwc",
+    "security"
+  ],
+  "homepage": "https://github.com/ZilverZtream/macwarden#readme",
+  "bugs": {
+    "url": "https://github.com/ZilverZtream/macwarden/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ZilverZtream/macwarden.git"
+  },
+  "type": "module",
+  "bin": {
+    "macwarden": "dist/bin.js"
+  },
+  "files": [
+    "dist/",
+    "schemas/output/",
+    "rules/gitleaks.toml",
+    "rules/trufflehog.yaml",
+    "README.md",
+    "SECURITY.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "publishConfig": {
+    "provenance": true
+  },
+  "engines": {
+    "node": "^22.23.2 || ^24.18.1 || >=26.5.1"
+  },
+  "license": "MIT",
+  "scripts": {
+    "pretest": "npm run build",
+    "test": "vitest run --project product",
+    "test:harness": "vitest run --project harness-docs",
+    "test:related": "vitest related --run",
+    "test:full": "node scripts/full-validation.mjs",
+    "lint": "eslint .",
+    "prebuild": "node scripts/build.mjs",
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.test.json",
+    "postbuild": "node scripts/build.mjs --copy-permissions",
+    "prepack": "npm run build",
+    "test:oracle": "vitest run --config vitest.oracle.config.ts",
+    "test:gitleaks": "vitest run --config vitest.gitleaks.config.ts",
+    "fixture:up": "node test/fixture/fixture.mjs up",
+    "fixture:down": "node test/fixture/fixture.mjs down"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3",
+    "vitest": "5.0.3",
+    "vite": "8.3.2",
+    "eslint": "10.11.0",
+    "@eslint/js": "10.0.1",
+    "typescript-eslint": "8.71.0",
+    "@types/node": "22.20.5",
+    "globals": "17.13.0",
+    "ajv": "8.20.0"
+  }
+}

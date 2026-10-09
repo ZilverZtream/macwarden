@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "location": "lnd",
+  "root_key_id": "0",
+  "permissions": [
+    "signer:read"
+  ],
+  "caveats": [
+    "time-before 2030-01-01T00:00:00.123456789Z"
+  ]
+}

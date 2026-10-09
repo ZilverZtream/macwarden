@@ -1,0 +1,912 @@
+{
+ "source": "LND v0.21.4-beta macaroon oracle (test/vectors/lnd-oracle/oracle)",
+ "rootKey": "macwarden-fuzz-root-key-0123456",
+ "clock": "2026-10-08T12:00:00Z",
+ "cases": [
+  {
+   "name": "canonical",
+   "sha256": "102d13641b21d5ee2190f1410d1696fc8279ea1d1fe11bc46bf9a707bfbe1c58",
+   "length": 194,
+   "lnd": {
+    "parse": true,
+    "verify": true,
+    "error": null,
+    "location": "lnd",
+    "identifierSha256": "0ea282d754e3f7b4304311a0fe9306c3130a9e2d0ad1cea0782dc5af19fd9197",
+    "canonicalSha256": "102d13641b21d5ee2190f1410d1696fc8279ea1d1fe11bc46bf9a707bfbe1c58",
+    "storageId": "1234",
+    "ops": [
+     [
+      "onchain:read",
+      1
+     ],
+     [
+      "onchain:write",
+      1
+     ],
+     [
+      "offchain:read",
+      1
+     ],
+     [
+      "offchain:write",
+      1
+     ],
+     [
+      "macaroon:generate",
+      1
+     ]
+    ],
+    "caveats": [
+     [
+      {
+       "location": "",
+       "id": "time-before 2030-01-01T00:00:00Z",
+       "vidLength": 0
+      },
+      1
+     ],
+     [
+      {
+       "location": "",
+       "id": "ipaddr 127.0.0.1",
+       "vidLength": 0
+      },
+      1
+     ]
+    ],
+    "allow": {
+     "info:read": false,
+     "invoices:write": false,
+     "macaroon:generate": true,
+     "offchain:write": true,
+     "onchain:write": true,
+     "uri:/lnrpc.Lightning/GetInfo": false
+    }
+   }
+  },
+  {
+   "name": "identifier length non-minimal",
+   "sha256": "5c01fffbab992af4b66e919834d86b6bfbc36ee25f504d4401a6d2e76d406278",
+   "length": 195,
+   "lnd": {
+    "parse": true,
+    "verify": true,
+    "error": null,
+    "location": "lnd",
+    "identifierSha256": "0ea282d754e3f7b4304311a0fe9306c3130a9e2d0ad1cea0782dc5af19fd9197",
+    "canonicalSha256": "102d13641b21d5ee2190f1410d1696fc8279ea1d1fe11bc46bf9a707bfbe1c58",
+    "storageId": "1234",
+    "ops": [
+     [
+      "onchain:read",
+      1
+     ],
+     [
+      "onchain:write",
+      1
+     ],
+     [
+      "offchain:read",
+      1
+     ],
+     [
+      "offchain:write",
+      1
+     ],
+     [
+      "macaroon:generate",
+      1
+     ]
+    ],
+    "caveats": [
+     [
+      {
+       "location": "",
+       "id": "time-before 2030-01-01T00:00:00Z",
+       "vidLength": 0
+      },
+      1
+     ],
+     [
+      {
+       "location": "",
+       "id": "ipaddr 127.0.0.1",
+       "vidLength": 0
+      },
+      1
+     ]
+    ],
+    "allow": {
+     "info:read": false,
+     "invoices:write": false,
+     "macaroon:generate": true,
+     "offchain:write": true,
+     "onchain:write": true,
+     "uri:/lnrpc.Lightning/GetInfo": false
+    }
+   }
+  },
+  {
+   "name": "all lengths non-minimal",
+   "sha256": "4a0c9ac7fac9ffa42b07368e68a4a6055cb550a973a3d44683b9bf83c6e631d6",
+   "length": 199,
+   "lnd": {
+    "parse": true,
+    "verify": true,
+    "error": null,
+    "location": "lnd",
+    "identifierSha256": "0ea282d754e3f7b4304311a0fe9306c3130a9e2d0ad1cea0782dc5af19fd9197",
+    "canonicalSha256": "102d13641b21d5ee2190f1410d1696fc8279ea1d1fe11bc46bf9a707bfbe1c58",
+    "storageId": "1234",
+    "ops": [
+     [
+      "onchain:read",
+      1
+     ],
+     [
+      "onchain:write",
+      1
+     ],
+     [
+      "offchain:read",
+      1
+     ],
+     [
+      "offchain:write",
+      1
+     ],
+     [
+      "macaroon:generate",
+      1
+     ]
+    ],
+    "caveats": [
+     [
+      {
+       "location": "",
+       "id": "time-before 2030-01-01T00:00:00Z",
+       "vidLength": 0
+      },
+      1
+     ],
+     [
+      {
+       "location": "",
+       "id": "ipaddr 127.0.0.1",
+       "vidLength": 0
+      },
+      1
+     ]
+    ],
+    "allow": {
+     "info:read": false,
+     "invoices:write": false,
+     "macaroon:generate": true,
+     "offchain:write": true,
+     "onchain:write": true,
+     "uri:/lnrpc.Lightning/GetInfo": false
+    }
+   }
+  },
+  {
+   "name": "all lengths padded to 10 bytes",
+   "sha256": "8db14857f1c5736240f46abb38d7111ea099906a6143645bc534cff66b3e3cc8",
+   "length": 239,
+   "lnd": {
+    "parse": true,
+    "verify": true,
+    "error": null,
+    "location": "lnd",
+    "identifierSha256": "0ea282d754e3f7b4304311a0fe9306c3130a9e2d0ad1cea0782dc5af19fd9197",
+    "canonicalSha256": "102d13641b21d5ee2190f1410d1696fc8279ea1d1fe11bc46bf9a707bfbe1c58",
+    "storageId": "1234",
+    "ops": [
+     [
+      "onchain:read",
+      1
+     ],
+     [
+      "onchain:write",
+      1
+     ],
+     [
+      "offchain:read",
+      1
+     ],
+     [
+      "offchain:write",
+      1
+     ],
+     [
+      "macaroon:generate",
+      1
+     ]
+    ],
+    "caveats": [
+     [
+      {
+       "location": "",
+       "id": "time-before 2030-01-01T00:00:00Z",
+       "vidLength": 0
+      },
+      1
+     ],
+     [
+      {
+       "location": "",
+       "id": "ipaddr 127.0.0.1",
+       "vidLength": 0
+      },
+      1
+     ]
+    ],
+    "allow": {
+     "info:read": false,
+     "invoices:write": false,
+     "macaroon:generate": true,
+     "offchain:write": true,
+     "onchain:write": true,
+     "uri:/lnrpc.Lightning/GetInfo": false
+    }
+   }
+  },
+  {
+   "name": "all kinds non-minimal",
+   "sha256": "a3c34cab2182e7122e32487abecb3791121f4fe757e19a4d2ab6f9338a478f61",
+   "length": 199,
+   "lnd": {
+    "parse": true,
+    "verify": true,
+    "error": null,
+    "location": "lnd",
+    "identifierSha256": "0ea282d754e3f7b4304311a0fe9306c3130a9e2d0ad1cea0782dc5af19fd9197",
+    "canonicalSha256": "102d13641b21d5ee2190f1410d1696fc8279ea1d1fe11bc46bf9a707bfbe1c58",
+    "storageId": "1234",
+    "ops": [
+     [
+      "onchain:read",
+      1
+     ],
+     [
+      "onchain:write",
+      1
+     ],
+     [
+      "offchain:read",
+      1
+     ],
+     [
+      "offchain:write",
+      1
+     ],
+     [
+      "macaroon:generate",
+      1
+     ]
+    ],
+    "caveats": [
+     [
+      {
+       "location": "",
+       "id": "time-before 2030-01-01T00:00:00Z",
+       "vidLength": 0
+      },
+      1
+     ],
+     [
+      {
+       "location": "",
+       "id": "ipaddr 127.0.0.1",
+       "vidLength": 0
+      },
+      1
+     ]
+    ],
+    "allow": {
+     "info:read": false,
+     "invoices:write": false,
+     "macaroon:generate": true,
+     "offchain:write": true,
+     "onchain:write": true,
+     "uri:/lnrpc.Lightning/GetInfo": false
+    }
+   }
+  },
+  {
+   "name": "all kinds padded to 10 bytes",
+   "sha256": "10bfc597cd27b0edaf2038ca4331de0db63db4ce1d835c5a91a87d7d6428028b",
+   "length": 239,
+   "lnd": {
+    "parse": true,
+    "verify": true,
+    "error": null,
+    "location": "lnd",
+    "identifierSha256": "0ea282d754e3f7b4304311a0fe9306c3130a9e2d0ad1cea0782dc5af19fd9197",
+    "canonicalSha256": "102d13641b21d5ee2190f1410d1696fc8279ea1d1fe11bc46bf9a707bfbe1c58",
+    "storageId": "1234",
+    "ops": [
+     [
+      "onchain:read",
+      1
+     ],
+     [
+      "onchain:write",
+      1
+     ],
+     [
+      "offchain:read",
+      1
+     ],
+     [
+      "offchain:write",
+      1
+     ],
+     [
+      "macaroon:generate",
+      1
+     ]
+    ],
+    "caveats": [
+     [
+      {
+       "location": "",
+       "id": "time-before 2030-01-01T00:00:00Z",
+       "vidLength": 0
+      },
+      1
+     ],
+     [
+      {
+       "location": "",
+       "id": "ipaddr 127.0.0.1",
+       "vidLength": 0
+      },
+      1
+     ]
+    ],
+    "allow": {
+     "info:read": false,
+     "invoices:write": false,
+     "macaroon:generate": true,
+     "offchain:write": true,
+     "onchain:write": true,
+     "uri:/lnrpc.Lightning/GetInfo": false
+    }
+   }
+  },
+  {
+   "name": "end-of-section as 0x80 0x00",
+   "sha256": "e3a3ac6e91b6d73465e86f85c3547fef2f1d8b473c48b4d3cc7c84b3f602b336",
+   "length": 198,
+   "lnd": {
+    "parse": true,
+    "verify": true,
+    "error": null,
+    "location": "lnd",
+    "identifierSha256": "0ea282d754e3f7b4304311a0fe9306c3130a9e2d0ad1cea0782dc5af19fd9197",
+    "canonicalSha256": "102d13641b21d5ee2190f1410d1696fc8279ea1d1fe11bc46bf9a707bfbe1c58",
+    "storageId": "1234",
+    "ops": [
+     [
+      "onchain:read",
+      1
+     ],
+     [
+      "onchain:write",
+      1
+     ],
+     [
+      "offchain:read",
+      1
+     ],
+     [
+      "offchain:write",
+      1
+     ],
+     [
+      "macaroon:generate",
+      1
+     ]
+    ],
+    "caveats": [
+     [
+      {
+       "location": "",
+       "id": "time-before 2030-01-01T00:00:00Z",
+       "vidLength": 0
+      },
+      1
+     ],
+     [
+      {
+       "location": "",
+       "id": "ipaddr 127.0.0.1",
+       "vidLength": 0
+      },
+      1
+     ]
+    ],
+    "allow": {
+     "info:read": false,
+     "invoices:write": false,
+     "macaroon:generate": true,
+     "offchain:write": true,
+     "onchain:write": true,
+     "uri:/lnrpc.Lightning/GetInfo": false
+    }
+   }
+  },
+  {
+   "name": "end-of-section padded to 10 bytes",
+   "sha256": "c145ea7a37617f7c239ddf590f13c6d459c94b2cf0340b58925c5f3ec9cd4028",
+   "length": 230,
+   "lnd": {
+    "parse": true,
+    "verify": true,
+    "error": null,
+    "location": "lnd",
+    "identifierSha256": "0ea282d754e3f7b4304311a0fe9306c3130a9e2d0ad1cea0782dc5af19fd9197",
+    "canonicalSha256": "102d13641b21d5ee2190f1410d1696fc8279ea1d1fe11bc46bf9a707bfbe1c58",
+    "storageId": "1234",
+    "ops": [
+     [
+      "onchain:read",
+      1
+     ],
+     [
+      "onchain:write",
+      1
+     ],
+     [
+      "offchain:read",
+      1
+     ],
+     [
+      "offchain:write",
+      1
+     ],
+     [
+      "macaroon:generate",
+      1
+     ]
+    ],
+    "caveats": [
+     [
+      {
+       "location": "",
+       "id": "time-before 2030-01-01T00:00:00Z",
+       "vidLength": 0
+      },
+      1
+     ],
+     [
+      {
+       "location": "",
+       "id": "ipaddr 127.0.0.1",
+       "vidLength": 0
+      },
+      1
+     ]
+    ],
+    "allow": {
+     "info:read": false,
+     "invoices:write": false,
+     "macaroon:generate": true,
+     "offchain:write": true,
+     "onchain:write": true,
+     "uri:/lnrpc.Lightning/GetInfo": false
+    }
+   }
+  },
+  {
+   "name": "every varint non-minimal",
+   "sha256": "731e0f77ff4c54baa0dd925ec5c358da3da6fe96f79d9a599a5456c00dcd52de",
+   "length": 227,
+   "lnd": {
+    "parse": true,
+    "verify": true,
+    "error": null,
+    "location": "lnd",
+    "identifierSha256": "0ea282d754e3f7b4304311a0fe9306c3130a9e2d0ad1cea0782dc5af19fd9197",
+    "canonicalSha256": "102d13641b21d5ee2190f1410d1696fc8279ea1d1fe11bc46bf9a707bfbe1c58",
+    "storageId": "1234",
+    "ops": [
+     [
+      "onchain:read",
+      1
+     ],
+     [
+      "onchain:write",
+      1
+     ],
+     [
+      "offchain:read",
+      1
+     ],
+     [
+      "offchain:write",
+      1
+     ],
+     [
+      "macaroon:generate",
+      1
+     ]
+    ],
+    "caveats": [
+     [
+      {
+       "location": "",
+       "id": "time-before 2030-01-01T00:00:00Z",
+       "vidLength": 0
+      },
+      1
+     ],
+     [
+      {
+       "location": "",
+       "id": "ipaddr 127.0.0.1",
+       "vidLength": 0
+      },
+      1
+     ]
+    ],
+    "allow": {
+     "info:read": false,
+     "invoices:write": false,
+     "macaroon:generate": true,
+     "offchain:write": true,
+     "onchain:write": true,
+     "uri:/lnrpc.Lightning/GetInfo": false
+    }
+   }
+  },
+  {
+   "name": "every varint non-minimal, no location, trailing bytes",
+   "sha256": "930ea92247c1ad9315079dca3a2679fbcff66fa9971c39f83bd67911fb32f64d",
+   "length": 205,
+   "lnd": {
+    "parse": true,
+    "verify": true,
+    "error": null,
+    "location": "",
+    "identifierSha256": "0ea282d754e3f7b4304311a0fe9306c3130a9e2d0ad1cea0782dc5af19fd9197",
+    "canonicalSha256": "4386698d586165595917d50f88a3bb94f65abdd45ca50e279a8512db31c95bdf",
+    "storageId": "1234",
+    "ops": [
+     [
+      "onchain:read",
+      1
+     ],
+     [
+      "onchain:write",
+      1
+     ],
+     [
+      "offchain:read",
+      1
+     ],
+     [
+      "offchain:write",
+      1
+     ],
+     [
+      "macaroon:generate",
+      1
+     ]
+    ],
+    "caveats": [
+     [
+      {
+       "location": "",
+       "id": "time-before 2030-01-01T00:00:00Z",
+       "vidLength": 0
+      },
+      1
+     ],
+     [
+      {
+       "location": "",
+       "id": "ipaddr 127.0.0.1",
+       "vidLength": 0
+      },
+      1
+     ]
+    ],
+    "allow": {
+     "info:read": false,
+     "invoices:write": false,
+     "macaroon:generate": true,
+     "offchain:write": true,
+     "onchain:write": true,
+     "uri:/lnrpc.Lightning/GetInfo": false
+    }
+   }
+  },
+  {
+   "name": "third-party caveat, canonical",
+   "sha256": "25c5fb63136c2b78fcd6d4868759e8526f8f4748eab1999f6d10c76634618549",
+   "length": 295,
+   "lnd": {
+    "parse": true,
+    "verify": false,
+    "error": "verification failed: failed to decrypt caveat 2 signature: decryption failure",
+    "location": "lnd",
+    "identifierSha256": "0ea282d754e3f7b4304311a0fe9306c3130a9e2d0ad1cea0782dc5af19fd9197",
+    "canonicalSha256": "25c5fb63136c2b78fcd6d4868759e8526f8f4748eab1999f6d10c76634618549",
+    "storageId": "1234",
+    "ops": null,
+    "caveats": [
+     [
+      {
+       "location": "",
+       "id": "time-before 2030-01-01T00:00:00Z",
+       "vidLength": 0
+      },
+      1
+     ],
+     [
+      {
+       "location": "",
+       "id": "ipaddr 127.0.0.1",
+       "vidLength": 0
+      },
+      1
+     ],
+     [
+      {
+       "location": "https://discharge.example",
+       "id": "third-party-caveat-id",
+       "vidLength": 48
+      },
+      1
+     ]
+    ],
+    "allow": null
+   }
+  },
+  {
+   "name": "third-party caveat, every varint non-minimal",
+   "sha256": "8357b64c4c5a599ece098884d2ed03d41f4a6319c5bca19084440e908d46fed5",
+   "length": 324,
+   "lnd": {
+    "parse": true,
+    "verify": false,
+    "error": "verification failed: failed to decrypt caveat 2 signature: decryption failure",
+    "location": "lnd",
+    "identifierSha256": "0ea282d754e3f7b4304311a0fe9306c3130a9e2d0ad1cea0782dc5af19fd9197",
+    "canonicalSha256": "25c5fb63136c2b78fcd6d4868759e8526f8f4748eab1999f6d10c76634618549",
+    "storageId": "1234",
+    "ops": null,
+    "caveats": [
+     [
+      {
+       "location": "",
+       "id": "time-before 2030-01-01T00:00:00Z",
+       "vidLength": 0
+      },
+      1
+     ],
+     [
+      {
+       "location": "",
+       "id": "ipaddr 127.0.0.1",
+       "vidLength": 0
+      },
+      1
+     ],
+     [
+      {
+       "location": "https://discharge.example",
+       "id": "third-party-caveat-id",
+       "vidLength": 48
+      },
+      1
+     ]
+    ],
+    "allow": null
+   }
+  },
+  {
+   "name": "empty location packet in header",
+   "sha256": "79de59dea1084be110a41b816b688b15b19b3f1afbd14977931fab70fc712bc5",
+   "length": 191,
+   "lnd": {
+    "parse": true,
+    "verify": true,
+    "error": null,
+    "location": "",
+    "identifierSha256": "0ea282d754e3f7b4304311a0fe9306c3130a9e2d0ad1cea0782dc5af19fd9197",
+    "canonicalSha256": "4386698d586165595917d50f88a3bb94f65abdd45ca50e279a8512db31c95bdf",
+    "storageId": "1234",
+    "ops": [
+     [
+      "onchain:read",
+      1
+     ],
+     [
+      "onchain:write",
+      1
+     ],
+     [
+      "offchain:read",
+      1
+     ],
+     [
+      "offchain:write",
+      1
+     ],
+     [
+      "macaroon:generate",
+      1
+     ]
+    ],
+    "caveats": [
+     [
+      {
+       "location": "",
+       "id": "time-before 2030-01-01T00:00:00Z",
+       "vidLength": 0
+      },
+      1
+     ],
+     [
+      {
+       "location": "",
+       "id": "ipaddr 127.0.0.1",
+       "vidLength": 0
+      },
+      1
+     ]
+    ],
+    "allow": {
+     "info:read": false,
+     "invoices:write": false,
+     "macaroon:generate": true,
+     "offchain:write": true,
+     "onchain:write": true,
+     "uri:/lnrpc.Lightning/GetInfo": false
+    }
+   }
+  },
+  {
+   "name": "empty location and verification ID packets in a first-party caveat",
+   "sha256": "786035e4dc2568e5e54bc463452d104e00cd8f6be82ff5e23484c8802577203e",
+   "length": 179,
+   "lnd": {
+    "parse": true,
+    "verify": true,
+    "error": null,
+    "location": "lnd",
+    "identifierSha256": "0ea282d754e3f7b4304311a0fe9306c3130a9e2d0ad1cea0782dc5af19fd9197",
+    "canonicalSha256": "4a64349b2d65337c91c306ac73be139e4023000d5f70b04cf8f677c631c0dd1a",
+    "storageId": "1234",
+    "ops": [
+     [
+      "onchain:read",
+      1
+     ],
+     [
+      "onchain:write",
+      1
+     ],
+     [
+      "offchain:read",
+      1
+     ],
+     [
+      "offchain:write",
+      1
+     ],
+     [
+      "macaroon:generate",
+      1
+     ]
+    ],
+    "caveats": [
+     [
+      {
+       "location": "",
+       "id": "time-before 2030-01-01T00:00:00Z",
+       "vidLength": 0
+      },
+      1
+     ]
+    ],
+    "allow": {
+     "info:read": false,
+     "invoices:write": false,
+     "macaroon:generate": true,
+     "offchain:write": true,
+     "onchain:write": true,
+     "uri:/lnrpc.Lightning/GetInfo": false
+    }
+   }
+  },
+  {
+   "name": "kind 11 bytes (rejected)",
+   "sha256": "1f8f924b3e5f1230af2e453fefcf77fe9f44c858e9450e3c683af6bfc79d2a20",
+   "length": 244,
+   "lnd": {
+    "parse": false,
+    "verify": false,
+    "error": "unmarshal v2: varint value out of range",
+    "location": null,
+    "identifierSha256": null,
+    "canonicalSha256": null,
+    "storageId": null,
+    "ops": null,
+    "caveats": null,
+    "allow": null
+   }
+  },
+  {
+   "name": "length tenth byte 2 (rejected)",
+   "sha256": "ccc69deb911737ede4cd0ca13ceecda0ef5c8bb7c38e45a55215d24de4334e1d",
+   "length": 12,
+   "lnd": {
+    "parse": false,
+    "verify": false,
+    "error": "unmarshal v2: varint value out of range",
+    "location": null,
+    "identifierSha256": null,
+    "canonicalSha256": null,
+    "storageId": null,
+    "ops": null,
+    "caveats": null,
+    "allow": null
+   }
+  },
+  {
+   "name": "length above 0x7fffffff (rejected)",
+   "sha256": "a851f1321a776aa62575b20bc4461f38898da104f8067d07feb3bcd3bc47011c",
+   "length": 10,
+   "lnd": {
+    "parse": false,
+    "verify": false,
+    "error": "unmarshal v2: varint value out of range",
+    "location": null,
+    "identifierSha256": null,
+    "canonicalSha256": null,
+    "storageId": null,
+    "ops": null,
+    "caveats": null,
+    "allow": null
+   }
+  },
+  {
+   "name": "end-of-section 11 bytes (rejected)",
+   "sha256": "87507f2249811775f7b9075e447502efcf868dce60f8270dfd3cd879b97364e3",
+   "length": 234,
+   "lnd": {
+    "parse": false,
+    "verify": false,
+    "error": "unmarshal v2: varint value out of range",
+    "location": null,
+    "identifierSha256": null,
+    "canonicalSha256": null,
+    "storageId": null,
+    "ops": null,
+    "caveats": null,
+    "allow": null
+   }
+  },
+  {
+   "name": "kind 0x80 0x01 is 128, not end-of-section (rejected)",
+   "sha256": "405e670f0dacbc43575e5ae736ae4cfbcd5cc880b82930dfcb51aef0fe4ab792",
+   "length": 198,
+   "lnd": {
+    "parse": false,
+    "verify": false,
+    "error": "unmarshal v2: field data extends past end of buffer",
+    "location": null,
+    "identifierSha256": null,
+    "canonicalSha256": null,
+    "storageId": null,
+    "ops": null,
+    "caveats": null,
+    "allow": null
+   }
+  }
+ ]
+}

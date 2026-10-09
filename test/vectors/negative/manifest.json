@@ -1,0 +1,134 @@
+{
+  "vectors": [
+    {
+      "name": "v1-binary",
+      "file": "v1-binary.macaroon",
+      "stage": "v2-header"
+    },
+    {
+      "name": "v1-base64-decoded",
+      "file": "v1-base64-decoded.macaroon",
+      "stage": "v2-header"
+    },
+    {
+      "name": "empty",
+      "file": "empty.macaroon",
+      "stage": "v2-header"
+    },
+    {
+      "name": "wrong-first-byte",
+      "file": "wrong-first-byte.macaroon",
+      "stage": "v2-header"
+    },
+    {
+      "name": "unknown-packet-type",
+      "file": "unknown-packet-type.macaroon",
+      "stage": "packet"
+    },
+    {
+      "name": "overlong-varint",
+      "file": "overlong-varint.macaroon",
+      "stage": "packet"
+    },
+    {
+      "name": "length-past-end",
+      "file": "length-past-end.macaroon",
+      "stage": "packet"
+    },
+    {
+      "name": "fields-out-of-order",
+      "file": "fields-out-of-order.macaroon",
+      "stage": "packet"
+    },
+    {
+      "name": "header-without-identifier",
+      "file": "header-without-identifier.macaroon",
+      "stage": "packet"
+    },
+    {
+      "name": "caveat-vid-without-identifier",
+      "file": "caveat-vid-without-identifier.macaroon",
+      "stage": "packet"
+    },
+    {
+      "name": "missing-final-eos",
+      "file": "missing-final-eos.macaroon",
+      "stage": "packet"
+    },
+    {
+      "name": "missing-signature",
+      "file": "missing-signature.macaroon",
+      "stage": "packet"
+    },
+    {
+      "name": "short-signature",
+      "file": "short-signature.macaroon",
+      "stage": "packet"
+    },
+    {
+      "name": "identifier-version-02",
+      "file": "identifier-version-02.macaroon",
+      "stage": "identifier-version"
+    },
+    {
+      "name": "truncated-protobuf",
+      "file": "truncated-protobuf.macaroon",
+      "stage": "identifier-proto"
+    },
+    {
+      "name": "protobuf-wire-3",
+      "file": "protobuf-wire-3.macaroon",
+      "stage": "identifier-proto"
+    },
+    {
+      "name": "protobuf-wire-4",
+      "file": "protobuf-wire-4.macaroon",
+      "stage": "identifier-proto"
+    },
+    {
+      "name": "op-first-empty",
+      "file": "op-first-empty.macaroon",
+      "stage": "identifier-proto"
+    },
+    {
+      "name": "op-zero-actions",
+      "file": "op-zero-actions.macaroon",
+      "stage": "identifier-proto"
+    },
+    {
+      "name": "storage-empty",
+      "file": "storage-empty.macaroon",
+      "stage": "identifier-root-key-id"
+    },
+    {
+      "name": "storage-nondigits",
+      "file": "storage-nondigits.macaroon",
+      "stage": "identifier-root-key-id"
+    },
+    {
+      "name": "storage-high-bit-zero",
+      "file": "storage-high-bit-zero.macaroon",
+      "stage": "identifier-root-key-id"
+    },
+    {
+      "name": "storage-high-bit-nine",
+      "file": "storage-high-bit-nine.macaroon",
+      "stage": "identifier-root-key-id"
+    },
+    {
+      "name": "storage-unicode-digit",
+      "file": "storage-unicode-digit.macaroon",
+      "stage": "identifier-root-key-id"
+    },
+    {
+      "name": "storage-leading-zeroes",
+      "file": "storage-leading-zeroes.macaroon",
+      "stage": "identifier-root-key-id"
+    },
+    {
+      "name": "storage-over-uint64",
+      "file": "storage-over-uint64.macaroon",
+      "stage": "identifier-root-key-id"
+    }
+  ]
+}

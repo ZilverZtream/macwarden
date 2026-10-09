@@ -1,0 +1,100 @@
+# Security model
+
+This document defines macwarden's security requirements: what it handles, the safety rules every release must keep (SAFE-01 to SAFE-11), and the threat model. To report a vulnerability, see [SECURITY.md](../SECURITY.md).
+
+## What macwarden handles
+
+macwarden works with LND macaroons. A macaroon is a bearer credential: whoever holds the bytes has its permissions, with no further check. An `admin.macaroon` (or any macaroon that can spend or bake) is enough to move a node's funds.
+
+Why this matters now:
+
+- The [BTCPay Server 2.4.2 advisory](https://blog.btcpayserver.org/security-advisory-btcpay-server-2-4-2/) (2026-08-07) describes an issue that "could allow an unauthenticated remote attacker to obtain `.macaroon` credential files for LND", which "could be used to take control of an LND node and move funds". It states "attackers exploited this vulnerability. Users were affected and funds were stolen", and advises: "If you use LND, treat its credentials as potentially exposed".
+- Rotation itself has locked operators out. In [btcpayserver-docker#1112](https://github.com/btcpayserver/btcpayserver-docker/issues/1112) rotation deleted `macaroons.db` and a later `changepassword` left a wallet permanently locked ("LND changes the wallet passphrase before touching the macaroon root key, so a failure on the second step leaves the passphrase already changed"). In [lnd#11049](https://github.com/lightningnetwork/lnd/issues/11049) renaming `admin.macaroon` and `macaroons.db` left LND stuck in `WAITING_TO_START`.
+
+So macwarden must never become a new leak path, and must never take the risky rotation path that caused those lock-outs.
+
+## Safety rules
+
+These IDs are referenced from [spec.md](spec.md) and from the test suite. They are stable and are never renumbered.
+
+| ID | Rule | How it is tested or enforced |
+|---|---|---|
+| SAFE-01 | Never print, log, or store macaroon bytes, hex or base64. Fingerprints only. Applies to errors, warnings, crashes and `--json` output too. (The single exception is the macaroon file that `bake`, `rotate` or the offline `attenuate` writes to `--out`, which is the product. The `attenuate --out` file is created through the same exclusive, owner-only writer.) | All rendering goes through the `output` module; process-level handlers route crashes through it. A leak test plants a sentinel macaroon and asserts its raw bytes (as UTF-8 and latin1), hex (both cases), base64 and base64url (padded and unpadded) appear in no stdout, stderr, log, registry, error output or other written file across every command, including a crash forced mid-request; it excludes exactly the `--out` file, including the `attenuate --out` copy. |
+| SAFE-02 | Never call `changepassword`; never read or write `macaroons.db`, wallet password files, seeds, TLS keys. | The `lnd` adapter exposes no `changepassword` call; a test asserts the adapter's endpoint list. `scan` never opens these names (case-insensitive, also as directory names); a test asserts it with an fs spy. |
+| SAFE-03 | Never delete root key ID 0. | `revoke` and `rotate` refuse ID 0 (as an argument or as a `--target-file`'s ID) before any network call; the adapter refuses it again. Unit and integration tests for both layers. |
+| SAFE-04 | Rotation is two invocations: **stage** (bake → verify new) → operator switches the app → **finish** (confirm → revoke old → verify old rejected). A failure anywhere before the revoke leaves the old credential valid. | The rotation failure-injection cases 1–8 in [spec.md, Acceptance criteria](spec.md#rotation-failure-injection) (faulty adapter in unit tests, real faults against the fixture in integration tests) assert with the `lncli` acceptance probe that the old macaroon is still accepted unless the finish's DeleteMacaroonID had completed. |
+| SAFE-05 | Every mutating command (`bake`, `revoke`, `rotate`) supports `--dry-run`; `revoke` and `rotate --finish` require typed confirmation unless `--yes`. Rotation stage relying on permissions unproven by the old credential requires typed informed approval showing the exact grade and permissions before lock, reservation or issue; stage --yes does not authorize this fallback. | Integration tests: `--dry-run` leaves LND's root key IDs, the registry and the `--out` path unchanged; without `--yes`, a declined, wrong or missing (non-TTY) confirmation changes nothing. |
+| SAFE-06 | Registry and all outputs are free of secrets. The registry is `0600` in a `0700` directory; macaroon files are written owner-only. Stale-lock recovery requires same-host dead-owner and pathname identity proof; competing owners are preserved. Failed owned lock/output cleanup is visible and reports exit 7 after possible mutation while retaining any primary error. Every `--out` file is owner-only before its first byte, and that is verified, never assumed: on POSIX the `0600` mode and owner are read back from the open descriptor (one `chmod` repair, otherwise the file is removed and the command fails); on Windows the file is created with an owner-only, protected DACL in the same call that creates it (no moment under the folder's inherited ACL, so no other account can open any handle to it, including a change-permissions handle), and its owner and DACL are read back while macwarden holds an exclusive (share mode 0) handle; any other entry, inherited entry or owner fails the command without writing. Bytes are written only through that exclusive handle; if another handle exists the command fails without writing. Only a Windows volume that stores no permissions (FAT, exFAT) is written with warning `acl-best-effort`. Output names that Windows normalises or maps to a device or stream are refused before anything is created. | Leak test covers the registry file. Tests check modes `0600`/`0700` on Linux/macOS, and that a file system which keeps other mode bits fails closed with the file removed; on Windows (CI) a real-Windows test shows the first DACL any process can observe on a new file in a folder granting Everyone change-permissions is owner-only and protected, an entry added before the write fails closed, a handle opened before the exclusive open makes the command fail with no bytes readable through it, and normalised, device and stream names are refused with nothing touched. |
+| SAFE-07 | `inspect` and `scan` are offline and read-only. | Tests run them with networking stubbed to throw and on read-only fixture directories; file mtimes and contents are unchanged afterwards. |
+| SAFE-08 | No telemetry; the only network peer is the configured LND node; TLS certificate verification is on by default. | Code review rule: the `lnd` adapter is the only module that opens network connections (it uses `node:https`). Integration test: a wrong TLS cert is rejected. |
+| SAFE-09 | macwarden's own credential should be a dedicated macaroon; the docs must state plainly that the ability to bake is admin-equivalent, so that macaroon must be protected like `admin.macaroon`. | Documented below and in the README; a unit test asserts `inspect` grades any macaroon holding `macaroon:generate` as `ADMIN`; online commands warn `own-root-key-0`. |
+| SAFE-11 | `watch` is read-only toward the caller's data: the read-only middleware always accepts, the canary guard always denies, and nothing replaces an RPC response. Intercepted macaroons are decoded in memory to a credential ID and root key ID and dropped; payloads and gRPC metadata are never read; only credential IDs, root key IDs, method names, counts and times are written (`<registry>.usage.json`, owner-only). The own macaroon needs `macaroon:write`, which is admin-equivalent like `macaroon:generate` (SAFE-09). A stalled watcher delays and then fails node RPCs (SPEC Commands > 8), so event output never blocks the answers (bounded queue written off the event loop); never recommend `rpcmiddleware.addmandatory`. Zeroed after use: each received gRPC frame and the copied raw macaroon bytes. Not zeroed: the `Secret` wrapper's own copy and derived identifier bytes, which are unreferenced at once and left to garbage collection. The canary guard fails closed (unknown intercept types and internal errors deny); canaries carry only READ or RECEIVE permissions. Every resource an attacker can drive is bounded: alerts are rate-limited per registered canary (one per 10-second window plus a counted summary) and invented caveat conditions share one bucket; at most one alert command runs, killed (process group) 12 s after it starts; event output is a bounded queue that treats EAGAIN as backpressure; usage holds at most 20,000 records with least-recently-seen eviction, is written at most at 64 KiB/s on average, and the summary counts at most 10,000 credentials; shutdown persists usage and releases the lock before waiting at most 13 s for an alert command. Attribution runs behind a bounded queue that drops and counts work it cannot keep up with, so LND feedback latency is independent of the call rate; stream fields are capped (macaroon 64 KiB, method name and caveat condition 256 bytes) before they are copied; a session ends on a missing registration confirmation (30 s), a stalled message (60 s) or more than 16 MiB of unread feedback. Processes an alert command leaves behind are killed (POSIX process groups, 1 s after it exits and when watch stops; on Windows the tree is killed on timeout only). Output that cannot be delivered never keeps watch running: queued lines are dropped and counted and the process exits within a bounded time, non-zero when it had to be terminated. | Unit tests decide every intercept kind; leak tests assert caller macaroons never appear in events, alerts or the usage file; the regtest oracle proves attribution, canary denial, and unregistration on exit. |
+| SAFE-10 | Development and CI integration tests run against regtest only. (The released tool works on any network — it moves no funds.) | The test fixture starts its own regtest LND + bitcoind and aborts if `getinfo` reports any other network or a version not starting with `0.21.4-beta`. |
+
+## Threat model
+
+macwarden helps against:
+
+- **Over-privileged apps.** `inspect` and `inventory` show what each credential can do; `bake` issues least-privilege macaroons instead of handing out `admin.macaroon`.
+- **Unknown credentials.** `inventory` flags root key IDs LND has that the registry does not know; `inventory --verify` flags registered macaroons LND no longer accepts.
+- **Leaked credentials in repos, configs and backups.** `scan` finds macaroon files, embedded hex/base64 macaroons, `lndconnect://` URIs and NWC connection strings, and can fail a CI job.
+- **Unknown usage and silent leaks.** `watch` attributes every authenticated RPC to a credential and records last use; `recommend` narrows a credential to what it actually calls; a canary macaroon (`bake --canary`) is refused by LND unless `watch` runs, and while it runs every use is denied and alerted within the same call.
+- **Botched rotation.** `rotate` follows SAFE-04 and only ever revokes per-app root key IDs, never root key 0.
+- **Leaked credentials after an incident.** `respond` rotates every registered credential in one confirmed batch through `rotate` (SAFE-04 and SAFE-05 apply to each), then proves each old credential rejected and each replacement accepted. It never touches root key IDs it does not own and never calls `changepassword` (SAFE-02); for root key 0 it prints the manual LND procedure.
+- **A leaked credential that can bake, and a tampered registry, during an incident.** A holder of `macaroon:generate` can create credentials on any root key ID, including the replacements `respond` stages, so every `respond` proof is scoped to its own credential, credentials that can bake are listed and finished first, and the guidance says that only regenerating all root keys removes everything such a holder could have baked. `respond` and `rotate` treat a replacement link macwarden could not have written as tampering (exit 3), never rotate a canary into an ordinary credential, and list root key IDs the registry calls revoked but LND still holds. Registry evidence values are validated, and printed commands are quoted for POSIX shells and PowerShell, including PowerShell's curly single quotes.
+- **Missing review evidence.** `inventory --report` writes an access-review record from registry facts and LND root key IDs only, never credential bytes.
+- **Leaks reaching CI logs and code-scanning tools.** `scan --format sarif|github` reports only paths, kinds, grades and fingerprints, never matched text, so uploading the SARIF log or printing annotations exposes no credential.
+
+macwarden does not protect against:
+
+- **A compromised host.** An attacker on the machine running LND or macwarden can read the macaroons directly.
+- **Theft of the admin macaroon itself**, or of macwarden's own macaroon (see below).
+- **Streams that are already open.** Deleting a root key ID blocks new requests only. Streams opened earlier (e.g. `HtlcInterceptor`, `SubscribeInvoices`, REST WebSockets) keep running until they disconnect. New requests with this macaroon are now rejected. Streams opened before the revoke stay open until they disconnect; if the credential may be compromised, restart LND.
+- **Anything on root key ID 0.** `admin.macaroon`, `readonly.macaroon`, `invoice.macaroon` and anything else baked on ID 0 cannot be revoked individually. They stay valid until the operator rotates the root keys by hand. `changepassword --new_mac_root_key` regenerates **every** root key, not just ID 0: every macaroon ever baked becomes invalid, including macwarden-baked ones and macwarden's own. LND's docs also describe deleting `macaroons.db`. So the order is always: rotate the root keys first (in a maintenance window), then bake fresh per-app macaroons ([Replacing the default macaroons](replacing-default-macaroons.md)). Moving apps first and rotating afterwards breaks every app.
+- **Nodes where macwarden's view is incomplete.** With `--no-macaroons` LND checks no macaroons, so macwarden's verification means nothing. With `--mac_root_key` (stateless init) macaroons can be baked offline and never appear in `inventory`. With a remote signer, the signer has its own macaroon store and must be inventoried separately. Other tools and operators can store root keys in the same LND store (Lightning Terminal is reported to; architecture.md assumption 12), which is why `revoke` needs `--unregistered` for IDs it did not issue.
+- **IP-restricted macaroons.** `bake` has no `--ip`: LND is reported to see REST clients as its REST proxy's address (architecture.md assumption 5), so an IP lock either breaks the app or accepts everyone.
+- **Other implementations.** CLN runes, Eclair and LDK are out of scope for v1.
+- **Secrets `scan` does not recognise.** Scanning is pattern-based. Text detectors only match macaroons with location `lnd`; line-wrapped, split, encrypted, archived or oddly encoded credentials can be missed or only flagged as `undecodable-candidate` (for example an `xxd` dump whose prefix is split across two lines, or hex grouped other than by byte; spec.md lists the forms scan reads); UTF-16 without a BOM is treated as binary; files over 5 MiB are skipped; git history is scanned only with `scan --git-history`, and only for history that still exists in the local repository (rewritten history, other clones and objects missing from a partial clone are not covered; a missing object fails the scan). A clean scan is not proof of no leak.
+
+Two facts to keep in mind:
+
+- **`macaroon:read` is a validity oracle.** It includes CheckMacaroonPermissions, so even an inventory-only macaroon can test whether a stolen macaroon is still valid.
+- **Fingerprints are linkable.** A fingerprint reveals nothing usable about the credential (no feasible preimage), but the same credential has the same fingerprint in every report, so reports can be correlated. A fingerprint changes when a caveat is added.
+
+## The credential macwarden runs with
+
+- Online commands need a macaroon. Use a **dedicated** one for macwarden, not `admin.macaroon`, so it can be revoked on its own. First-time setup may use `admin.macaroon`; every online command then warns `own-root-key-0`.
+- `bake` needs `macaroon:generate`. **Holding `macaroon:generate` is admin-equivalent**: it can bake a macaroon with any permission, including spending. Protect macwarden's macaroon exactly like `admin.macaroon`.
+- `revoke` and `rotate` also need `macaroon:write`, which can revoke any non-zero root key ID. macwarden refuses to revoke or rotate the root key ID it is itself using.
+- For `inventory` only, `info:read` and `macaroon:read` are enough. Do not give a read-only workflow a baking macaroon.
+- Do not store macwarden's macaroon in the repo or CI variables of the apps it manages. Run it from an operator machine or a locked-down admin host.
+
+Recommended: bake, use and revoke a short-lived session macaroon per session, on its own root key ID, with only `macaroon:generate macaroon:read macaroon:write info:read` and a one-hour `time-before`. `lncli bakemacaroon` defaults to root key ID 0, so pass an explicit `--root_key_id`:
+
+```sh
+ID=$(( (RANDOM << 30) | (RANDOM << 15) | RANDOM ))    # check it is not in `lncli listmacaroonids`
+lncli bakemacaroon --root_key_id "$ID" --timeout 3600 \
+  --save_to ./macwarden-session.macaroon \
+  macaroon:generate macaroon:read macaroon:write info:read
+macwarden inventory --macaroon ./macwarden-session.macaroon    # … this session's commands
+lncli deletemacaroonid "$ID"
+rm ./macwarden-session.macaroon
+```
+
+Check the flag names with `lncli bakemacaroon --help` on your LND version.
+
+## Installing
+
+- Install a pinned version for online commands and check registry signatures: `npm i -g macwarden@<exact version>`, then run `npm audit signatures` in a project that depends on macwarden.
+- For the offline commands, `npx macwarden@<exact version> inspect …` is fine.
+- Releases so far are validated locally on Windows and unprivileged Linux before publication; macOS is not tested. Current releases do not carry npm provenance. When the package is published through npm trusted publishing from CI, it will carry provenance that `npm audit signatures` can verify.
+- After installing a new release, the [field check](field-check.md) is a short, safe way to confirm it against your own node.
+
+## Rules for contributors
+
+- No real credentials in issues, pull requests, logs, commits or test snapshots. Never paste a real macaroon, `lndconnect://` URI or NWC string into an AI assistant or any other third-party service. Fixtures use throwaway regtest credentials generated by the test suite (SAFE-10).
+- Test vectors committed to the repo come from a disposable regtest node and are labelled as such. Read vectors by path and use fingerprints in reports, logs and commit messages. The repo's own `.macwardenignore` lists their fingerprints so `scan` of the repo stays clean.
+- Run gitleaks only with `--redact`; without it gitleaks prints and stores the matched credential.
+- A real credential that is ever exposed is treated as compromised: revoke it on the node and remove it from history; deleting the text is not enough.
+
+[CONTRIBUTING.md](../CONTRIBUTING.md) describes the development workflow and how changes are tested.

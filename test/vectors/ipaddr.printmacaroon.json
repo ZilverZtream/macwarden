@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "location": "lnd",
+  "root_key_id": "0",
+  "permissions": [
+    "signer:read"
+  ],
+  "caveats": [
+    "ipaddr 127.0.0.1"
+  ]
+}

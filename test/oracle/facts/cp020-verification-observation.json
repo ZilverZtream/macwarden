@@ -1,0 +1,91 @@
+{
+  "fixture": {
+    "network": "regtest",
+    "version": "0.21.4-beta commit=v0.21.4-beta"
+  },
+  "method": "REST ChangePassword after isolated unlocker restart",
+  "targets": {
+    "zero": "0",
+    "nonzero": "20031",
+    "fresh": "20032"
+  },
+  "before": {
+    "rootKeyIds": [
+      "0",
+      "20031"
+    ],
+    "zero": {
+      "check": {
+        "status": 200,
+        "code": null,
+        "valid": true,
+        "category": "none",
+        "text": null
+      },
+      "ordinary": {
+        "accepted": true,
+        "category": "accepted"
+      }
+    },
+    "nonzero": {
+      "check": {
+        "status": 200,
+        "code": null,
+        "valid": true,
+        "category": "none",
+        "text": null
+      },
+      "ordinary": {
+        "accepted": true,
+        "category": "accepted"
+      }
+    }
+  },
+  "after": {
+    "rootKeyIds": [
+      "0",
+      "20031",
+      "20032"
+    ],
+    "freshOwnGetInfoStatus": 200,
+    "zero": {
+      "check": {
+        "status": 400,
+        "code": 3,
+        "valid": null,
+        "category": "signature-mismatch",
+        "text": "signature mismatch"
+      },
+      "ordinary": {
+        "accepted": false,
+        "category": "other"
+      }
+    },
+    "nonzero": {
+      "check": {
+        "status": 400,
+        "code": 3,
+        "valid": null,
+        "category": "signature-mismatch",
+        "text": "signature mismatch"
+      },
+      "ordinary": {
+        "accepted": false,
+        "category": "other"
+      }
+    },
+    "fresh": {
+      "check": {
+        "status": 200,
+        "code": null,
+        "valid": true,
+        "category": "none",
+        "text": null
+      },
+      "ordinary": {
+        "accepted": true,
+        "category": "accepted"
+      }
+    }
+  }
+}

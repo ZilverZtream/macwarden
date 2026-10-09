@@ -1,0 +1,277 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "macwarden scan --json output",
+  "description": "The single JSON document `macwarden scan --json` prints to stdout. Normative source: docs/spec.md, Global conventions > Output and Commands > 2. scan. Exit 1 (--fail-on tripped) still has ok: true and error: null.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "command", "ok", "warnings", "result", "error"],
+  "properties": {
+    "schema": { "const": 1 },
+    "command": { "const": "scan" },
+    "ok": { "type": "boolean" },
+    "warnings": {
+      "description": "Empty, except shallow-history with --git-history --allow-shallow on a shallow clone.",
+      "type": "array", "maxItems": 1, "items": { "const": "shallow-history" }
+    },
+    "result": {
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/result" }, { "$ref": "#/$defs/help" }]
+    },
+    "error": {
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/error" }]
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "ok": { "const": true } }, "required": ["ok"] },
+      "then": {
+        "properties": {
+          "result": { "oneOf": [{ "$ref": "#/$defs/result" }, { "$ref": "#/$defs/help" }] },
+          "error": { "type": "null" }
+        }
+      },
+      "else": {
+        "properties": {
+          "result": { "type": "null" },
+          "error": { "$ref": "#/$defs/error" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "help": {
+      "description": "macwarden scan --help --json: the command synopsis lines (docs/spec.md, Output > Help).",
+      "type": "object", "additionalProperties": false, "required": ["usage"],
+      "properties": { "usage": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^macwarden scan " } } }
+    },
+    "agentLocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["client", "path"],
+      "properties": { "client": { "type": "string" }, "path": { "type": "string" } }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "step", "message"],
+      "properties": {
+        "code": { "enum": [2, 3, 8] },
+        "step": {
+          "description": "null for bad flags; input-read for a missing or unreadable path argument or ignore file; ignore-file for an invalid ignore-file line; git-history when --git-history finds no git or no work tree, or git fails; findings-limit when a scan would report more than 250,000 findings (it fails closed); internal for exit 8.",
+          "oneOf": [{ "type": "null" }, { "enum": ["input-read", "ignore-file", "git-history", "findings-limit", "internal"] }]
+        },
+        "message": { "type": "string" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "code": { "const": 2 } } },
+          "then": { "properties": { "step": { "type": "null" } } }
+        },
+        {
+          "if": { "properties": { "code": { "const": 3 } } },
+          "then": { "properties": { "step": { "enum": ["input-read", "ignore-file", "git-history", "findings-limit"] } } }
+        },
+        {
+          "if": { "properties": { "code": { "const": 8 } } },
+          "then": { "properties": { "step": { "const": "internal" } } }
+        }
+      ]
+    },
+    "rootKeyId": { "type": "string", "pattern": "^(0|[1-9][0-9]{0,19})$" },
+    "fingerprint": { "type": "string", "pattern": "^fp:[0-9a-f]{16}$" },
+    "ladderGrade": { "enum": ["ADMIN", "SPEND", "OPERATE", "RECEIVE", "READ"] },
+    "grade": { "enum": ["ADMIN", "SPEND", "OPERATE", "RECEIVE", "READ", "UNASSESSED"] },
+    "macaroonWarning": {
+      "enum": [
+        "root-key-0",
+        "trailing-bytes",
+        "bad-time-before",
+        "identifier-exceeds-bounds",
+        "caveats-exceed-bounds",
+        "unassessed-uri",
+        "unassessed-permission",
+        "no-permissions",
+        "preimage-exposure"
+      ]
+    },
+    "caveat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "value"],
+      "properties": {
+        "type": { "enum": ["time-before", "ipaddr", "iprange", "lnd-custom", "third-party", "unknown"] },
+        "value": { "type": "string" },
+        "expired": { "type": "boolean" }
+      },
+      "if": { "properties": { "type": { "const": "time-before" } } },
+      "else": { "properties": { "expired": false } }
+    },
+    "count": { "type": "integer", "minimum": 0 },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "line",
+        "column",
+        "kind",
+        "fingerprint",
+        "grade",
+        "rootKeyId",
+        "permissions",
+        "caveats",
+        "warnings",
+        "unassessed"
+      ],
+      "properties": {
+        "path": { "type": "string", "minLength": 1, "not": { "type": "string", "pattern": "\\\\" } },
+        "line": { "oneOf": [{ "type": "null" }, { "type": "integer", "minimum": 1 }] },
+        "column": { "oneOf": [{ "type": "null" }, { "type": "integer", "minimum": 1 }] },
+        "kind": {
+          "enum": [
+            "macaroon-file",
+            "macaroon-hex",
+            "macaroon-base64",
+            "lndconnect",
+            "nwc",
+            "undecodable",
+            "undecodable-candidate"
+          ]
+        },
+        "fingerprint": { "$ref": "#/$defs/fingerprint" },
+        "grade": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/grade" }] },
+        "rootKeyId": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/rootKeyId" }] },
+        "permissions": { "oneOf": [{ "type": "null" }, { "type": "array", "items": { "type": "string" } }] },
+        "caveats": { "oneOf": [{ "type": "null" }, { "type": "array", "items": { "$ref": "#/$defs/caveat" } }] },
+        "warnings": { "type": "array", "items": { "$ref": "#/$defs/macaroonWarning" }, "uniqueItems": true },
+        "unassessed": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "commit": {
+          "description": "Only with --git-history: full hash of the oldest commit that added this credential at this path. Absent on work-tree findings.",
+          "type": "string",
+          "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "context": { "description": "Only when the credential is a string value inside an MCP server entry of a JSON config (an AI agent configuration).", "const": "mcp-config" },
+        "alsoAt": {
+          "description": "With --git-history (a finding with commit): the same file content was also added at other paths. On a work-tree finding (no commit): the same file is also reachable under other hard-link names within the same path argument. One finding stands for all of them: count is how many other paths, paths lists up to five.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["count", "paths"],
+          "properties": {
+            "count": { "type": "integer", "minimum": 1 },
+            "paths": { "type": "array", "items": { "type": "string" }, "maxItems": 5 }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "enum": ["macaroon-file", "undecodable"] } } },
+          "then": { "properties": { "line": { "type": "null" }, "column": { "type": "null" } } },
+          "else": {
+            "properties": {
+              "line": { "type": "integer" },
+              "column": { "type": "integer" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "enum": ["nwc", "undecodable", "undecodable-candidate"] } } },
+          "then": {
+            "properties": {
+              "grade": { "type": "null" },
+              "rootKeyId": { "type": "null" },
+              "permissions": { "type": "null" },
+              "caveats": { "type": "null" },
+              "warnings": { "type": "array", "maxItems": 0 },
+              "unassessed": { "type": "array", "maxItems": 0 }
+            }
+          },
+          "else": {
+            "properties": {
+              "grade": { "$ref": "#/$defs/grade" },
+              "rootKeyId": { "$ref": "#/$defs/rootKeyId" },
+              "permissions": { "type": "array" },
+              "caveats": { "type": "array" }
+            }
+          }
+        }
+      ]
+    },
+    "skipped": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "reason"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1, "not": { "type": "string", "pattern": "\\\\" } },
+        "reason": {
+          "enum": ["symlink", "size", "binary", "excluded-dir", "never-open", "not-regular", "unreadable"]
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filesScanned", "filesSkipped", "dropped", "ignored", "findings", "distinct", "byGrade"],
+      "properties": {
+        "filesScanned": { "$ref": "#/$defs/count" },
+        "filesSkipped": { "$ref": "#/$defs/count" },
+        "dropped": { "$ref": "#/$defs/count" },
+        "ignored": { "$ref": "#/$defs/count" },
+        "findings": { "$ref": "#/$defs/count" },
+        "distinct": { "$ref": "#/$defs/count" },
+        "blobsScanned": { "description": "Only with --git-history: distinct historical blobs read.", "$ref": "#/$defs/count" },
+        "shallowHistory": { "description": "Only with --git-history --allow-shallow on a shallow clone: commits before the shallow boundary were not scanned.", "const": true },
+        "agentConfigs": {
+          "description": "Only with --agent-configs: well-known agent and MCP client locations that exist (and were scanned) and that do not.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["found", "absent"],
+          "properties": {
+            "found": { "type": "array", "items": { "$ref": "#/$defs/agentLocation" } },
+            "absent": { "type": "array", "items": { "$ref": "#/$defs/agentLocation" } }
+          }
+        },
+        "byGrade": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ADMIN", "SPEND", "OPERATE", "RECEIVE", "READ", "UNASSESSED", "NWC", "UNDECODABLE"],
+          "properties": {
+            "ADMIN": { "$ref": "#/$defs/count" },
+            "SPEND": { "$ref": "#/$defs/count" },
+            "OPERATE": { "$ref": "#/$defs/count" },
+            "RECEIVE": { "$ref": "#/$defs/count" },
+            "READ": { "$ref": "#/$defs/count" },
+            "UNASSESSED": { "$ref": "#/$defs/count" },
+            "NWC": { "$ref": "#/$defs/count" },
+            "UNDECODABLE": { "$ref": "#/$defs/count" }
+          }
+        }
+      }
+    },
+    "failOn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["threshold", "count"],
+      "properties": {
+        "threshold": { "$ref": "#/$defs/ladderGrade" },
+        "count": { "$ref": "#/$defs/count" }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["findings", "skipped", "summary", "failOn"],
+      "properties": {
+        "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+        "skipped": { "type": "array", "items": { "$ref": "#/$defs/skipped" } },
+        "ignoredFingerprints": {
+          "description": "Present only when findings are ignored. Sorted unique canonical fingerprints of suppressed findings, without their details.",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/fingerprint" }
+        },
+        "summary": { "$ref": "#/$defs/summary" },
+        "failOn": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/failOn" }] }
+      }
+    }
+  }
+}

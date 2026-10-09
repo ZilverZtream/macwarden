@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Credential-free registry entry",
+  "type": "object",
+  "required": ["nodePubkey", "label", "rootKeyId", "permissions", "caveats", "grade", "fingerprint", "outPath", "createdAt", "verified", "status", "revokedAt", "revokeEvidence", "replaces", "replacedBy"],
+  "additionalProperties": false,
+  "properties": {
+    "nodePubkey": {"type": "string", "pattern": "^0[23][0-9a-fA-F]{64}$"},
+    "label": {"type": ["string", "null"], "pattern": "^[A-Za-z][A-Za-z0-9._-]{0,63}$"},
+    "rootKeyId": {"type": "string", "pattern": "^(0|[1-9][0-9]*)$"},
+    "permissions": {"type": "array", "items": {"type": "string"}},
+    "caveats": {"type": "array", "items": {"type": "object"}},
+    "grade": {"enum": ["ADMIN", "SPEND", "OPERATE", "RECEIVE", "READ", "UNASSESSED"]},
+    "fingerprint": {"type": ["string", "null"], "pattern": "^fp:[0-9a-f]{16}$"},
+    "outPath": {"type": ["string", "null"]},
+    "createdAt": {"type": "string"},
+    "verified": {"type": "boolean"},
+    "status": {"enum": ["active", "revoked"]},
+    "revokedAt": {"type": ["string", "null"]},
+    "revokeEvidence": {"enum": ["rejected", "by-id-only", null]},
+    "replaces": {"type": ["string", "null"], "pattern": "^(0|[1-9][0-9]*)$"},
+    "replacedBy": {"type": ["string", "null"], "pattern": "^(0|[1-9][0-9]*)$"}
+  },
+  "allOf": [{
+    "if": {"properties": {"fingerprint": {"type": "null"}}},
+    "then": {"properties": {"verified": {"const": false}, "outPath": {"type": "null"}}}
+  }]
+}

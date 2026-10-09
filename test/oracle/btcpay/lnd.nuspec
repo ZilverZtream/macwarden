@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
+  <metadata>
+    <id>BTCPayServer.Lightning.LND</id>
+    <version>1.7.2</version>
+    <authors>BTCPayServer.Lightning.LND</authors>
+    <license type="expression">MIT</license>
+    <licenseUrl>https://licenses.nuget.org/MIT</licenseUrl>
+    <readme>README.md</readme>
+    <projectUrl>https://github.com/btcpayserver/BTCPayServer.Lightning</projectUrl>
+    <description>Client library for LND to build Lightning Network Apps in C#.</description>
+    <tags>lightning bitcoin lnd lapps</tags>
+    <repository type="git" url="https://github.com/btcpayserver/BTCPayServer.Lightning" commit="62164e9394295bb27ebd06b769c6038f9277fb37" />
+    <dependencies>
+      <group targetFramework="net10.0">
+        <dependency id="BTCPayServer.Lightning.Common" version="1.7.2" exclude="Build,Analyzers" />
+      </group>
+      <group targetFramework=".NETStandard2.0">
+        <dependency id="BTCPayServer.Lightning.Common" version="1.7.2" exclude="Build,Analyzers" />
+        <dependency id="System.Threading.Channels" version="8.0.0" exclude="Build,Analyzers" />
+      </group>
+    </dependencies>
+  </metadata>
+</package>

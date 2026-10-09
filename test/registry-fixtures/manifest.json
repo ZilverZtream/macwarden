@@ -1,0 +1,10 @@
+{
+  "source": "docs/spec.md#registry-format and test/vectors/manifest.json",
+  "schema": 1,
+  "entryCount": 3,
+  "entries": [
+    { "nodePubkey": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "rootKeyId": "18446744073709551615", "label": "btcpay", "status": "active", "fingerprint": "fp:fab2bae47e567b11", "grade": "RECEIVE" },
+    { "nodePubkey": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "rootKeyId": "4831990234117", "label": null, "status": "revoked", "fingerprint": "fp:4e7f80baa57e6e1d", "grade": "READ" },
+    { "nodePubkey": "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "rootKeyId": "18446744073709551615", "label": "btcpay", "status": "active", "fingerprint": "fp:4e7f80baa57e6e1d", "grade": "READ" }
+  ]
+}

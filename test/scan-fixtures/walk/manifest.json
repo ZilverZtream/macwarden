@@ -1,0 +1,27 @@
+{
+  "source": "test/vectors/manifest.json and stored lncli printmacaroon JSON; bad.macaroon fingerprint is SHA-256 of its literal bytes",
+  "files": [
+    { "path": "a.env", "findings": [{ "line": 1, "column": 1, "kind": "macaroon-hex", "fingerprint": "fp:4e7f80baa57e6e1d", "grade": "READ" }] },
+    { "path": "admin.macaroon", "findings": [{ "line": null, "column": null, "kind": "macaroon-file", "fingerprint": "fp:c1034ad4f2a2a06f", "grade": "ADMIN" }] },
+    { "path": "bad.macaroon", "findings": [{ "line": null, "column": null, "kind": "undecodable", "fingerprint": "fp:795b6904e54f8241", "grade": null }] },
+    { "path": "inv.MACAROON", "findings": [{ "line": null, "column": null, "kind": "macaroon-file", "fingerprint": "fp:fab2bae47e567b11", "grade": "RECEIVE" }] },
+    { "path": "manifest.json", "findings": [] },
+    { "path": "ro.macaroon", "findings": [{ "line": null, "column": null, "kind": "macaroon-file", "fingerprint": "fp:4e7f80baa57e6e1d", "grade": "READ" }] },
+    { "path": "sub/b.yml", "findings": [{ "line": 1, "column": 1, "kind": "macaroon-base64", "fingerprint": "fp:fab2bae47e567b11", "grade": "RECEIVE" }] }
+  ],
+  "skipped": [
+    { "path": "MACAROONS.DB", "reason": "never-open" },
+    { "path": "binary.txt", "reason": "binary" },
+    { "path": "node_modules", "reason": "excluded-dir" },
+    { "path": "seed", "reason": "never-open" }
+  ],
+  "summary": {
+    "filesScanned": 7,
+    "filesSkipped": 4,
+    "dropped": 0,
+    "ignored": 0,
+    "findings": 6,
+    "distinct": 4,
+    "byGrade": { "ADMIN": 1, "SPEND": 0, "OPERATE": 0, "RECEIVE": 2, "READ": 2, "UNASSESSED": 0, "NWC": 0, "UNDECODABLE": 1 }
+  }
+}

@@ -1,0 +1,508 @@
+{
+  "lndVersion": "0.21.4-beta",
+  "methods": {
+    "/autopilotrpc.Autopilot/ModifyStatus": [
+      "onchain:write",
+      "offchain:write"
+    ],
+    "/autopilotrpc.Autopilot/QueryScores": [
+      "info:read"
+    ],
+    "/autopilotrpc.Autopilot/SetScores": [
+      "onchain:write",
+      "offchain:write"
+    ],
+    "/autopilotrpc.Autopilot/Status": [
+      "info:read"
+    ],
+    "/chainrpc.ChainKit/GetBestBlock": [
+      "onchain:read"
+    ],
+    "/chainrpc.ChainKit/GetBlock": [
+      "onchain:read"
+    ],
+    "/chainrpc.ChainKit/GetBlockHash": [
+      "onchain:read"
+    ],
+    "/chainrpc.ChainKit/GetBlockHeader": [
+      "onchain:read"
+    ],
+    "/chainrpc.ChainNotifier/RegisterBlockEpochNtfn": [
+      "onchain:read"
+    ],
+    "/chainrpc.ChainNotifier/RegisterConfirmationsNtfn": [
+      "onchain:read"
+    ],
+    "/chainrpc.ChainNotifier/RegisterSpendNtfn": [
+      "onchain:read"
+    ],
+    "/invoicesrpc.Invoices/AddHoldInvoice": [
+      "invoices:write"
+    ],
+    "/invoicesrpc.Invoices/CancelInvoice": [
+      "invoices:write"
+    ],
+    "/invoicesrpc.Invoices/HtlcModifier": [
+      "invoices:write"
+    ],
+    "/invoicesrpc.Invoices/LookupInvoiceV2": [
+      "invoices:write"
+    ],
+    "/invoicesrpc.Invoices/SettleInvoice": [
+      "invoices:write"
+    ],
+    "/invoicesrpc.Invoices/SubscribeSingleInvoice": [
+      "invoices:read"
+    ],
+    "/lnrpc.Lightning/AbandonChannel": [
+      "offchain:write"
+    ],
+    "/lnrpc.Lightning/AddInvoice": [
+      "invoices:write"
+    ],
+    "/lnrpc.Lightning/BakeMacaroon": [
+      "macaroon:generate"
+    ],
+    "/lnrpc.Lightning/BatchOpenChannel": [
+      "onchain:write",
+      "offchain:write"
+    ],
+    "/lnrpc.Lightning/ChannelAcceptor": [
+      "onchain:write",
+      "offchain:write"
+    ],
+    "/lnrpc.Lightning/ChannelBalance": [
+      "offchain:read"
+    ],
+    "/lnrpc.Lightning/CheckMacaroonPermissions": [
+      "macaroon:read"
+    ],
+    "/lnrpc.Lightning/CloseChannel": [
+      "onchain:write",
+      "offchain:write"
+    ],
+    "/lnrpc.Lightning/ClosedChannels": [
+      "offchain:read"
+    ],
+    "/lnrpc.Lightning/ConnectPeer": [
+      "peers:write"
+    ],
+    "/lnrpc.Lightning/DebugLevel": [
+      "info:write"
+    ],
+    "/lnrpc.Lightning/DecodePayReq": [
+      "offchain:read"
+    ],
+    "/lnrpc.Lightning/DeleteAllPayments": [
+      "offchain:write"
+    ],
+    "/lnrpc.Lightning/DeleteCanceledInvoice": [
+      "invoices:write"
+    ],
+    "/lnrpc.Lightning/DeleteMacaroonID": [
+      "macaroon:write"
+    ],
+    "/lnrpc.Lightning/DeletePayment": [
+      "offchain:write"
+    ],
+    "/lnrpc.Lightning/DescribeGraph": [
+      "info:read"
+    ],
+    "/lnrpc.Lightning/DisconnectPeer": [
+      "peers:write"
+    ],
+    "/lnrpc.Lightning/EstimateFee": [
+      "onchain:read"
+    ],
+    "/lnrpc.Lightning/ExportAllChannelBackups": [
+      "offchain:read"
+    ],
+    "/lnrpc.Lightning/ExportChannelBackup": [
+      "offchain:read"
+    ],
+    "/lnrpc.Lightning/FeeReport": [
+      "offchain:read"
+    ],
+    "/lnrpc.Lightning/ForwardingHistory": [
+      "offchain:read"
+    ],
+    "/lnrpc.Lightning/FundingStateStep": [
+      "onchain:write",
+      "offchain:write"
+    ],
+    "/lnrpc.Lightning/GetChanInfo": [
+      "info:read"
+    ],
+    "/lnrpc.Lightning/GetDebugInfo": [
+      "info:read",
+      "offchain:read",
+      "onchain:read",
+      "peers:read"
+    ],
+    "/lnrpc.Lightning/GetInfo": [
+      "info:read"
+    ],
+    "/lnrpc.Lightning/GetNetworkInfo": [
+      "info:read"
+    ],
+    "/lnrpc.Lightning/GetNodeInfo": [
+      "info:read"
+    ],
+    "/lnrpc.Lightning/GetNodeMetrics": [
+      "info:read"
+    ],
+    "/lnrpc.Lightning/GetRecoveryInfo": [
+      "info:read"
+    ],
+    "/lnrpc.Lightning/GetTransactions": [
+      "onchain:read"
+    ],
+    "/lnrpc.Lightning/ListAliases": [
+      "offchain:read"
+    ],
+    "/lnrpc.Lightning/ListChannels": [
+      "offchain:read"
+    ],
+    "/lnrpc.Lightning/ListInvoices": [
+      "invoices:read"
+    ],
+    "/lnrpc.Lightning/ListMacaroonIDs": [
+      "macaroon:read"
+    ],
+    "/lnrpc.Lightning/ListPayments": [
+      "offchain:read"
+    ],
+    "/lnrpc.Lightning/ListPeers": [
+      "peers:read"
+    ],
+    "/lnrpc.Lightning/ListPermissions": [
+      "info:read"
+    ],
+    "/lnrpc.Lightning/ListUnspent": [
+      "onchain:read"
+    ],
+    "/lnrpc.Lightning/LookupHtlcResolution": [
+      "offchain:read"
+    ],
+    "/lnrpc.Lightning/LookupInvoice": [
+      "invoices:read"
+    ],
+    "/lnrpc.Lightning/NewAddress": [
+      "address:write"
+    ],
+    "/lnrpc.Lightning/OpenChannel": [
+      "onchain:write",
+      "offchain:write"
+    ],
+    "/lnrpc.Lightning/OpenChannelSync": [
+      "onchain:write",
+      "offchain:write"
+    ],
+    "/lnrpc.Lightning/PendingChannels": [
+      "offchain:read"
+    ],
+    "/lnrpc.Lightning/QueryRoutes": [
+      "info:read"
+    ],
+    "/lnrpc.Lightning/RegisterRPCMiddleware": [
+      "macaroon:write"
+    ],
+    "/lnrpc.Lightning/RestoreChannelBackups": [
+      "offchain:write"
+    ],
+    "/lnrpc.Lightning/SendCoins": [
+      "onchain:write"
+    ],
+    "/lnrpc.Lightning/SendCustomMessage": [
+      "offchain:write"
+    ],
+    "/lnrpc.Lightning/SendMany": [
+      "onchain:write"
+    ],
+    "/lnrpc.Lightning/SendOnionMessage": [
+      "offchain:write"
+    ],
+    "/lnrpc.Lightning/SignMessage": [
+      "message:write"
+    ],
+    "/lnrpc.Lightning/StopDaemon": [
+      "info:write"
+    ],
+    "/lnrpc.Lightning/SubscribeChannelBackups": [
+      "offchain:read"
+    ],
+    "/lnrpc.Lightning/SubscribeChannelEvents": [
+      "offchain:read"
+    ],
+    "/lnrpc.Lightning/SubscribeChannelGraph": [
+      "info:read"
+    ],
+    "/lnrpc.Lightning/SubscribeCustomMessages": [
+      "offchain:read"
+    ],
+    "/lnrpc.Lightning/SubscribeInvoices": [
+      "invoices:read"
+    ],
+    "/lnrpc.Lightning/SubscribeOnionMessages": [
+      "offchain:read"
+    ],
+    "/lnrpc.Lightning/SubscribePeerEvents": [
+      "peers:read"
+    ],
+    "/lnrpc.Lightning/SubscribeTransactions": [
+      "onchain:read"
+    ],
+    "/lnrpc.Lightning/UpdateChannelPolicy": [
+      "offchain:write"
+    ],
+    "/lnrpc.Lightning/VerifyChanBackup": [
+      "offchain:read"
+    ],
+    "/lnrpc.Lightning/VerifyMessage": [
+      "message:read"
+    ],
+    "/lnrpc.Lightning/WalletBalance": [
+      "onchain:read"
+    ],
+    "/neutrinorpc.NeutrinoKit/AddPeer": [
+      "peers:write"
+    ],
+    "/neutrinorpc.NeutrinoKit/DisconnectPeer": [
+      "peers:write"
+    ],
+    "/neutrinorpc.NeutrinoKit/GetBlock": [
+      "onchain:read"
+    ],
+    "/neutrinorpc.NeutrinoKit/GetBlockHash": [
+      "onchain:read"
+    ],
+    "/neutrinorpc.NeutrinoKit/GetBlockHeader": [
+      "onchain:read"
+    ],
+    "/neutrinorpc.NeutrinoKit/GetCFilter": [
+      "onchain:read"
+    ],
+    "/neutrinorpc.NeutrinoKit/IsBanned": [
+      "info:read"
+    ],
+    "/neutrinorpc.NeutrinoKit/Status": [
+      "info:read"
+    ],
+    "/peersrpc.Peers/UpdateNodeAnnouncement": [
+      "peers:write"
+    ],
+    "/routerrpc.Router/BuildRoute": [
+      "offchain:read"
+    ],
+    "/routerrpc.Router/DeleteForwardingHistory": [
+      "offchain:write"
+    ],
+    "/routerrpc.Router/EstimateRouteFee": [
+      "offchain:read"
+    ],
+    "/routerrpc.Router/GetMissionControlConfig": [
+      "offchain:read"
+    ],
+    "/routerrpc.Router/HtlcInterceptor": [
+      "offchain:write"
+    ],
+    "/routerrpc.Router/QueryMissionControl": [
+      "offchain:read"
+    ],
+    "/routerrpc.Router/QueryProbability": [
+      "offchain:read"
+    ],
+    "/routerrpc.Router/ResetMissionControl": [
+      "offchain:write"
+    ],
+    "/routerrpc.Router/SendPaymentV2": [
+      "offchain:write"
+    ],
+    "/routerrpc.Router/SendToRouteV2": [
+      "offchain:write"
+    ],
+    "/routerrpc.Router/SetMissionControlConfig": [
+      "offchain:write"
+    ],
+    "/routerrpc.Router/SubscribeHtlcEvents": [
+      "offchain:read"
+    ],
+    "/routerrpc.Router/TrackPaymentV2": [
+      "offchain:read"
+    ],
+    "/routerrpc.Router/TrackPayments": [
+      "offchain:read"
+    ],
+    "/routerrpc.Router/UpdateChanStatus": [
+      "offchain:write"
+    ],
+    "/routerrpc.Router/XAddLocalChanAliases": [
+      "offchain:write"
+    ],
+    "/routerrpc.Router/XDeleteLocalChanAliases": [
+      "offchain:write"
+    ],
+    "/routerrpc.Router/XImportMissionControl": [
+      "offchain:write"
+    ],
+    "/signrpc.Signer/ComputeInputScript": [
+      "signer:generate"
+    ],
+    "/signrpc.Signer/DeriveSharedKey": [
+      "signer:generate"
+    ],
+    "/signrpc.Signer/MuSig2Cleanup": [
+      "signer:generate"
+    ],
+    "/signrpc.Signer/MuSig2CombineKeys": [
+      "signer:read"
+    ],
+    "/signrpc.Signer/MuSig2CombineSig": [
+      "signer:generate"
+    ],
+    "/signrpc.Signer/MuSig2CreateSession": [
+      "signer:generate"
+    ],
+    "/signrpc.Signer/MuSig2GetCombinedNonce": [
+      "signer:read"
+    ],
+    "/signrpc.Signer/MuSig2RegisterCombinedNonce": [
+      "signer:generate"
+    ],
+    "/signrpc.Signer/MuSig2RegisterNonces": [
+      "signer:generate"
+    ],
+    "/signrpc.Signer/MuSig2Sign": [
+      "signer:generate"
+    ],
+    "/signrpc.Signer/SignMessage": [
+      "signer:generate"
+    ],
+    "/signrpc.Signer/SignOutputRaw": [
+      "signer:generate"
+    ],
+    "/signrpc.Signer/VerifyMessage": [
+      "signer:read"
+    ],
+    "/verrpc.Versioner/GetVersion": [
+      "info:read"
+    ],
+    "/walletrpc.WalletKit/BumpFee": [
+      "onchain:write"
+    ],
+    "/walletrpc.WalletKit/BumpForceCloseFee": [
+      "onchain:write"
+    ],
+    "/walletrpc.WalletKit/DeriveKey": [
+      "address:read"
+    ],
+    "/walletrpc.WalletKit/DeriveNextKey": [
+      "address:read"
+    ],
+    "/walletrpc.WalletKit/EstimateFee": [
+      "onchain:read"
+    ],
+    "/walletrpc.WalletKit/FinalizePsbt": [
+      "onchain:write"
+    ],
+    "/walletrpc.WalletKit/FundPsbt": [
+      "onchain:write"
+    ],
+    "/walletrpc.WalletKit/GetTransaction": [
+      "onchain:read"
+    ],
+    "/walletrpc.WalletKit/ImportAccount": [
+      "onchain:write"
+    ],
+    "/walletrpc.WalletKit/ImportPublicKey": [
+      "onchain:write"
+    ],
+    "/walletrpc.WalletKit/ImportTapscript": [
+      "onchain:write"
+    ],
+    "/walletrpc.WalletKit/LabelTransaction": [
+      "onchain:write"
+    ],
+    "/walletrpc.WalletKit/LeaseOutput": [
+      "onchain:write"
+    ],
+    "/walletrpc.WalletKit/ListAccounts": [
+      "onchain:read"
+    ],
+    "/walletrpc.WalletKit/ListAddresses": [
+      "onchain:read"
+    ],
+    "/walletrpc.WalletKit/ListLeases": [
+      "onchain:read"
+    ],
+    "/walletrpc.WalletKit/ListSweeps": [
+      "onchain:read"
+    ],
+    "/walletrpc.WalletKit/ListUnspent": [
+      "onchain:read"
+    ],
+    "/walletrpc.WalletKit/NextAddr": [
+      "address:read"
+    ],
+    "/walletrpc.WalletKit/PendingSweeps": [
+      "onchain:read"
+    ],
+    "/walletrpc.WalletKit/PublishTransaction": [
+      "onchain:write"
+    ],
+    "/walletrpc.WalletKit/ReleaseOutput": [
+      "onchain:write"
+    ],
+    "/walletrpc.WalletKit/RemoveTransaction": [
+      "onchain:write"
+    ],
+    "/walletrpc.WalletKit/RequiredReserve": [
+      "onchain:read"
+    ],
+    "/walletrpc.WalletKit/SendOutputs": [
+      "onchain:write"
+    ],
+    "/walletrpc.WalletKit/SignMessageWithAddr": [
+      "onchain:write"
+    ],
+    "/walletrpc.WalletKit/SignPsbt": [
+      "onchain:write"
+    ],
+    "/walletrpc.WalletKit/SubmitPackage": [
+      "onchain:write"
+    ],
+    "/walletrpc.WalletKit/VerifyMessageWithAddr": [
+      "onchain:write"
+    ],
+    "/walletrpc.WalletKit/XCreateAccount": [
+      "onchain:write"
+    ],
+    "/watchtowerrpc.Watchtower/GetInfo": [
+      "info:read"
+    ],
+    "/wtclientrpc.WatchtowerClient/AddTower": [
+      "offchain:write"
+    ],
+    "/wtclientrpc.WatchtowerClient/DeactivateTower": [
+      "offchain:write"
+    ],
+    "/wtclientrpc.WatchtowerClient/GetTowerInfo": [
+      "offchain:read"
+    ],
+    "/wtclientrpc.WatchtowerClient/ListTowers": [
+      "offchain:read"
+    ],
+    "/wtclientrpc.WatchtowerClient/Policy": [
+      "offchain:read"
+    ],
+    "/wtclientrpc.WatchtowerClient/RemoveTower": [
+      "offchain:write"
+    ],
+    "/wtclientrpc.WatchtowerClient/Stats": [
+      "offchain:read"
+    ],
+    "/wtclientrpc.WatchtowerClient/TerminateSession": [
+      "offchain:write"
+    ]
+  }
+}

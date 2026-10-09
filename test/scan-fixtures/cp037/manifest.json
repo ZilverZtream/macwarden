@@ -1,0 +1,32 @@
+{
+  "source": "Literal code-point offsets from fixture construction; fingerprint and grade copied from test/vectors/manifest.json default-readonly",
+  "files": [
+    {
+      "path": "long-utf8.env",
+      "encoding": "UTF-8",
+      "findings": [
+        { "line": 1, "column": 32767, "kind": "macaroon-hex", "fingerprint": "fp:4e7f80baa57e6e1d", "grade": "READ" },
+        { "line": 1, "column": 65970, "kind": "macaroon-hex", "fingerprint": "fp:4e7f80baa57e6e1d", "grade": "READ" },
+        { "line": 2, "column": 5, "kind": "macaroon-hex", "fingerprint": "fp:4e7f80baa57e6e1d", "grade": "READ" }
+      ]
+    },
+    {
+      "path": "long-utf16le.env",
+      "encoding": "UTF-16LE with BOM",
+      "findings": [
+        { "line": 1, "column": 32767, "kind": "macaroon-hex", "fingerprint": "fp:4e7f80baa57e6e1d", "grade": "READ" },
+        { "line": 1, "column": 65970, "kind": "macaroon-hex", "fingerprint": "fp:4e7f80baa57e6e1d", "grade": "READ" },
+        { "line": 2, "column": 5, "kind": "macaroon-hex", "fingerprint": "fp:4e7f80baa57e6e1d", "grade": "READ" }
+      ]
+    },
+    {
+      "path": "long-utf16be.env",
+      "encoding": "UTF-16BE with BOM",
+      "findings": [
+        { "line": 1, "column": 32767, "kind": "macaroon-hex", "fingerprint": "fp:4e7f80baa57e6e1d", "grade": "READ" },
+        { "line": 1, "column": 65970, "kind": "macaroon-hex", "fingerprint": "fp:4e7f80baa57e6e1d", "grade": "READ" },
+        { "line": 2, "column": 5, "kind": "macaroon-hex", "fingerprint": "fp:4e7f80baa57e6e1d", "grade": "READ" }
+      ]
+    }
+  ]
+}
