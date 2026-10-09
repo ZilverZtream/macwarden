@@ -73,14 +73,51 @@ export type WatchEvent =
       repeats?: number }
   | { event: 'status'; time: string; status: 'registered' | 'reconnecting'; canaries: number; readOnly: true }
   | { event: 'status'; time: string; status: 'output-dropped'; dropped: number }
-  | { event: 'status'; time: string; status: 'alert-failed'; rootKeyId: string; label: string | null };
+  | { event: 'status'; time: string; status: 'alert-failed'; rootKeyId: string; label: string | null }
+  /** The payment journal stopped before the run ended; payments after this are not journaled. */
+  | { event: 'status'; time: string; status: 'payment-journal-stopped'; reason: 'full' | 'write-failed' | 'stalled' };
 export type WatchResult = { node: string; startedAt: string; endedAt: string; calls: number; errors: number;
   credentials: number; canaryAlerts: number; canaryUses: number; alertFailures: number; reconnects: number; canaries: number; usageFile: string;
   droppedUsageRecords: number;
   /** Usage records evicted (least recently seen first) to stay within the store limit. */
   evictedUsageRecords: number; droppedEvents: number 
   /** Calls whose attribution was dropped because callers outpaced it (the RPCs themselves were answered). */
-  droppedAttributions?: number };
+  droppedAttributions?: number;
+  /** Present with --payment-journal: records written this run, calls not journaled, and why journaling stopped early. */
+  paymentJournal?: { path: string; payments: number; deletions: number; dropped: number; stopped: 'full' | 'write-failed' | 'stalled' | null } };
+/** One journaled payment request, as reconcile reports it (observation evidence). */
+export type ReconcileObservation = { time: string; run: string; requestId: string; method: string; credential: string; rootKeyId: string;
+  label: string | null; amountMsat: string | null; amountSource: 'request' | 'invoice' | 'route' | null; feeLimitMsat: string | null;
+  extraction: string };
+/** What LND reports for one payment hash (settlement evidence); amounts in millisatoshi as decimal strings. */
+export type ReconcileSettlement = { status: 'succeeded' | 'failed' | 'in-flight' | 'not-found' | 'unknown';
+  source: 'list-payments' | 'track-payment' | null; createdAt: string | null; settledMsat: string | null; feesMsat: string | null;
+  inFlightMsat: string | null; attempts: number | null; failureReason: string | null; predatesObservation: boolean };
+export type ReconcilePayment = { paymentHash: string; attribution: 'single' | 'ambiguous'; credentials: string[];
+  observation: { first: string; last: string; calls: number; requestedMsat: string | null; routeAttemptsMsat: string | null;
+    feeLimitMsat: string | null; observations: ReconcileObservation[] };
+  settlement: ReconcileSettlement; deletedBy: string[] };
+export type ReconcileCredential = { credential: string; rootKeyIds: string[]; label: string | null; payments: number; succeeded: number;
+  failed: number; inFlight: number; notFound: number; unknown: number; ambiguous: number; unmatched: number; deletions: number;
+  requestedMsat: string; settledMsat: string; feesMsat: string; inFlightMsat: string };
+export type ReconcileUnattributed = { paymentHash: string; createdAt: string; status: 'succeeded' | 'failed' | 'in-flight' | 'unknown';
+  settledMsat: string; feesMsat: string; inFlightMsat: string; attempts: number; failureReason: string | null;
+  coverage: 'covered' | 'boundary' | 'gap' };
+export type ReconcileResult = {
+  node: { pubkey: string; alias: string; network: string };
+  journal: { path: string; size: number; runs: number; records: number; firstRecord: string | null; lastRecord: string | null;
+    otherNodeRecords: number; tornTail: boolean; repairedLines: number };
+  window: { since: string; until: string };
+  coverage: { windowSeconds: number; coveredSeconds: number; complete: boolean; gapCount: number; gapSeconds: number;
+    gaps: { from: string; to: string; reason: string; dropped: number }[] };
+  credentials: ReconcileCredential[];
+  payments: ReconcilePayment[];
+  unmatched: ReconcileObservation[];
+  unattributed: ReconcileUnattributed[];
+  deletions: { time: string; run: string; requestId: string; method: string; credential: string; rootKeyId: string; label: string | null;
+    scope: string; paymentHash: string | null; extraction: string }[];
+  lookups: { listed: number; listTruncated: boolean; tracked: number; trackFailed: number; trackLimited: number; attributedOutsideWindow: number };
+};
 export type RecommendResult = { node: string; selector: string; label: string | null; rootKeyId: string | null;
   credentials: string[]; observed: { method: string; calls: number; lastUsed: string; permissions: string[] }[];
   unmapped: string[]; recommended: string[]; recommendedUris: string[]; current: string[] | null; unneeded: string[];
@@ -106,6 +143,7 @@ export type OutputResult =
   | Success<'recommend', RecommendResult>
   | Success<'respond', RespondResult>
   | Success<'verify', VerifyResult>
+  | Success<'reconcile', ReconcileResult>
   | Success<null, { text: string }>;
 
 import type { RevokePlan, RevokeResult, RotatePlan, RotateStagedResult, RotateFinishedResult, RespondResult } from '../command-result.js';
@@ -628,6 +666,8 @@ export function renderWatchEvent(event: WatchEvent, mode: Mode): string {
   if (mode === 'json') return `${JSON.stringify({ schema: 1, ...event }, jsonRedactor())}\n`;
   if (event.event === 'status' && event.status === 'output-dropped')
     return `${safeText(event.time)}  output fell behind: ${event.dropped} event lines dropped (counts and usage are unaffected)\n`;
+  if (event.event === 'status' && event.status === 'payment-journal-stopped')
+    return `${safeText(event.time)}  PAYMENT JOURNAL STOPPED (${safeText(event.reason)}): later payments are not journaled; reconcile reports the rest of this run as a gap\n`;
   if (event.event === 'status' && event.status === 'alert-failed')
     return `${safeText(event.time)}  ALERT COMMAND FAILED for canary ${safeText(event.label ?? 'unknown')} (root key ${safeText(event.rootKeyId)})\n`;
   if (event.event === 'status') return `${safeText(event.time)}  ${event.status === 'registered'
@@ -645,7 +685,55 @@ function watchText(result: WatchResult): string {
     `${result.reconnects} reconnects; usage saved to ${safeText(result.usageFile)}` +
     `${result.droppedUsageRecords ? `; ${result.droppedUsageRecords} usage records dropped` : ''}` +
     `${result.evictedUsageRecords ? `; ${result.evictedUsageRecords} usage records evicted at the limit` : ''}` +
-    `${result.droppedEvents ? `; ${result.droppedEvents} event lines dropped because output fell behind` : ''}\n`;
+    `${result.droppedEvents ? `; ${result.droppedEvents} event lines dropped because output fell behind` : ''}\n`
+    + (result.paymentJournal ? `payment journal ${safeText(result.paymentJournal.path)}: ${result.paymentJournal.payments} payments, `
+      + `${result.paymentJournal.deletions} deletions journaled${result.paymentJournal.dropped ? `; ${result.paymentJournal.dropped} not journaled` : ''}`
+      + `${result.paymentJournal.stopped ? `; stopped early (${safeText(result.paymentJournal.stopped)})` : ''}\n` : '');
+}
+
+/** "1500 msat", or "unknown" for evidence that is not there. */
+function msat(value: string | null): string { return value === null ? 'unknown' : `${safeText(value)} msat`; }
+
+function reconcileText(result: ReconcileResult): string {
+  const who = (credential: string, rootKeyId: string | null, label: string | null) =>
+    `${safeText(credential)}${rootKeyId ? ` root key ${safeText(rootKeyId)}` : ''}${label ? ` (${safeText(label)})` : ''}`;
+  const lines = [
+    `node         ${safeText(result.node.pubkey)} (${safeText(result.node.alias)}, ${safeText(result.node.network)})`,
+    `journal      ${safeText(result.journal.path)}: ${result.journal.records} records in ${result.journal.runs} watch runs`
+      + (result.journal.firstRecord ? `, ${safeText(result.journal.firstRecord)} to ${safeText(result.journal.lastRecord ?? '')}` : ''),
+    `window       ${safeText(result.window.since)} to ${safeText(result.window.until)}; covered ${formatDuration(result.coverage.coveredSeconds)} `
+      + `of ${formatDuration(result.coverage.windowSeconds)}${result.coverage.complete ? '' : ` (${result.coverage.gapCount} gaps)`}`,
+    ...result.coverage.gaps.slice(0, 20).map(gap => `gap          ${safeText(gap.from)} to ${safeText(gap.to)}  ${safeText(gap.reason)}`
+      + (gap.dropped ? `  ${gap.dropped} payment calls not journaled` : '')),
+    ...(result.coverage.gapCount > 20 ? [`gap          ... ${result.coverage.gapCount - 20} more (see --json)`] : []),
+    ...result.credentials.map(row => `credential   ${who(row.credential, row.rootKeyIds.join(',') || null, row.label)}: ${row.payments} payments `
+      + `(${row.succeeded} succeeded, ${row.failed} failed, ${row.inFlight + row.notFound + row.unknown} without a final outcome)`
+      + `; requested ${msat(row.requestedMsat)}; settled ${msat(row.settledMsat)}; fees ${msat(row.feesMsat)}`
+      + `${row.inFlightMsat !== '0' ? `; in flight ${msat(row.inFlightMsat)}` : ''}`
+      + `${row.ambiguous ? `; ${row.ambiguous} shared with other credentials` : ''}${row.unmatched ? `; ${row.unmatched} without a hash` : ''}`
+      + `${row.deletions ? `; ${row.deletions} payment record deletions` : ''}`),
+    ...result.payments.map(item => {
+      const observed = item.attribution === 'single' ? safeText(item.credentials[0]) : `ambiguous (${item.credentials.map(safeText).join(', ')})`;
+      const settled = item.settlement;
+      return `payment      ${safeText(item.paymentHash)}  observed: ${observed}, ${item.observation.calls} request${item.observation.calls === 1 ? '' : 's'}, `
+        + `requested ${msat(item.observation.requestedMsat ?? item.observation.routeAttemptsMsat)}, fee limit ${msat(item.observation.feeLimitMsat)}`
+        + `  |  LND: ${safeText(settled.status)}${settled.source ? `, settled ${msat(settled.settledMsat)}, fees ${msat(settled.feesMsat)}, `
+          + `${settled.attempts} attempt${settled.attempts === 1 ? '' : 's'}` : ''}`
+        + `${settled.failureReason ? `, ${safeText(settled.failureReason)}` : ''}`
+        + `${settled.predatesObservation ? '; LND record predates the observed request' : ''}`
+        + `${item.deletedBy.length ? `; deletions by ${item.deletedBy.map(safeText).join(', ')}` : ''}`;
+    }),
+    ...result.unmatched.map(item => `unmatched    ${safeText(item.time)}  ${who(item.credential, item.rootKeyId, item.label)}  `
+      + `${safeText(item.method)}  no payment hash (${safeText(item.extraction)})`),
+    ...result.unattributed.map(item => `unattributed ${safeText(item.paymentHash)}  created ${safeText(item.createdAt)}  ${safeText(item.status)}, `
+      + `settled ${msat(item.settledMsat)}, fees ${msat(item.feesMsat)}  (${item.coverage === 'covered' ? 'while watch was registered'
+        : item.coverage === 'boundary' ? 'at the edge of watch coverage' : 'in a journal gap'})`),
+    ...result.deletions.map(item => `deletion     ${safeText(item.time)}  ${who(item.credential, item.rootKeyId, item.label)}  `
+      + `${safeText(item.method)}  ${safeText(item.scope)}${item.paymentHash ? ` ${safeText(item.paymentHash)}` : ''}`),
+    'evidence     observed requests (journal) and settlement (LND) are separate; a request is not a payment, and a payment missing '
+      + 'from either is no proof that none was made',
+  ];
+  return `${lines.join('\n')}\n`;
 }
 
 /** "3d 4h", "2h 5m", "1m 30s", "45s". */
@@ -972,6 +1060,7 @@ export function* renderChunks(result: OutputResult, mode: Mode): Generator<strin
     case 'rotate': rendered = rotateText(result.result, result.display?.finish); break;
     case 'respond': rendered = respondText(result.result); break;
     case 'verify': rendered = isInspectResult(result.result) ? verifyText(result.result) : genericText(result); break;
+    case 'reconcile': rendered = reconcileText(result.result); break;
     default: rendered = genericText(result); break;
   }
   yield guardLines(redactKnownSecrets(rendered, secrets));

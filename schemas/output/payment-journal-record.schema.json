@@ -1,0 +1,488 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ZilverZtream/macwarden/blob/main/schemas/output/payment-journal-record.schema.json",
+  "title": "macwarden payment journal record (format version 1)",
+  "description": "Normative source: docs/spec.md, Payment journal format. One line of the file watch --payment-journal appends to; reconcile reads it. Coverage is only what registered markers prove; every other time is a gap.",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "time",
+        "run",
+        "node",
+        "version",
+        "repairedTail"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "run-start"
+        },
+        "time": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "run": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "node": {
+          "type": "string",
+          "pattern": "^0[23][0-9a-fA-F]{64}$"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[ -~]{1,64}$"
+        },
+        "repairedTail": {
+          "type": "boolean"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "time",
+        "run",
+        "session"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "registered"
+        },
+        "time": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "run": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "session": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "time",
+        "run",
+        "session",
+        "reason"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "unregistered"
+        },
+        "time": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "run": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "session": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "reason": {
+          "enum": [
+            "stream-lost",
+            "stopping",
+            "refresh"
+          ]
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "time",
+        "run"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "alive"
+        },
+        "time": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "run": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "time",
+        "run",
+        "requestId",
+        "method",
+        "credential",
+        "rootKeyId",
+        "paymentHash",
+        "amountMsat",
+        "amountSource",
+        "feeLimitMsat",
+        "amp",
+        "extraction"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "payment"
+        },
+        "time": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "run": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "requestId": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]{0,19})$"
+        },
+        "credential": {
+          "type": "string",
+          "pattern": "^id:([0-9a-f]{16}|none|undecodable)$"
+        },
+        "rootKeyId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/rootKeyId"
+            },
+            {
+              "const": "none"
+            }
+          ]
+        },
+        "method": {
+          "enum": [
+            "/routerrpc.Router/SendPaymentV2",
+            "/routerrpc.Router/SendToRouteV2"
+          ]
+        },
+        "paymentHash": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          ]
+        },
+        "amountMsat": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]{0,19})$"
+            }
+          ]
+        },
+        "amountSource": {
+          "enum": [
+            "request",
+            "invoice",
+            "route",
+            null
+          ]
+        },
+        "feeLimitMsat": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]{0,19})$"
+            }
+          ]
+        },
+        "amp": {
+          "type": "boolean"
+        },
+        "extraction": {
+          "enum": [
+            "complete",
+            "no-hash",
+            "amp",
+            "payload-too-large",
+            "malformed",
+            "invoice-invalid",
+            "invoice-too-long"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "extraction": {
+                "const": "complete"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "paymentHash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "paymentHash": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "time",
+        "run",
+        "requestId",
+        "method",
+        "credential",
+        "rootKeyId",
+        "paymentHash",
+        "scope",
+        "extraction"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "deletion"
+        },
+        "time": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "run": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "requestId": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]{0,19})$"
+        },
+        "credential": {
+          "type": "string",
+          "pattern": "^id:([0-9a-f]{16}|none|undecodable)$"
+        },
+        "rootKeyId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/rootKeyId"
+            },
+            {
+              "const": "none"
+            }
+          ]
+        },
+        "method": {
+          "enum": [
+            "/lnrpc.Lightning/DeletePayment",
+            "/lnrpc.Lightning/DeleteAllPayments"
+          ]
+        },
+        "paymentHash": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          ]
+        },
+        "scope": {
+          "enum": [
+            "payment",
+            "failed-htlcs",
+            "all-payments",
+            "failed-payments",
+            "none"
+          ]
+        },
+        "extraction": {
+          "enum": [
+            "complete",
+            "payload-too-large",
+            "malformed"
+          ]
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "time",
+        "run",
+        "count",
+        "first",
+        "last",
+        "reason"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "drop"
+        },
+        "time": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "run": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "first": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "last": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "reason": {
+          "const": "overload"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "time",
+        "run"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "full"
+        },
+        "time": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "run": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "time",
+        "run",
+        "payments",
+        "deletions",
+        "dropped"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "run-end"
+        },
+        "time": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "run": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "payments": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "deletions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dropped": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "rootKeyId": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,19})$",
+      "description": "uint64 as a canonical decimal string (range up to 18446744073709551615 is enforced by the decoder)."
+    }
+  }
+}

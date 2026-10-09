@@ -104,7 +104,18 @@ function ids(body: string): bigint[] {
   });
 }
 
-export function createLndAdapter(config: Config): LndAdapter {
+type CallOptions = {
+  /** Largest response body accepted (default MAX_RESPONSE); a larger one fails the call. */
+  maxResponse?: number;
+  /**
+   * A streaming (server-streaming REST) call: the body is complete at its first newline, which
+   * grpc-gateway writes after each message; the rest of the stream is not read.
+   */
+  firstLine?: boolean;
+};
+
+/** One HTTPS request at a time to LND's REST proxy, with the pinned certificate and own macaroon. */
+function transport(config: Config) {
   const peer = endpoint(config);
   // WHATWG URL keeps an IPv6 literal in brackets ("[::1]"); the transport and its TLS
   // identity check need the bare address, or Node treats it as a DNS name and the
@@ -113,7 +124,9 @@ export function createLndAdapter(config: Config): LndAdapter {
   const ca = Buffer.from(config.tlsCert);
   const own = config.macaroon;
 
-  function call(stage: string, method: 'GET' | 'POST' | 'DELETE', path: string, payload?: object): Promise<Response> {
+  function call(stage: string, method: 'GET' | 'POST' | 'DELETE', path: string, payload?: object,
+    options: CallOptions = {}): Promise<Response> {
+    const limit = options.maxResponse ?? MAX_RESPONSE;
     const body = payload === undefined ? undefined : JSON.stringify(payload);
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -143,12 +156,25 @@ export function createLndAdapter(config: Config): LndAdapter {
         const chunks: Buffer[] = [];
         let size = 0;
         response.on('data', chunk => {
+          if (settled) return;
           const part = Buffer.from(chunk);
           size += part.length;
-          if (size > MAX_RESPONSE) {
+          if (size > limit) {
             response.destroy();
             fail(5, 'LND response too large');
-          } else chunks.push(part);
+            req?.destroy();
+            return;
+          }
+          chunks.push(part);
+          if (options.firstLine && part.includes(0x0a)) {
+            // The first message of a stream is complete; the call ends here (a read-only lookup).
+            const whole = Buffer.concat(chunks);
+            settled = true;
+            cleanup();
+            response.destroy();
+            req?.destroy();
+            resolve({ status: response.statusCode ?? 0, body: whole.subarray(0, whole.indexOf(0x0a)).toString('utf8') });
+          }
         });
         response.on('end', () => {
           if (settled) return;
@@ -176,8 +202,9 @@ export function createLndAdapter(config: Config): LndAdapter {
     });
   }
 
-  async function read(stage: string, method: 'GET' | 'POST' | 'DELETE', path: string, payload?: object): Promise<string> {
-    const response = await call(stage, method, path, payload);
+  async function read(stage: string, method: 'GET' | 'POST' | 'DELETE', path: string, payload?: object,
+    options: CallOptions = {}): Promise<string> {
+    const response = await call(stage, method, path, payload, options);
     if (ownAuthenticationFailure(response))
       throw new LndError(4, stage, 'LND authentication failure');
     if (response.status < 200 || response.status >= 300)
@@ -185,6 +212,11 @@ export function createLndAdapter(config: Config): LndAdapter {
     return response.body;
   }
 
+  return { call, read };
+}
+
+export function createLndAdapter(config: Config): LndAdapter & PaymentLookup {
+  const { call, read } = transport(config);
   return {
     async getInfo() {
       const stage = 'get-info';
@@ -286,6 +318,128 @@ export function createLndAdapter(config: Config): LndAdapter {
       if (value.valid === true) return { valid: true };
       return { valid: false, reason: 'other', message: 'LND rejected macaroon' };
     },
+    ...paymentLookup(call, read),
+  };
+}
+
+/** A payment as LND reports it (lnrpc.Payment), reduced to the settlement evidence reconcile uses. */
+export type LndPayment = {
+  /** Lower-case hex payment hash. */
+  paymentHash: string;
+  status: 'succeeded' | 'failed' | 'in-flight' | 'unknown';
+  /** Creation time, nanoseconds since the Unix epoch. */
+  createdAtNs: bigint;
+  /** LND's summary: amount sent to the destination and fees paid, in millisatoshi. */
+  valueMsat: bigint;
+  feeMsat: bigint;
+  /** One per HTLC attempt: its status, the amount it delivers and its route's fees. */
+  htlcs: { status: 'succeeded' | 'failed' | 'in-flight' | 'unknown'; amountMsat: bigint; feesMsat: bigint }[];
+  /** LND's failure reason without the FAILURE_REASON_ prefix, lower case with dashes; null for none. */
+  failureReason: string | null;
+  /** LND's payment index (for paging ListPayments). */
+  index: bigint;
+};
+
+/** Read-only payment lookups for reconcile: ListPayments and TrackPaymentV2 (offchain:read). */
+export interface PaymentLookup {
+  /**
+   * One page of ListPayments, incomplete payments included, created in [startSeconds, endSeconds]
+   * (Unix seconds), after index `indexOffset`, at most `max` payments.
+   */
+  listPayments(query: { startSeconds: number; endSeconds: number; indexOffset: bigint; max: number }):
+    Promise<{ payments: LndPayment[]; lastIndexOffset: bigint }>;
+  /** The current state of one payment (the first TrackPaymentV2 update), or null when LND has no payment with this hash. */
+  trackPayment(paymentHash: string): Promise<LndPayment | null>;
+}
+
+/** Largest ListPayments page or TrackPaymentV2 update read: payments with many HTLC attempts carry a route each. */
+const PAYMENT_RESPONSE_LIMIT = 8 * 1024 * 1024;
+const MAX_PAGE = 1_000;
+const MAX_UINT64 = (1n << 64n) - 1n;
+// LND (paymentsdb) refuses to track a hash it holds no payment for with this error text.
+const NOT_INITIATED = /payment isn'?t initiated|payment not initiated/i;
+const HTLC_STATUS: Record<string, LndPayment['htlcs'][number]['status']> = { IN_FLIGHT: 'in-flight', SUCCEEDED: 'succeeded', FAILED: 'failed' };
+const PAYMENT_STATUS: Record<string, LndPayment['status']> = { SUCCEEDED: 'succeeded', FAILED: 'failed', IN_FLIGHT: 'in-flight',
+  INITIATED: 'in-flight', UNKNOWN: 'unknown' };
+
+function paymentLookup(call: ReturnType<typeof transport>['call'], read: ReturnType<typeof transport>['read']): PaymentLookup {
+  // grpc-gateway writes int64 and uint64 as JSON strings; a safe JSON integer is accepted too.
+  const integer = (value: unknown, stage: string, signed = false): bigint => {
+    if (typeof value === 'string' && (signed ? /^-?(0|[1-9][0-9]{0,19})$/ : /^(0|[1-9][0-9]{0,19})$/).test(value)) return BigInt(value);
+    if (typeof value === 'number' && Number.isSafeInteger(value) && (signed || value >= 0)) return BigInt(value);
+    throw new LndError(5, stage, 'invalid LND response');
+  };
+  const record = (value: unknown, stage: string): Record<string, unknown> => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new LndError(5, stage, 'invalid LND response');
+    return value as Record<string, unknown>;
+  };
+  const payment = (value: unknown, stage: string): LndPayment => {
+    const item = record(value, stage);
+    const hash = string(item.payment_hash, stage).toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(hash)) throw new LndError(5, stage, 'invalid LND response');
+    const htlcs = item.htlcs === undefined || item.htlcs === null ? [] : item.htlcs;
+    if (!Array.isArray(htlcs)) throw new LndError(5, stage, 'invalid LND response');
+    const reason = item.failure_reason === undefined ? 'FAILURE_REASON_NONE' : string(item.failure_reason, stage);
+    if (!/^FAILURE_REASON_[A-Z_]{1,64}$/.test(reason)) throw new LndError(5, stage, 'invalid LND response');
+    // Only these fields are read; the preimage and the payment request LND also returns are never kept.
+    return {
+      paymentHash: hash,
+      status: PAYMENT_STATUS[string(item.status, stage)] ?? 'unknown',
+      createdAtNs: integer(item.creation_time_ns, stage, true),
+      valueMsat: integer(item.value_msat, stage, true),
+      feeMsat: integer(item.fee_msat, stage, true),
+      htlcs: htlcs.map(entry => {
+        const htlc = record(entry, stage);
+        const route = record(htlc.route, stage);
+        const total = integer(route.total_amt_msat, stage, true);
+        const fees = integer(route.total_fees_msat, stage, true);
+        if (fees < 0n || total < fees) throw new LndError(5, stage, 'invalid LND response');
+        return { status: HTLC_STATUS[string(htlc.status, stage)] ?? 'unknown', amountMsat: total - fees, feesMsat: fees };
+      }),
+      failureReason: reason === 'FAILURE_REASON_NONE' ? null : reason.slice('FAILURE_REASON_'.length).toLowerCase().replaceAll('_', '-'),
+      index: integer(item.payment_index, stage),
+    };
+  };
+  return {
+    async listPayments({ startSeconds, endSeconds, indexOffset, max }) {
+      const stage = 'list-payments';
+      if (!Number.isSafeInteger(startSeconds) || !Number.isSafeInteger(endSeconds) || startSeconds < 0 || endSeconds < startSeconds
+        || !Number.isSafeInteger(max) || max < 1 || max > MAX_PAGE || indexOffset < 0n || indexOffset > MAX_UINT64)
+        throw new UsageError('invalid payment query');
+      const query = new URLSearchParams({ include_incomplete: 'true', index_offset: indexOffset.toString(), max_payments: String(max),
+        reversed: 'false', count_total_payments: 'false', creation_date_start: String(startSeconds), creation_date_end: String(endSeconds) });
+      const value = json(await read(stage, 'GET', `/v1/payments?${query.toString()}`, undefined, { maxResponse: PAYMENT_RESPONSE_LIMIT }), stage);
+      const payments = value.payments === undefined || value.payments === null ? [] : value.payments;
+      if (!Array.isArray(payments) || payments.length > max) throw new LndError(5, stage, 'invalid LND response');
+      return { payments: payments.map(item => payment(item, stage)), lastIndexOffset: integer(value.last_index_offset, stage) };
+    },
+    async trackPayment(paymentHash) {
+      const stage = 'track-payment';
+      if (!/^[0-9a-f]{64}$/.test(paymentHash)) throw new UsageError('invalid payment hash');
+      // A bytes path parameter is base64; grpc-gateway also accepts the URL-safe alphabet.
+      const path = `/v2/router/track/${encodeURIComponent(Buffer.from(paymentHash, 'hex').toString('base64url'))}`;
+      const response = await call(stage, 'GET', path, undefined, { maxResponse: PAYMENT_RESPONSE_LIMIT, firstLine: true });
+      if (ownAuthenticationFailure(response)) throw new LndError(4, stage, 'LND authentication failure');
+      let value: Record<string, unknown>;
+      try { value = json(response.body, stage); }
+      catch (error) {
+        if (NOT_INITIATED.test(response.body.slice(0, 4096))) return null;
+        throw error;
+      }
+      // A stream that fails before its first message carries {"error": {...}} (grpc-gateway);
+      // a unary-style error body carries the message at the top level.
+      const failure = value.error;
+      const message = failure && typeof failure === 'object' && !Array.isArray(failure)
+        && typeof (failure as Record<string, unknown>).message === 'string' ? (failure as Record<string, unknown>).message as string
+        : typeof failure === 'string' ? failure : typeof value.message === 'string' ? value.message : null;
+      if (failure !== undefined && failure !== null || response.status < 200 || response.status >= 300) {
+        if (message !== null && NOT_INITIATED.test(message)) return null;
+        throw new LndError(5, stage, 'LND request rejected');
+      }
+      const result = payment(value.result, stage);
+      if (result.paymentHash !== paymentHash) throw new LndError(5, stage, 'invalid LND response');
+      return result;
+    },
   };
 }
 
@@ -304,6 +458,15 @@ export type MiddlewareCall = {
   oversizedMacaroon?: boolean;
   /** Size of the macaroon bytes held by this call (0 without one), for memory accounting. */
   macaroonBytes?: number;
+  /**
+   * The serialized request of a method selected with `payloadMethods` (at most
+   * MAX_PAYLOAD_BYTES), copied on first read while the handler runs; null otherwise and afterwards.
+   */
+  readonly payload?: Buffer | null;
+  /** Size of that request payload (0 without one), for memory accounting. */
+  payloadBytes?: number;
+  /** A selected method's request payload was above MAX_PAYLOAD_BYTES; it was not copied. */
+  oversizedPayload?: boolean;
 };
 
 export type MiddlewareEnd = { registered: boolean; code: 3 | 4 | 5; stage: string; message: string; disabled: boolean };
@@ -323,7 +486,8 @@ const REGISTRATION_TIMEOUT_MS = 30_000;
 export function registerMiddleware(config: { host: string; port: number; tlsCert: Buffer; macaroon: Secret;
   pingIntervalMs?: number; pingTimeoutMs?: number; registrationTimeoutMs?: number; stallTimeoutMs?: number },
   registration: { name: string; readOnly: boolean; caveatName?: string },
-  decide: (call: MiddlewareCall) => string, onRegistered: () => void): MiddlewareSession {
+  decide: (call: MiddlewareCall) => string, onRegistered: () => void,
+  options: { payloadMethods?: ReadonlySet<string> } = {}): MiddlewareSession {
   if (!/^[A-Za-z0-9._-]{5,64}$/.test(registration.name)
     || (registration.readOnly === (registration.caveatName !== undefined))
     || (registration.caveatName !== undefined && !/^[A-Za-z0-9_-]{5,64}$/.test(registration.caveatName)))
@@ -334,7 +498,7 @@ export function registerMiddleware(config: { host: string; port: number; tlsCert
   const stream = openGrpcStream({ host: config.host, port: config.port, ca: Buffer.from(config.tlsCert),
     path: MIDDLEWARE_PATH, metadata: { macaroon: revealSecret(config.macaroon).toString('hex') },
     pingIntervalMs: config.pingIntervalMs, pingTimeoutMs: config.pingTimeoutMs, stallTimeoutMs: config.stallTimeoutMs }, message => {
-    const request = decodeMiddlewareRequest(message);
+    const request = decodeMiddlewareRequest(message, options.payloadMethods);
     // A read-only observer always accepts; a read/write registration (the canary guard) fails closed.
     const fallback = registration.readOnly ? '' : 'permission denied';
     if (request.kind === 'none') {
@@ -354,14 +518,22 @@ export function registerMiddleware(config: { host: string; port: number; tlsCert
     // shedding load never needs them. The frame (and so rawMacaroon) is wiped afterwards.
     let raw: Buffer | null = request.rawMacaroon.length ? request.rawMacaroon : null;
     let macaroon: Secret | null = null;
+    // The same for a selected request payload (watch --payment-journal): copied only if read.
+    let rawPayload: Buffer | null = request.payload.length ? request.payload : null;
+    let payload: Buffer | null = null;
     const call: MiddlewareCall = { kind: request.kind, requestId: request.requestId, method: request.method,
       isError: request.isError, customCaveatCondition: request.customCaveatCondition,
       get macaroon() { if (raw) { macaroon = new Secret(raw); raw = null; } return macaroon; },
-      macaroonBytes: request.rawMacaroon.length, ...(request.oversizedMacaroon ? { oversizedMacaroon: true } : {}) };
+      get payload() { if (rawPayload) { payload = Buffer.from(rawPayload); rawPayload = null; } return payload; },
+      macaroonBytes: request.rawMacaroon.length, payloadBytes: request.payload.length,
+      ...(request.oversizedMacaroon ? { oversizedMacaroon: true } : {}),
+      ...(request.oversizedPayload ? { oversizedPayload: true } : {}) };
     let verdict: string;
     try { verdict = decide(call); } catch { verdict = fallback; }
     raw = null;
     macaroon = null;
+    rawPayload = null;
+    payload = null;
     // Feedback is required for every intercepted message, including responses.
     stream.send(encodeFeedback(request.msgId, verdict));
   });

@@ -1,7 +1,10 @@
 // `macwarden watch`: a read-only LND RPC middleware that attributes every authenticated
 // call to a credential (root key ID, fingerprint, registry label), records usage next
 // to the registry, and guards canary macaroons. Intercepted macaroon bytes are decoded
-// in memory to derive the fingerprint and dropped; payloads and metadata are never read.
+// in memory to derive the fingerprint and dropped; payloads and metadata are never read,
+// except that with --payment-journal the request payload of a payment-initiating or
+// payment-deleting method is decoded for its payment hash, amount and fee limit
+// (src/watch/payment-request.ts) and journaled (src/watch/payment-journal.ts).
 import { randomUUID } from 'node:crypto';
 import * as nodeFs from 'node:fs/promises';
 import { hostname as nodeHostname } from 'node:os';
@@ -24,6 +27,9 @@ import { readUsage, usagePath, writeUsage, UsageFileError, UsageStore } from '..
 import { ALERT_CLEANUP_MS, ALERT_KILL_MS, alertCleanupDone, reapAlertGroups, runAlertCommand } from '../watch/alert.js';
 import { createAlertRunner, createAlertThrottle } from '../watch/alert-throttle.js';
 import { createOutputQueue, fdWriter } from '../watch/output-queue.js';
+import { JournalError, PaymentJournal, type JournalStats, type UnregisterReason } from '../watch/payment-journal.js';
+import { JOURNALED_METHODS } from '../watch/payment-request.js';
+import { macwardenVersion } from '../version.js';
 
 export type Register = typeof registerMiddleware;
 
@@ -59,10 +65,10 @@ export type Deps = {
 
 type WatchOutput = OutputResult & { schema: 1 };
 type Request = { host: string; grpcHost: string; grpcPort: number; grpcSource: string; cert: string; own: string; registry?: string;
-  name: string; untilMs: number | null; alertCommand?: string; alertsOnly: boolean; json: boolean };
+  name: string; untilMs: number | null; alertCommand?: string; alertsOnly: boolean; json: boolean; paymentJournal?: string };
 
 const valueFlags = new Set(['--lnd-rest', '--lnd-grpc', '--tls-cert', '--macaroon', '--registry',
-  '--middleware-name', '--until', '--alert-command']);
+  '--middleware-name', '--until', '--alert-command', '--payment-journal']);
 const switchFlags = new Set(['--json', '--alerts-only']);
 const FLUSH_MS = 5_000;
 // The usage file is rewritten whole, so flushes are spaced by its size: on average at
@@ -147,8 +153,10 @@ function parse(args: string[], env: Deps['env']): Request | string {
   const alertCommand = get('--alert-command');
   if (alertCommand !== undefined && !/^(?:\/|[A-Za-z]:[\\/])/.test(alertCommand))
     return '--alert-command must be an absolute path to an executable';
+  const paymentJournal = get('--payment-journal');
+  if (paymentJournal !== undefined && !paymentJournal.trim()) return '--payment-journal must be a file path';
   return { host: endpoint(host)!, grpcHost: grpc.host, grpcPort: grpc.port, grpcSource, cert, own, registry: get('--registry'),
-    name, untilMs, alertCommand, alertsOnly: flags.get('--alerts-only') === true, json: flags.get('--json') === true };
+    name, untilMs, alertCommand, alertsOnly: flags.get('--alerts-only') === true, json: flags.get('--json') === true, paymentJournal };
 }
 
 /** The longest delay setTimeout honours (signed 32-bit milliseconds); longer ones fire after 1 ms. */
@@ -393,6 +401,19 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
     warnings.push({ code: 'usage-file-quarantined', message: `invalid usage file moved to ${aside}; recording starts empty` });
     usage = new UsageStore();
   }
+  // The payment journal (opt-in): opened, locked and started with a synced run-start before
+  // anything registers, so a journal that cannot be written stops watch here (exit 3).
+  let journal: PaymentJournal | null = null;
+  const journalStopped: { reason: JournalStats['stopped'] } = { reason: null };
+  if (request.paymentJournal !== undefined) {
+    try {
+      journal = await PaymentJournal.open(request.paymentJournal, pubkey, macwardenVersion(), { fs: deps.fs, clock: deps.clock,
+        lock: path => acquireLock(path, deps), platform: deps.platform, onStop: reason => { journalStopped.reason = reason; } });
+    } catch (error) {
+      await release();
+      return fail(3, 'W6', error instanceof JournalError ? error.message : 'cannot open payment journal', warnings);
+    }
+  }
 
   const register = deps.register ?? registerMiddleware;
   const sleep = deps.sleep ?? defaultSleep;
@@ -462,6 +483,13 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
     if (request.alertsOnly && event.event !== 'canary' && event.event !== 'status') return;
     deps.emit(renderWatchEvent(event, request.json ? 'json' : 'text'), event.event === 'canary' || event.event === 'status');
   };
+  let journalStopReported = false;
+  // A journal that stopped (full, failed write, stalled disk) is reported once, as a status event.
+  const reportJournalStop = () => {
+    if (journalStopReported || !journalStopped.reason) return;
+    journalStopReported = true;
+    emit({ event: 'status', time: deps.clock().toISOString(), status: 'payment-journal-stopped', reason: journalStopped.reason });
+  };
   let reportedDrops = 0;
   const reportDrops = () => {
     const total = deps.dropped?.() ?? 0;
@@ -493,6 +521,9 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
   // call.macaroon is read here, synchronously: the middleware wipes the intercepted bytes
   // once this returns.
   const observe = (call: MiddlewareCall): string => {
+    // A payment request is captured for the journal now, while its payload is readable; it is
+    // decoded and written later, off this path, and dropped (counted) under overload.
+    if (journal && call.kind === 'request' && JOURNALED_METHODS.has(call.method)) journal.capture(call);
     enqueue(call.macaroonBytes ?? 0, () => {
       const macaroon = call.kind === 'response' ? null : call.macaroon;
       const { kind, requestId, method, isError, oversizedMacaroon } = call;
@@ -594,6 +625,7 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
   };
   const flusher = setInterval(() => {
     reportDrops();
+    reportJournalStop();
     if (Date.now() >= nextFlushAt) { usage.extendCoverage(pubkey, deps.clock()); void flush(); }
   }, FLUSH_MS);
   let refresh = new AbortController();
@@ -615,6 +647,7 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
     return { promise, off };
   };
   let lastReload = 0;
+  let journalStats: JournalStats | null = null;
   try {
     let backoff = 1_000;
     let everRegistered = false;
@@ -634,6 +667,8 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
       let registeredAt = 0;
       const onRegistered = (index: number) => () => {
         registeredSessions.add(index);
+        // Payments are seen by the observer (session 0): its registration starts journal coverage.
+        if (index === 0) journal?.registered();
         if (registeredSessions.size === expected) {
           markRegistered();
           registeredAt = Date.now();
@@ -645,7 +680,8 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
       };
       try {
         const target = { host: request.grpcHost, port: request.grpcPort, tlsCert: cert, macaroon: own };
-        sessions.push(register(target, { name: request.name, readOnly: true }, observe, onRegistered(0)));
+        sessions.push(register(target, { name: request.name, readOnly: true }, observe, onRegistered(0),
+          journal ? { payloadMethods: JOURNALED_METHODS } : {}));
         guardName = canaries.size && canaryConfig ? canaryConfig.caveatName : null;
         if (guardName)
           sessions.push(register(target, { name: `${request.name}-guard`, readOnly: false, caveatName: guardName },
@@ -662,6 +698,9 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
       for (const session of sessions) session.close();
       const ends = await Promise.all(sessions.map(session => session.ended));
       usage.endCoverage(pubkey, deps.clock());
+      const why: UnregisterReason = first === 'stopped' || stop.signal.aborted ? 'stopping' : first === 'refresh' ? 'refresh' : 'stream-lost';
+      journal?.unregistered(why);
+      reportJournalStop();
       if (first === 'stopped' || stop.signal.aborted) break;
       // The canaries changed (for example one was baked): register again with the new set.
       if (first === 'refresh') continue;
@@ -697,6 +736,15 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
     throttle.flush();
     usage.endCoverage(pubkey, deps.clock());
     await flush();
+    if (journal) {
+      journal.unregistered('stopping');
+      journalStats = await journal.close();
+      reportJournalStop();
+      if (journalStats.stopped) warnings.push({ code: 'payment-journal-stopped', message: `the payment journal stopped (${journalStats.stopped}); `
+        + 'payments after that were not journaled, and reconcile reports that time as a gap' });
+      if (journalStats.dropped) warnings.push({ code: 'payment-journal-dropped', message: `${journalStats.dropped} payment calls were not `
+        + 'journaled (overload or a stopped journal); the journal records when, and reconcile reports those times as gaps' });
+    }
     await release();
     // One alert deadline for the whole shutdown (audit MW102-05): no alert command starts from
     // here on and an alert still waiting is discarded (reported as alert-failed); the running
@@ -726,7 +774,9 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
     node: pubkey, startedAt: startedAt.toISOString(), endedAt: endedAt.toISOString(), calls: counters.calls,
     errors: counters.errors, credentials: counters.credentials.size, canaryAlerts: counters.alerts, canaryUses: counters.canaryUses,
     alertFailures: counters.alertFailures, reconnects: counters.reconnects, canaries: canaries.size, usageFile,
-    droppedUsageRecords: usage.dropped, evictedUsageRecords: usage.evictions, droppedAttributions: counters.attributionDropped, droppedEvents: deps.dropped?.() ?? 0 } };
+    droppedUsageRecords: usage.dropped, evictedUsageRecords: usage.evictions, droppedAttributions: counters.attributionDropped, droppedEvents: deps.dropped?.() ?? 0,
+    ...(journalStats ? { paymentJournal: { path: journalStats.path, payments: journalStats.payments, deletions: journalStats.deletions,
+      dropped: journalStats.dropped, stopped: journalStats.stopped } } : {}) } };
 }
 
 export async function run(args: string[], deps: Deps): Promise<WatchOutput> {
