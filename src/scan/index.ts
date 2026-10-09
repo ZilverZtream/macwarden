@@ -23,6 +23,12 @@ import { Cancelled, cancellable, checkCancellation } from '../cancellation.js';
 import { readBounded } from '../bounded-file.js';
 import { runeFindings } from './runes.js';
 import type { RuneInvalidReport, RuneReport } from '../rune-report.js';
+
+/** An unexpected exception while analysing a file's bytes: a bug, reported as exit 8 (internal). */
+class ScanAnalysisFailure extends Error {
+  constructor(cause: unknown) { super('internal error while analysing a scanned file', { cause }); }
+}
+
 export { IgnoreFileError } from './ignore.js';
 export { GitHistoryError } from './git-history.js';
 
@@ -975,7 +981,11 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
       } finally {
         if (handle) await handle.close();
       }
-      const outcome = scanBytes('', bytes, macaroonFile, now, ctx, basename(path));
+      // An exception from analysing bytes that were read is a bug, not an unreadable file: it must
+      // stop the scan (exit 8) rather than look like a clean scan of a skipped file.
+      let outcome: ReturnType<typeof scanBytes>;
+      try { outcome = scanBytes('', bytes, macaroonFile, now, ctx, basename(path)); }
+      catch (failure) { throw new ScanAnalysisFailure(failure); }
       if ('skip' in outcome) return { type: 'skip', path, reason: outcome.skip, identity };
       if (outcome.findings.length) {
         const safePath = redactPath(reportedPath(path));
@@ -983,7 +993,7 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
       }
       return { type: 'file', path, identity, findings: outcome.findings, dropped: outcome.dropped };
     } catch (error) {
-      if (error instanceof Cancelled) throw error;
+      if (error instanceof Cancelled || error instanceof ScanAnalysisFailure) throw error;
       if (explicit) return { type: 'error', error: new InputError('input-read', 'cannot read scan path') };
       return { type: 'skip', path, reason: 'unreadable', identity };
     }
