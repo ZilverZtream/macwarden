@@ -81,6 +81,22 @@ describe('RUNE/scan contexts', () => {
   });
 });
 
+describe('RUNE/scan command context follows checkrune\'s unique ID rule', () => {
+  // param_rune: strtoull over the whole unique ID, at most 2^63-1, "" reads as 0. Core Lightning
+  // checks every such rune, so a positional argument holding one is reported.
+  for (const id of ['1234567890123456789', '9223372036854775807', ' 7', '+7', '', '007']) {
+    it(`RUNE/scan a commando argument with unique ID ${JSON.stringify(id)} is reported`, async () => {
+      const findings = await scanText('run.sh', `lightning-cli commando 02${'ab'.repeat(32)} getinfo '{}' ${rune(`=${id}&method=getinfo`)}\n`);
+      expect(findings.map(finding => [finding.kind, finding.grade])).toEqual([['rune', 'READ']]);
+    });
+  }
+  for (const id of ['9223372036854775808', 'abc', '7 ', '+', ' ']) {
+    it(`RUNE/scan a commando argument with unique ID ${JSON.stringify(id)}, which checkrune refuses, is not reported`, async () => {
+      expect(await scanText('run.sh', `lightning-cli commando 02${'ab'.repeat(32)} getinfo '{}' ${rune(`=${id}&method=getinfo`)}\n`)).toEqual([]);
+    });
+  }
+});
+
 describe('RUNE/scan no context, no finding', () => {
   const negatives: [string, string][] = [
     ['bare rune text', `${READ_RUNE}\n`],

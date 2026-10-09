@@ -220,15 +220,25 @@ function identityWarnings(facts: RuneFacts): RuneWarning[] {
   if (facts.nonCanonical) warnings.push('non-canonical-encoding');
   if (facts.version !== null) warnings.push('version-suffix');
   if (facts.uniqueId === null) { warnings.push('no-unique-id'); return warnings; }
-  // param_rune: strtoull over the whole ID, at most INT64_MAX; "" reads as 0.
-  const match = /^[ \t\n\v\f\r]*([+-]?)([0-9]+)$/.exec(facts.uniqueId);
-  if (facts.uniqueId !== '' && !match) { warnings.push('unique-id-not-numeric'); return warnings; }
-  const magnitude = match ? BigInt(match[2]) : 0n;
-  const value = match?.[1] === '-' && magnitude !== 0n ? 2n ** 64n - magnitude : magnitude;
-  if (magnitude >= 2n ** 64n || value > LONG_MAX) warnings.push('unique-id-not-numeric');
+  const value = runeUniqueIdNumber(facts.uniqueId);
+  if (value === null) warnings.push('unique-id-not-numeric');
   // is_rune_blacklisted: IDs from 100,000,000 on cannot be blacklisted and are always refused.
   else if (value >= 100_000_000n) warnings.push('unique-id-out-of-range');
   return warnings;
+}
+
+/**
+ * param_rune's unique_id_num: strtoull over the whole unique ID, accepted only up to INT64_MAX
+ * ("" reads as 0). Null when checkrune refuses the rune as having no valid numeric unique ID.
+ */
+export function runeUniqueIdNumber(uniqueId: string): bigint | null {
+  if (uniqueId === '') return 0n;
+  const match = /^[ \t\n\v\f\r]*([+-]?)([0-9]+)$/.exec(uniqueId);
+  if (!match) return null;
+  const magnitude = BigInt(match[2]);
+  if (magnitude > ULONG_MAX) return null;
+  const value = match[1] === '-' && magnitude !== 0n ? ULONG_MAX + 1n - magnitude : magnitude;
+  return value > LONG_MAX ? null : value;
 }
 
 export function assessRune(facts: RuneFacts, nowSeconds: bigint): RuneAssessment {

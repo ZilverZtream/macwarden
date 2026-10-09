@@ -23,6 +23,7 @@
 //
 // Every step moves forward and a key inside an earlier value is skipped, so the work is linear.
 import { RUNE_SHORTEST_TEXT, RUNE_TEXT_LIMIT, decodeRuneText } from '../decode/rune.js';
+import { runeUniqueIdNumber } from '../grade/rune.js';
 
 export type RuneCandidate = {
   /** UTF-16 offsets of the value run in the text. */
@@ -100,10 +101,13 @@ function commandCandidates(line: string, taken: RuneCandidate[]): RuneCandidate[
   return found;
 }
 
-/** Whether a command-context value is a rune Core Lightning would check: it parses and has a numeric unique ID. */
+/**
+ * Whether a value is a rune Core Lightning would check: it parses and has a unique ID that
+ * checkrune's parameter parser (param_rune) accepts as a number.
+ */
 export function checkableRune(text: string): boolean {
   const decoded = decodeRuneText(text);
-  return decoded.ok && decoded.facts.uniqueId !== null && /^[0-9]{1,18}$/.test(decoded.facts.uniqueId);
+  return decoded.ok && decoded.facts.uniqueId !== null && runeUniqueIdNumber(decoded.facts.uniqueId) !== null;
 }
 
 /** Candidates in key context and in command context on one line (or text), in text order. */
