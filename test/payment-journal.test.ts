@@ -123,7 +123,7 @@ it('PAYJ/durability a write cut short by a crash is ignored, and the next run re
   const payment = record('payment', 2, { requestId: '1', method: SEND, credential: identityOf(vector('preset-pay-only')), rootKeyId: '0',
     paymentHash: hash('before crash').toString('hex'), amountMsat: null, amountSource: null, feeLimitMsat: '0', amp: false, extraction: 'complete' });
   const partial = '{"v":1,"type":"payment","time":"2026-10-09T10:5';
-  writeFileSync(path, `${[start(0), record('registered', 1, { session: 1 }), payment].join('\n')}\n${partial}`);
+  writeFileSync(path, `${[start(0), record('registered', 1, { session: 1 }), payment].join('\n')}\n${partial}`, { mode: 0o600 });
   const torn = await readJournal(path);
   expect(torn.tornTail).toBe(true);
   expect(torn.records.map(item => item.type)).toEqual(['run-start', 'registered', 'payment']);
@@ -144,7 +144,7 @@ it('PAYJ/durability a write cut short by a crash is ignored, and the next run re
 it('PAYJ/durability a crash after a complete record but before its newline is repaired too', async () => {
   const dir = scratch();
   const path = join(dir, 'newline.journal');
-  writeFileSync(path, `${start(0)}\n${record('registered', 1, { session: 1 })}`);
+  writeFileSync(path, `${start(0)}\n${record('registered', 1, { session: 1 })}`, { mode: 0o600 });
   expect((await readJournal(path)).tornTail).toBe(true);
   const journal = await openJournal(path);
   await journal.close();
@@ -174,12 +174,12 @@ it('PAYJ/reader an invalid line anywhere but where a crash leaves it makes the w
   ];
   for (const [name, content] of cases) {
     const path = join(dir, `${name.replaceAll(' ', '-')}.journal`);
-    writeFileSync(path, `${content.join('\n')}\n`);
+    writeFileSync(path, `${content.join('\n')}\n`, { mode: 0o600 });
     await expect(readJournal(path), name).rejects.toThrow(JournalError);
   }
   // The same over-long line directly before a repaired run-start is a crash's leftover: accepted.
   const tolerated = join(dir, 'tolerated.journal');
-  writeFileSync(tolerated, `${[start(0), 'x'.repeat(3_000), start(5, RUN2, NODE, true)].join('\n')}\n`);
+  writeFileSync(tolerated, `${[start(0), 'x'.repeat(3_000), start(5, RUN2, NODE, true)].join('\n')}\n`, { mode: 0o600 });
   expect(await readJournal(tolerated)).toMatchObject({ repairedLines: 1, tornTail: false });
 });
 
@@ -206,7 +206,7 @@ it('PAYJ/reader the path rules of the other sidecars: protected names, non-files
   await expect(readJournal(join(dir, 'missing.journal'))).rejects.toThrow('payment journal not found');
   await expect(readJournal(dir)).rejects.toThrow('payment journal is not a regular file');
   const large = join(dir, 'large.journal');
-  writeFileSync(large, `${start(0)}\n`);
+  writeFileSync(large, `${start(0)}\n`, { mode: 0o600 });
   truncateSync(large, JOURNAL_LIMIT_BYTES + 1);
   await expect(readJournal(large)).rejects.toThrow('payment journal too large');
 });
@@ -315,7 +315,7 @@ it('PAYJ/size the journal never grows past its limit: a full record ends coverag
   const head = `${start(0)}\n`;
   const room = JOURNAL_START_ROOM_BYTES + 2_000;
   const filler = JOURNAL_LIMIT_BYTES - JOURNAL_RESERVE_BYTES - room - Buffer.byteLength(head) - 1;
-  writeFileSync(path, Buffer.concat([Buffer.from(head), Buffer.alloc(filler, 0x78), Buffer.from('\n')]));
+  writeFileSync(path, Buffer.concat([Buffer.from(head), Buffer.alloc(filler, 0x78), Buffer.from('\n')]), { mode: 0o600 });
   const stops: string[] = [];
   const journal = await openJournal(path, { onStop: reason => stops.push(reason) });
   journal.registered();
@@ -345,7 +345,7 @@ it('PAYJ/open refusals: protected names, directories, other files, a second writ
   await expect(openJournal(join(dir, 'my-password.journal'))).rejects.toThrow(JournalError);
   await expect(openJournal(dir)).rejects.toThrow('payment journal is not a regular file');
   const other = join(dir, 'notes.txt');
-  writeFileSync(other, 'my notes\n');
+  writeFileSync(other, 'my notes\n', { mode: 0o600 });
   await expect(openJournal(other)).rejects.toThrow('not a macwarden payment journal');
   expect(readFileSync(other, 'utf8')).toBe('my notes\n');
   const path = join(dir, 'locked.journal');

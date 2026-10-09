@@ -150,7 +150,7 @@ it('WATCH/payment-journal without the flag no payload is selected or read', asyn
 
 it('WATCH/payment-journal a journal that cannot be opened stops watch at W6, before anything registers', async () => {
   const s = setup();
-  writeFileSync(s.journal, 'someone else\'s file\n');
+  writeFileSync(s.journal, 'someone else\'s file\n', { mode: 0o600 });
   let registered = false;
   const register = (() => { registered = true; throw new Error('must not register'); }) as unknown as Register;
   const { result } = await watchWith([...s.args, '--payment-journal', s.journal], register, async () => undefined);
