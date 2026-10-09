@@ -22,6 +22,10 @@ export function validDomain(value: unknown): value is ProcessDomain {
 const windowsQuery = String.raw`
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+# Load the Microsoft.PowerShell.Utility cmdlets used below from the pinned module
+# path by name. Autoloading them first analyses every module on the path, which took 18 to 33 s
+# on GitHub's Windows runners in this environment (no PSModuleAnalysisCachePath).
+Import-Module Microsoft.PowerShell.Utility
 try {
 Add-Type -TypeDefinition @'
 using System;
