@@ -22,6 +22,9 @@
 - `verify` refuses an L402 token at `input-form` with a message saying it is not an LND credential.
 - `--json` schemas: `inspect` has the `l402Result` shape and the stages `l402-form` and `l402-preimage`; `scan` findings may carry `l402`, and `byGrade` always has `L402`. Rune findings count under their grade on the existing scale (`rune-invalid` under `UNASSESSED`); `inspect` also has the `runeResult` shape and the stage `rune-syntax`.
 - `inspect` input precedence with three credential families: a binary macaroon, then an Aperture token store file; text is read as an NWC URI, an L402 Authorization value, challenge or pair, a Core Lightning rune, an `lndconnect://` URI, and last a hex or base64 macaroon. Text that decodes as a macaroon (LND or L402) is never taken for a rune ([spec](docs/spec.md#1-inspect-offline-safe-07)).
+- Documentation lives under `docs/` (specification, architecture, security model, guides and the release audits), with a contributor guide, issue and pull request templates, and a rewritten README.
+- Continuous integration covers the supported platforms: Linux on every supported Node.js version, Windows on the oldest and newest supported lines, the LND and Core Lightning comparisons and the gitleaks rules. macOS remains untested.
+- Timing tests measure growth by comparing work in the same process instead of fixed time limits, so they hold on slower machines and still catch quadratic regressions.
 
 ### Fixed
 
