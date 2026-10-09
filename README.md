@@ -209,6 +209,7 @@ The online commands are for LND only. Core Lightning runes are decoded by `inspe
 - [Replacing the default macaroons](docs/replacing-default-macaroons.md): moving every app onto its own macaroon
 - [CI integration](docs/ci-integration.md): GitHub Actions, SARIF, pre-commit, gitleaks and TruffleHog
 - [Field check](docs/field-check.md): a short, safe procedure to confirm a release against your own node
+- [Safe agent payments example](examples/agent-payments/README.md): a regtest stack where an agent pays an L402 API with a scoped, expiring macaroon, and is then cut off with proof
 - [Specification](docs/spec.md): every command, flag, grade, exit code and output format
 - [Security model](docs/security-model.md): the SAFE rules and the threat model
 - [Architecture](docs/architecture.md): how it is built and the LND facts it relies on

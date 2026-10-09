@@ -23,6 +23,12 @@
 - `--json` schemas: `inspect` has the `l402Result` shape and the stages `l402-form` and `l402-preimage`; `scan` findings may carry `l402`, and `byGrade` always has `L402`. Rune findings count under their grade on the existing scale (`rune-invalid` under `UNASSESSED`); `inspect` also has the `runeResult` shape and the stage `rune-syntax`.
 - `inspect` input precedence with three credential families: a binary macaroon, then an Aperture token store file; text is read as an NWC URI, an L402 Authorization value, challenge or pair, a Core Lightning rune, an `lndconnect://` URI, and last a hex or base64 macaroon. Text that decodes as a macaroon (LND or L402) is never taken for a rune ([spec](docs/spec.md#1-inspect-offline-safe-07)).
 
+### Fixed
+
+- Windows: writing an `--out` file (`bake`, `attenuate`, `rotate`, `respond`) could fail with exit 3 after about 20 seconds on machines where PowerShell has no module analysis cache (fresh machines, service accounts, CI runners): the owner-only file helper waited while PowerShell analysed every installed module before loading the one it needed. The helper now loads that module by name from the System32 module path, in well under a second.
+- Windows: the process-domain query behind stale-lock recovery had the same delay and a 5-second limit, so a stale registry lock could not be proven safe to recover. It loads its module by name and allows 15 seconds for a cold PowerShell start.
+- `npm run test:full` names the checks that failed and each failed command's output (redacted), or the reason it did not start, instead of exiting silently; it finds npm beside a Node installed by setup-node.
+
 ## 1.1.1 (2026-10-09)
 
 Security release. It fixes every finding of the independent audit of 1.1.0 ([report](docs/reviews/2026-10-09-audit-1.1.0.md)) and of four further internal reviews (threat model, lifecycle logic, scan robustness, output files and environment): 38 issues, each proven by a test that failed on 1.1.0. The most important: a long or punctuation-terminated `lndconnect://` URI could be missed by `scan`; `verify` could report a live credential as conclusively rejected (clock skew, an altered copy); a FIFO could hang `scan`; a new `--out` file was briefly readable under the folder's inherited Windows permissions.
