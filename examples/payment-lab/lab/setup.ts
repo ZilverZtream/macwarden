@@ -53,7 +53,10 @@ async function waitSynced(height: number): Promise<void> {
   for (const node of NODE_NAMES) await waitUntil(`${node} to sync to height ${height}`, () => syncedHeight(node, height), WAIT);
 }
 
-interface ChannelRow { chan_id: string; remote_pubkey: string; initiator: boolean; active: boolean; capacity: string }
+interface ChannelRow { chan_id: string; scid?: string; remote_pubkey: string; initiator: boolean; active: boolean; capacity: string }
+
+/** The short channel ID: scid on LND v0.21 (whose chan_id is the 32-byte channel ID), chan_id before. */
+const shortId = (row: ChannelRow): string => row.scid ?? row.chan_id;
 
 async function channels(node: NodeName): Promise<ChannelRow[]> {
   const list = await lncli(node, ['listchannels']);
@@ -179,17 +182,34 @@ async function main(): Promise<void> {
   }
   const routerChannels = await channels('router');
   const customerOpened = routerChannels.filter(item => item.remote_pubkey === pubkeys.customer && !item.initiator)
-    .map(item => item.chan_id).sort((a, b) => (BigInt(a) < BigInt(b) ? -1 : 1));
+    .map(shortId).sort((a, b) => (BigInt(a) < BigInt(b) ? -1 : 1));
   const routerToCustomer = routerChannels.find(item => item.remote_pubkey === pubkeys.customer && item.initiator);
   const routerToMerchant = routerChannels.find(item => item.remote_pubkey === pubkeys.merchant && item.initiator);
   if (customerOpened.length !== 2 || !routerToCustomer || !routerToMerchant) throw new Error('the router does not show the expected channels');
   const ids = { customerRouterA: customerOpened[0] ?? '', customerRouterB: customerOpened[1] ?? '',
-    routerCustomer: routerToCustomer.chan_id, routerMerchant: routerToMerchant.chan_id };
+    routerCustomer: shortId(routerToCustomer), routerMerchant: shortId(routerToMerchant) };
   for (const [name, id] of Object.entries(ids)) fact(`channel ${name}`, id);
 
+  // A channel_update that reaches a node before the channel's announcement is dropped, so every
+  // node must know all four channels (with both directions' policies) before the router changes
+  // its policy; otherwise the customer and merchant can keep the default policy indefinitely.
+  step('Wait until every node\'s graph has all four channels announced');
+  const allChannels = Object.values(ids);
+  for (const viewer of NODE_NAMES) {
+    await waitUntil(`${viewer} to know all four channels`, async () => {
+      for (const chanId of allChannels) {
+        const edge = await lncliMaybe(viewer, ['getchaninfo', '--chan_id', chanId]);
+        if (edge === undefined || !edge.node1_policy || !edge.node2_policy) return undefined;
+      }
+      return true;
+    }, WAIT);
+  }
+
   step(`Set the router's fee policy: ${ROUTER_BASE_FEE_MSAT} msat base + ${ROUTER_FEE_RATE_PPM} ppm on every channel`);
+  const setRouterPolicy = () => lncli('router', ['updatechanpolicy', '--base_fee_msat', ROUTER_BASE_FEE_MSAT,
+    '--fee_rate_ppm', ROUTER_FEE_RATE_PPM, '--time_lock_delta', '40']);
   command(`lncli updatechanpolicy --base_fee_msat ${ROUTER_BASE_FEE_MSAT} --fee_rate_ppm ${ROUTER_FEE_RATE_PPM} --time_lock_delta 40   # on router`);
-  await lncli('router', ['updatechanpolicy', '--base_fee_msat', ROUTER_BASE_FEE_MSAT, '--fee_rate_ppm', ROUTER_FEE_RATE_PPM, '--time_lock_delta', '40']);
+  await setRouterPolicy();
 
   step('Wait until each sender\'s graph has the router\'s policy for the channels it routes over');
   const routerPolicyVisible = async (viewer: NodeName, chanId: string): Promise<true | undefined> => {
@@ -202,7 +222,14 @@ async function main(): Promise<void> {
   };
   for (const [viewer, chanId, name] of [['customer', ids.routerMerchant, 'C'], ['merchant', ids.customerRouterA, 'A'],
     ['merchant', ids.customerRouterB, 'B'], ['merchant', ids.routerCustomer, 'D']] as const) {
-    await waitUntil(`${viewer} to know channel ${name} with the router's policy`, () => routerPolicyVisible(viewer, chanId), WAIT);
+    // Re-send the policy every 30 s while waiting (an update can still be dropped in transit); the
+    // router re-signs it with a newer timestamp, which every node accepts over the old one.
+    let lastSent = Date.now();
+    await waitUntil(`${viewer} to know channel ${name} with the router's policy`, async () => {
+      const visible = await routerPolicyVisible(viewer, chanId);
+      if (visible === undefined && Date.now() - lastSent >= 30_000) { await setRouterPolicy(); lastSent = Date.now(); }
+      return visible;
+    }, WAIT);
   }
 
   step('Write the lab manifest');

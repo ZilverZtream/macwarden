@@ -129,8 +129,10 @@ export class ReadApi {
     return { payments: array(response, 'payments').map(parsePayment), lastIndexOffset: integer(response, 'last_index_offset') };
   }
 
+  // Lightning.LookupInvoice (GET /v1/invoice/{hex hash}) needs only invoices:read; the v2
+  // invoicesrpc lookup needs invoices:write in LND v0.21.4, which a read-only credential lacks.
   async lookupInvoice(paymentHash: string): Promise<Invoice> {
-    return parseInvoice(await this.#client.call('GET', `/v2/invoices/lookup?payment_hash=${hexToUrlParam(assertHash(paymentHash))}`));
+    return parseInvoice(await this.#client.call('GET', `/v1/invoice/${assertHash(paymentHash)}`));
   }
 
   async listChannels(): Promise<Channel[]> {

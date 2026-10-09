@@ -225,7 +225,9 @@ function reserve(o: JsonObject, constraintsKey: string, deprecatedKey: string): 
 export function parseChannel(value: unknown): Channel {
   const o = asObject(value, 'channel');
   return {
-    chanId: integer(o, 'chan_id').toString(),
+    // LND v0.21 reports the 32-byte channel ID as chan_id and the short channel ID as scid;
+    // earlier releases put the short channel ID in chan_id. Routes and forwards use the short one.
+    chanId: ('scid' in o ? integer(o, 'scid') : integer(o, 'chan_id')).toString(),
     channelPoint: string(o, 'channel_point'),
     remotePubkey: string(o, 'remote_pubkey'),
     active: boolean(o, 'active'),
