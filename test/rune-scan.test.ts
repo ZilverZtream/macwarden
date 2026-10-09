@@ -82,20 +82,33 @@ describe('RUNE/scan contexts', () => {
   });
 });
 
-describe('RUNE/scan command context follows checkrune\'s unique ID rule', () => {
-  // param_rune: strtoull over the whole unique ID, at most 2^63-1, "" reads as 0. Core Lightning
-  // checks every such rune, so a positional argument holding one is reported.
-  for (const id of ['1234567890123456789', '9223372036854775807', ' 7', '+7', '', '007']) {
+describe('RUNE/scan command context needs a unique ID in the form Core Lightning creates', () => {
+  // createrune writes the unique ID as a decimal number (PRIu64), and only the node can write the
+  // ID restriction, so every rune a node issues has one: digits without a leading zero, here up to
+  // 2^63-1, the largest checkrune accepts.
+  for (const id of ['0', '7', '1234567890123456789', '9223372036854775807']) {
     it(`RUNE/scan a commando argument with unique ID ${JSON.stringify(id)} is reported`, async () => {
       const findings = await scanText('run.sh', `lightning-cli commando 02${'ab'.repeat(32)} getinfo '{}' ${rune(`=${id}&method=getinfo`)}\n`);
       expect(findings.map(finding => [finding.kind, finding.grade])).toEqual([['rune', 'READ']]);
     });
   }
-  for (const id of ['9223372036854775808', 'abc', '7 ', '+', ' ']) {
-    it(`RUNE/scan a commando argument with unique ID ${JSON.stringify(id)}, which checkrune refuses, is not reported`, async () => {
+  // checkrune would parse some of these (" 7", "+7", "007", ""), but no node creates them.
+  for (const id of ['9223372036854775808', 'abc', '7 ', '+', ' ', ' 7', '+7', '007', '']) {
+    it(`RUNE/scan a commando argument with unique ID ${JSON.stringify(id)} is not reported`, async () => {
       expect(await scanText('run.sh', `lightning-cli commando 02${'ab'.repeat(32)} getinfo '{}' ${rune(`=${id}&method=getinfo`)}\n`)).toEqual([]);
     });
   }
+
+  it('RUNE/scan a regtest address passed to lightning-cli withdraw is not a rune, though its last byte decodes to "="', async () => {
+    // 44 characters decode to 33 bytes; about one address in a hundred ends in the byte '=', which
+    // parses as a rune with an empty unique ID and no restrictions.
+    const BECH32 = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+    const address = Array.from({ length: 4000 }, (_, index) => `bcrt1q${[...createHash('sha512').update(String(index)).digest()]
+      .slice(0, 38).map(byte => BECH32[byte % 32]).join('')}`)
+      .find(text => { const decoded = decodeRuneText(text); return decoded.ok && decoded.facts.uniqueId === ''; });
+    expect(address).toBeDefined();
+    expect(await scanText('run.sh', `lightning-cli withdraw ${address} 100000\nlightning-cli checkrune ${address}\n`)).toEqual([]);
+  });
 });
 
 describe('RUNE/scan no context, no finding', () => {

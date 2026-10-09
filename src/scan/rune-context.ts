@@ -102,12 +102,16 @@ function commandCandidates(line: string, taken: RuneCandidate[]): RuneCandidate[
 }
 
 /**
- * Whether a value is a rune Core Lightning would check: it parses and has a unique ID that
- * checkrune's parameter parser (param_rune) accepts as a number.
+ * Whether a command-context value is a rune a Core Lightning node issued: it parses and its unique
+ * ID has the form createrune writes (a decimal number without a leading zero, PRIu64) within the
+ * range checkrune accepts (at most 2^63-1). Only the node can write the ID restriction, so a real
+ * rune never has another form, while other arguments (a bitcoin address whose last byte decodes to
+ * '=' parses as a rune with an empty ID) do.
  */
 export function checkableRune(text: string): boolean {
   const decoded = decodeRuneText(text);
-  return decoded.ok && decoded.facts.uniqueId !== null && runeUniqueIdNumber(decoded.facts.uniqueId) !== null;
+  if (!decoded.ok || decoded.facts.uniqueId === null || !/^(?:0|[1-9][0-9]{0,18})$/.test(decoded.facts.uniqueId)) return false;
+  return runeUniqueIdNumber(decoded.facts.uniqueId) !== null;
 }
 
 /** Candidates in key context and in command context on one line (or text), in text order. */
