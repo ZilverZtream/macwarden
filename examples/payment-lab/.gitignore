@@ -1,0 +1,3 @@
+# Created by setup and the scenarios: regtest credentials, certificates and databases. Never commit them.
+runtime/
+node_modules/
