@@ -25,3 +25,19 @@ detectors:
       - 'walletconnect'
     regex:
       uri: '(?i)(?:nostr\+walletconnect|nostrwalletconnect):(?://)?[0-9a-f]{64}/?\?[^\s"''<>]*?secret=[0-9a-f]{64}(?:[^0-9a-f]|$)'
+  - name: macwarden-l402
+    keywords:
+      - 'l402'
+      - 'lsat'
+    regex:
+      credential: '(?i)\b(?:l402|lsat)[ \t]+[A-Za-z0-9+/_=-]{40,}(?:,[A-Za-z0-9+/_=-]{40,})*:[0-9a-f]{64}\b'
+  - name: macwarden-l402-macaroon-hex
+    keywords:
+      - '0201046c73617402420000'
+    regex:
+      macaroon: '(?i)0201046c73617402420000[0-9a-f]{40,}'
+  - name: macwarden-l402-macaroon-base64
+    keywords:
+      - 'AgEEbHNhdAJCAA'
+    regex:
+      macaroon: 'AgEEbHNhdAJCAA[A-Za-z0-9+/_-]{40,}={0,2}'

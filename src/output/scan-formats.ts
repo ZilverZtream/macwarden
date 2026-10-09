@@ -16,7 +16,10 @@ const KINDS: { id: ScanFinding['kind']; name: string; text: string }[] = [
   { id: 'nwc', name: 'NostrWalletConnect', text: 'Nostr Wallet Connect URI carrying a spending secret' },
   { id: 'undecodable', name: 'UndecodableMacaroonFile', text: 'Macaroon file that does not decode (treated as ADMIN)' },
   { id: 'undecodable-candidate', name: 'UndecodableCandidate', text: 'Macaroon-like text that does not decode (treated as ADMIN)' },
+  { id: 'l402', name: 'L402Credential', text: 'L402 (LSAT) paid API access token' },
+  { id: 'l402-file', name: 'L402TokenFile', text: 'L402 (LSAT) token store file' },
 ];
+const L402_KINDS = new Set<string>(['l402', 'l402-file']);
 
 const HELP = 'https://github.com/ZilverZtream/macwarden#scan';
 
@@ -32,7 +35,14 @@ const titleCase = (grade: string) => grade.charAt(0) + grade.slice(1).toLowerCas
  * only from the rule, so a READ macaroon must not inherit an ADMIN rule's severity.
  */
 type Rule = { id: string; name: string; text: string; level: 'error' | 'warning' | 'note'; score: string };
-const RULES: Rule[] = KINDS.flatMap(kind => GRADED.has(kind.id)
+// L402 tokens: one rule with a usable preimage (paid: counted as READ) and one without (unpaid:
+// a challenge, a pending token or a wrong preimage, which grant nothing alone).
+const L402_STATES = [{ id: 'paid', name: 'Paid', text: 'with a usable preimage (live service-access secret, counted as READ)' },
+  { id: 'unpaid', name: 'Unpaid', text: 'without a usable preimage (not counted)' }] as const;
+const RULES: Rule[] = KINDS.flatMap(kind => L402_KINDS.has(kind.id)
+  ? L402_STATES.map(state => ({ id: `macwarden/${kind.id}/${state.id}`, name: `${kind.name}${state.name}`, text: `${kind.text} ${state.text}`,
+    ...findingSeverity({ kind: kind.id, grade: null, l402: state.id === 'paid' ? { countedAs: 'READ' } : { countedAs: null } }) }))
+  : GRADED.has(kind.id)
   ? GRADES.map(grade => {
     const { level, score } = findingSeverity({ kind: kind.id, grade });
     return { id: `macwarden/${kind.id}/${grade.toLowerCase()}`, name: `${kind.name}${titleCase(grade)}`,
@@ -40,13 +50,18 @@ const RULES: Rule[] = KINDS.flatMap(kind => GRADED.has(kind.id)
   })
   : [{ id: `macwarden/${kind.id}`, name: kind.name, text: kind.text, ...findingSeverity({ kind: kind.id, grade: null }) }]);
 
-export function ruleIdFor(finding: Pick<ScanFinding, 'kind' | 'grade'>): string {
+export function ruleIdFor(finding: Pick<ScanFinding, 'kind' | 'grade' | 'l402'>): string {
+  if (L402_KINDS.has(finding.kind)) return `macwarden/${finding.kind}/${finding.l402?.countedAs ? 'paid' : 'unpaid'}`;
   return GRADED.has(finding.kind) ? `macwarden/${finding.kind}/${(finding.grade ?? 'UNASSESSED').toLowerCase()}` : `macwarden/${finding.kind}`;
 }
 
 /** SARIF result level and GitHub security-severity for one finding. */
-export function findingSeverity(finding: { kind: ScanFinding['kind']; grade: ScanFinding['grade'] | null }): { level: 'error' | 'warning' | 'note'; score: string } {
+export function findingSeverity(finding: { kind: ScanFinding['kind']; grade: ScanFinding['grade'] | null;
+  l402?: { countedAs: 'READ' | null } }): { level: 'error' | 'warning' | 'note'; score: string } {
   if (finding.kind === 'nwc') return { level: 'error', score: '9.0' };
+  // An L402 token pays for access to a service; it gives no control of a node. With a usable
+  // preimage it is scored like a READ credential, without one lower still.
+  if (L402_KINDS.has(finding.kind)) return finding.l402?.countedAs ? { level: 'note', score: '3.0' } : { level: 'note', score: '1.0' };
   if (finding.kind === 'undecodable' || finding.kind === 'undecodable-candidate') return { level: 'error', score: '8.0' };
   switch (finding.grade) {
     case 'ADMIN': return { level: 'error', score: '9.5' };
@@ -62,7 +77,9 @@ export function findingSeverity(finding: { kind: ScanFinding['kind']; grade: Sca
 // the file's other hard-link names.
 const alsoText = (finding: ScanFinding) => finding.commit === undefined ? 'same file also at' : 'same content also added at';
 
-const gradeLabel = (finding: ScanFinding) => finding.kind === 'nwc' ? 'SPEND (NWC)'
+const gradeLabel = (finding: ScanFinding) => finding.l402
+  ? (finding.l402.countedAs ? `${finding.l402.countedAs} (L402 ${finding.l402.status})` : `not counted (L402 ${finding.l402.status})`)
+  : finding.kind === 'nwc' ? 'SPEND (NWC)'
   : finding.kind === 'undecodable' || finding.kind === 'undecodable-candidate' ? 'ADMIN (undecodable)'
     : finding.grade ?? 'UNASSESSED';
 
@@ -111,9 +128,15 @@ export function* sarifPieces(result: ScanResult, root: string, version: string, 
   const rules = RULES.map(rule => ({
     id: rule.id, name: rule.name,
     shortDescription: { text: rule.text },
-    fullDescription: { text: `${rule.text}. Anyone holding it can call the node with its permissions until its root key ID is deleted.` },
-    helpUri: HELP,
-    help: { text: 'Remove the credential from the file and its history, then revoke or rotate it with macwarden revoke / rotate.' },
+    ...(rule.id.startsWith('macwarden/l402') ? {
+      fullDescription: { text: `${rule.text}. Anyone holding the macaroon and its preimage can use the paid service until the token expires or the service revokes it; it gives no control of a Lightning node.` },
+      helpUri: HELP,
+      help: { text: 'Remove the token from the file and its history. Only the service that issued it can revoke it; a token with a usable preimage should be treated as spent and replaced.' },
+    } : {
+      fullDescription: { text: `${rule.text}. Anyone holding it can call the node with its permissions until its root key ID is deleted.` },
+      helpUri: HELP,
+      help: { text: 'Remove the credential from the file and its history, then revoke or rotate it with macwarden revoke / rotate.' },
+    }),
     defaultConfiguration: { level: rule.level },
     properties: { tags: ['security', 'secret', 'lightning'], 'security-severity': rule.score, precision: 'very-high' },
   }));

@@ -26,12 +26,12 @@ function fixtureLines(dir: string): string[] {
 
 it('UX/gitleaks-pack extends the gitleaks defaults instead of replacing them', () => {
   const header = ruleText().split(/^\s*\[\[rules\]\]/m)[0];
-  // Without this table gitleaks uses only these four rules and drops every built-in rule.
+  // Without this table gitleaks uses only these rules and drops every built-in rule.
   expect(header).toMatch(/^\[extend\]\s*\r?\n\s*useDefault\s*=\s*true\s*$/m);
 });
 
 it('UX/gitleaks-pack every rule has a description and a lowercase keyword prefilter', () => {
-  expect(blocks()).toHaveLength(4);
+  expect(blocks()).toHaveLength(7);
   for (const block of blocks()) {
     expect(block).toMatch(/^\s*description\s*=\s*'[^']+'\s*$/m);
     const words = keywords(block);

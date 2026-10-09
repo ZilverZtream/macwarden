@@ -64,7 +64,7 @@ const skipped = [{ path: 'binary.dat', reason: 'binary' },
   { path: 'node_modules', reason: 'excluded-dir' },
   { path: 'private.key', reason: 'never-open' }];
 const byGrade = { ADMIN: 1, SPEND: 3, OPERATE: 0, RECEIVE: 4, READ: 4,
-  UNASSESSED: 0, NWC: 3, UNDECODABLE: 0 };
+  UNASSESSED: 0, NWC: 3, UNDECODABLE: 0, L402: 0 };
 writeFileSync(join(full, 'manifest.json'), JSON.stringify({
   source: 'test/vectors/manifest.json and stored printmacaroon facts; fixed NWC 32-byte sentinel',
   files, skipped, summary: { filesScanned: 7, filesSkipped: 3, dropped: 0,

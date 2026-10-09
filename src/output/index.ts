@@ -5,7 +5,7 @@ import { types } from 'node:util';
 import { lndconnect } from '../scan/patterns.js';
 import { replaceNwc } from '../scan/nwc-match.js';
 import { redactEncodedCredentials } from '../credential-recognition.js';
-import { collectNwcSecrets, redactKnownSecrets } from '../scan/redact.js';
+import { collectNwcSecrets, redactKnownSecrets, redactL402Text } from '../scan/redact.js';
 import type { RegistryEntry } from '../registry/index.js';
 import { shellQuote } from '../online.js';
 import { dirname, join } from 'node:path';
@@ -23,6 +23,8 @@ export type NwcInspectResult = {
   kind: 'nwc'; fingerprint: string; walletPubkey: string; clientPubkey: string; relays: string[];
   lud16: string | null; grade: 'SPEND'; reasons: string[]; warnings: string[];
 };
+/** L402 credential facts; neither the preimage nor the macaroon bytes are part of the result. */
+export type L402InspectResult = { kind: 'l402'; fingerprint: string } & import('../l402.js').L402Report;
 export type InventoryResult = {
   node: { pubkey: string; alias: string; network: string; version: string };
   rootKeys: { rootKeyId: string; flags: string[]; verify: string;
@@ -87,7 +89,7 @@ type Success<C extends string | null, R> = Envelope & { command: C; ok: true; re
 export type OutputResult =
   | (Envelope & { command: string | null; ok: false; result: null;
       error: { code: number; step: string | null; message: string } })
-  | Success<'inspect', InspectResult | NwcInspectResult>
+  | Success<'inspect', InspectResult | NwcInspectResult | L402InspectResult>
   | Success<'scan', import('../scan/index.js').ScanResult>
   | (Success<'inventory', InventoryResult> & { display: { now: number } })
   | Success<'attenuate', AttenuateResult>
@@ -155,7 +157,8 @@ function redactUncached(text: string): string {
   // repeated prefixes. The match consumes one delimiter after the secret, which is kept.
   const withUrisRedacted = replaceNwc(withLndconnectRedacted,
     match => `[redacted]${/[^0-9a-f]$/i.test(match) ? match.slice(-1) : ''}`);
-  return redactEncodedCredentials(withUrisRedacted);
+  // L402 Authorization credentials and macaroon:preimage pairs, which carry a preimage.
+  return redactEncodedCredentials(redactL402Text(withUrisRedacted));
 }
 
 function assertPlain(value: unknown, seen = new WeakSet<object>()): void {
@@ -261,7 +264,8 @@ function* scanTextLines(result: import('../scan/index.js').ScanResult): Generato
       (finding.line === null ? '' : `:${finding.line}:${finding.column}`);
     const counted = finding.kind === 'nwc' ? ' (counted as SPEND)'
       : finding.kind === 'undecodable' || finding.kind === 'undecodable-candidate'
-        ? ' (counted as ADMIN)' : '';
+        ? ' (counted as ADMIN)'
+        : finding.l402 ? ` ${safeText(finding.l402.status)} ${finding.l402.countedAs ? `(counted as ${finding.l402.countedAs})` : '(not counted)'}` : '';
     const grade = finding.grade ? ` ${finding.grade === 'UNASSESSED'
       ? 'UNASSESSED (treat as SPEND or worse)' : finding.grade}` : '';
     const root = finding.rootKeyId === null ? '' : ` root key ${finding.rootKeyId}`;
@@ -319,6 +323,49 @@ function nwcInspectText(result: NwcInspectResult): string {
     ...result.warnings.map(code => `warning      ${safeText(code)}` +
       (code === 'relay-details-removed' ? ' (relay userinfo, query or fragment not shown)' : '')),
     'revocation   in the wallet service; NIP-47 defines no call to create or revoke a connection',
+  ];
+  return `${lines.join('\n')}\n`;
+}
+
+const L402_PREIMAGE_TEXT: Record<L402InspectResult['preimage'], string> = {
+  matches: 'present; hashes to the payment hash (proof of payment)',
+  mismatch: 'present; does NOT hash to the payment hash (the server rejects it)',
+  unverifiable: 'present; cannot be checked (identifier not recognised)',
+  absent: 'absent; the macaroon alone grants nothing until its invoice is paid and the preimage added',
+};
+
+function l402CaveatText(caveat: import('../l402.js').L402ReportCaveat): string {
+  if (caveat.type === 'withheld') return '(withheld: it carries the preimage)';
+  if (caveat.type === 'preimage') return 'preimage=(not shown)';
+  if (caveat.type === 'third-party') return `third-party ${safeText(caveat.value ?? '')}`;
+  const text = caveat.condition === null ? caveat.value ?? '' : `${caveat.condition}=${caveat.value ?? ''}`;
+  const state = typeof caveat.expired === 'boolean'
+    ? ` (${caveat.until ? `${caveat.until}, ` : ''}${caveat.expired ? 'expired' : 'valid'})` : '';
+  return `${safeText(text)}${state}`;
+}
+
+function l402InspectText(result: L402InspectResult): string {
+  const form = (result.form === 'authorization' || result.form === 'challenge' ? `${result.form} (${result.scheme ?? 'L402'} scheme)` : result.form)
+    + (result.macaroons > 1 ? `, ${result.macaroons} macaroons (facts of the primary one)` : '');
+  const lines = [
+    'kind         l402 (paid API access token; formerly LSAT)',
+    `fingerprint  ${safeText(result.fingerprint)}`,
+    ...(result.macaroonFingerprint === result.fingerprint ? [] : [`macaroon     ${safeText(result.macaroonFingerprint)}`]),
+    `form         ${safeText(form)}`,
+    ...(result.location === null ? [] : [`location     ${safeText(result.location)}`]),
+    ...(result.identifier === null ? ['identifier   not an L402 version 0 identifier'] : [
+      `version      ${result.identifier.version}`,
+      `payment hash ${safeText(result.identifier.paymentHash)}`,
+      `token ID     ${safeText(result.identifier.tokenId)}`]),
+    ...(result.services.length ? [`services     ${result.services.map(service =>
+      `${safeText(service.name)} (tier ${safeText(service.tier)})`).join(', ')}`] : []),
+    ...result.caveats.map(caveat => `caveats      ${l402CaveatText(caveat)}`),
+    `preimage     ${L402_PREIMAGE_TEXT[result.preimage]}${result.preimageSource === 'caveat' ? ' (from a preimage caveat)' : ''}`,
+    `status       ${safeText(result.status)}`,
+    'access       service-access: pays for access to a service; it gives no control of a Lightning node',
+    `counted as   ${result.countedAs === null ? 'not counted by scan --fail-on' : `${result.countedAs} by scan --fail-on`}`,
+    ...result.warnings.map(code => `warning      ${safeText(code)}`),
+    'revocation   by the service that issued it; the holder cannot revoke it',
   ];
   return `${lines.join('\n')}\n`;
 }
@@ -668,6 +715,20 @@ function isNwcInspectResult(value: unknown): value is NwcInspectResult {
       .every(items => Array.isArray(items) && items.every(item => typeof item === 'string'));
 }
 
+function isL402InspectResult(value: unknown): value is L402InspectResult {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const fields = value as Record<string, unknown>;
+  return fields.kind === 'l402' && ['fingerprint', 'macaroonFingerprint', 'form', 'preimage', 'status'].every(key => typeof fields[key] === 'string')
+    && typeof fields.macaroons === 'number'
+    && Array.isArray(fields.caveats) && Array.isArray(fields.services) && Array.isArray(fields.warnings)
+    && fields.caveats.every(caveat => caveat !== null && typeof caveat === 'object' && typeof caveat.type === 'string')
+    && fields.services.every(service => service !== null && typeof service === 'object'
+      && typeof service.name === 'string' && typeof service.tier === 'string')
+    && (fields.identifier === null || (typeof fields.identifier === 'object' && fields.identifier !== null
+      && typeof (fields.identifier as Record<string, unknown>).paymentHash === 'string'
+      && typeof (fields.identifier as Record<string, unknown>).tokenId === 'string'));
+}
+
 function isInspectResult(value: unknown): value is InspectResult {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const fields = value as Record<string, unknown>;
@@ -805,7 +866,8 @@ export function* renderChunks(result: OutputResult, mode: Mode): Generator<strin
   else switch (result.command) {
     case 'inspect': rendered = isInspectResult(result.result)
       ? inspectText(result.result) : isNwcInspectResult(result.result)
-        ? nwcInspectText(result.result) : genericText(result); break;
+        ? nwcInspectText(result.result) : isL402InspectResult(result.result)
+          ? l402InspectText(result.result) : genericText(result); break;
     case 'inventory': rendered = typeof result.display?.report === 'string' ? result.display.report
       : typeof result.display?.now === 'number' && Number.isFinite(result.display.now)
         ? inventoryText(result.result, result.display.now) + (result.result.report?.path

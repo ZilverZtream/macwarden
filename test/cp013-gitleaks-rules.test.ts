@@ -2,7 +2,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { expect, it } from 'vitest';
 import { dockerArgs } from './gitleaks/run.js';
-import { expectedRegex, jsRegex, kinds, repo, rules, ruleText } from './gitleaks/rules-support.js';
+import { expectedRegex, jsRegex, kinds, repo, rules, ruleText, scanPatterns } from './gitleaks/rules-support.js';
 
 const fixture = resolve(repo, 'test/scan-fixtures');
 const ids = kinds.map(kind => `macwarden-${kind}`);
@@ -31,13 +31,12 @@ function spans(regex: RegExp, line: string): Array<[number, number]> {
   return [...line.matchAll(copy)].map(match => [match.index, match.index + match[0].length]);
 }
 
-it('CP-013/B1 rule pack has the four exact detector regexes', () => {
+it('CP-013/B1 rule pack has the exact detector regexes (four LND and NWC, three L402)', () => {
   expect(rules()).toEqual(kinds.map((kind, at) => ({ id: ids[at], regex: expectedRegex[kind] })));
 });
 
 it('CP-013/B2 gitleaks and scan regexes have identical spans on every fixture text line', async () => {
-  const patterns = await import('../src/scan/patterns.js');
-  const scan = [patterns.macaroonHex, patterns.macaroonBase64, patterns.lndconnect, patterns.nwc];
+  const scan = await scanPatterns();
   const pack = rules();
   for (const path of textFiles(fixture)) {
     for (const [at, line] of lines(path).entries()) {

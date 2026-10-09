@@ -1,4 +1,4 @@
-import { validMacaroonIdentifier, macaroonEosEnd, macaroonPacketRange, macaroonSectionRange } from './index.js';
+import { isL402Identifier, validMacaroonIdentifier, macaroonEosEnd, macaroonPacketRange, macaroonSectionRange } from './index.js';
 
 // Packet and caveat endings depend only on their byte offset. Compute them
 // backwards once per decoded run so candidate headers can share a long tail.
@@ -17,7 +17,9 @@ export function macaroonEnds(bytes: Buffer): (start: number) => number | null {
   function validIdentifier(start: number, end: number): boolean {
     const cached = identifiers.get(start);
     if (cached !== undefined) return cached;
-    const valid = validMacaroonIdentifier(bytes.subarray(start, end));
+    // LND macaroons, and L402 macaroons (Aperture identifiers), are redacted alike.
+    const identifier = bytes.subarray(start, end);
+    const valid = validMacaroonIdentifier(identifier) || isL402Identifier(identifier);
     identifiers.set(start, valid);
     return valid;
   }

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "macwarden inspect --json output",
-  "description": "The single JSON document `macwarden inspect --json` prints to stdout. Normative source: docs/spec.md, Global conventions > Output and Commands > 1. inspect. A Nostr Wallet Connect (NIP-47) input yields the nwcResult shape; its connection secret never appears.",
+  "description": "The single JSON document `macwarden inspect --json` prints to stdout. Normative source: docs/spec.md, Global conventions > Output and Commands > 1. inspect. A Nostr Wallet Connect (NIP-47) input yields the nwcResult shape; its connection secret never appears. An L402 (formerly LSAT) credential yields the l402Result shape; its preimage and macaroon bytes never appear.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "command", "ok", "warnings", "result", "error"],
@@ -15,7 +15,7 @@
       "uniqueItems": true
     },
     "result": {
-      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/result" }, { "$ref": "#/$defs/nwcResult" }, { "$ref": "#/$defs/help" }]
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/result" }, { "$ref": "#/$defs/nwcResult" }, { "$ref": "#/$defs/l402Result" }, { "$ref": "#/$defs/help" }]
     },
     "error": {
       "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/error" }]
@@ -26,7 +26,7 @@
       "if": { "properties": { "ok": { "const": true } }, "required": ["ok"] },
       "then": {
         "properties": {
-          "result": { "oneOf": [{ "$ref": "#/$defs/result" }, { "$ref": "#/$defs/nwcResult" }, { "$ref": "#/$defs/help" }] },
+          "result": { "oneOf": [{ "$ref": "#/$defs/result" }, { "$ref": "#/$defs/nwcResult" }, { "$ref": "#/$defs/l402Result" }, { "$ref": "#/$defs/help" }] },
           "error": { "type": "null" }
         }
       },
@@ -69,6 +69,8 @@
                 "nwc-relay",
                 "nwc-secret",
                 "nwc-lud16",
+                "l402-form",
+                "l402-preimage",
                 "internal"
               ]
             }
@@ -174,6 +176,84 @@
         "reasons": { "type": "array", "minItems": 1, "maxItems": 1, "items": { "const": "nwc-wallet-side-limits" } },
         "warnings": { "type": "array", "items": { "enum": ["relay-details-removed"] }, "uniqueItems": true }
       }
+    },
+    "l402Caveat": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "An L402 caveat as Aperture reads it: condition=value, split at the first '='. A preimage caveat's value is never reported, and a caveat that carries the preimage is withheld.",
+      "required": ["type", "condition", "value"],
+      "properties": {
+        "type": { "enum": ["services", "capabilities", "valid-until", "preimage", "constraint", "third-party", "unknown", "withheld"] },
+        "condition": { "type": ["string", "null"] },
+        "value": { "type": ["string", "null"] },
+        "service": { "type": "string" },
+        "until": { "type": "string", "description": "The valid-until instant as RFC 3339 UTC, when it is representable." },
+        "expired": { "type": "boolean" }
+      },
+      "allOf": [
+        { "if": { "properties": { "type": { "enum": ["capabilities", "valid-until"] } } }, "then": { "required": ["service"] }, "else": { "properties": { "service": false } } },
+        { "if": { "properties": { "type": { "const": "valid-until" } } }, "else": { "properties": { "expired": false, "until": false } } },
+        { "if": { "properties": { "type": { "enum": ["preimage", "withheld"] } } }, "then": { "properties": { "value": { "type": "null" } } }, "else": { "properties": { "value": { "type": "string" } } } },
+        { "if": { "properties": { "type": { "enum": ["unknown", "third-party", "withheld"] } } }, "then": { "properties": { "condition": { "type": "null" } } }, "else": { "properties": { "condition": { "type": "string" } } } }
+      ]
+    },
+    "l402Facts": {
+      "type": "object",
+      "description": "The facts of an L402 credential (docs/spec.md, Commands > 1. inspect, L402 input). access is always service-access: an L402 token pays for access to a service and gives no control of a Lightning node.",
+      "required": ["macaroonFingerprint", "macaroons", "form", "scheme", "location", "identifier", "services", "caveats", "preimage", "preimageSource", "status", "expired", "access", "countedAs", "warnings"],
+      "properties": {
+        "macaroonFingerprint": { "$ref": "#/$defs/fingerprint" },
+        "macaroons": { "type": "integer", "minimum": 1, "maximum": 16, "description": "Macaroons the credential carries; the other facts describe the primary one (the first with an L402 identifier, else the first)." },
+        "form": { "enum": ["authorization", "challenge", "pair", "macaroon", "token-file"] },
+        "scheme": { "enum": ["L402", "LSAT", null] },
+        "location": { "type": ["string", "null"] },
+        "identifier": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object", "additionalProperties": false, "required": ["version", "paymentHash", "tokenId"],
+              "properties": {
+                "version": { "const": 0 },
+                "paymentHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                "tokenId": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+              }
+            }
+          ]
+        },
+        "services": {
+          "type": "array",
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["name", "tier"],
+            "properties": { "name": { "type": "string", "minLength": 1 }, "tier": { "type": "string", "pattern": "^[+-]?[0-9]+$" } }
+          }
+        },
+        "caveats": { "type": "array", "items": { "$ref": "#/$defs/l402Caveat" } },
+        "preimage": { "enum": ["absent", "matches", "mismatch", "unverifiable"] },
+        "preimageSource": { "enum": ["credential", "caveat", null] },
+        "status": { "enum": ["live", "expired", "preimage-mismatch", "unpaid"] },
+        "expired": { "type": "boolean" },
+        "access": { "const": "service-access" },
+        "countedAs": { "enum": ["READ", null], "description": "How scan --fail-on counts it: READ when a preimage is present that matches the payment hash or cannot be checked; null otherwise." },
+        "warnings": {
+          "type": "array", "uniqueItems": true,
+          "items": { "enum": ["trailing-bytes", "caveats-exceed-bounds", "l402-identifier-unrecognized", "l402-bad-services", "l402-bad-valid-until", "l402-bad-preimage-caveat", "l402-caveat-withheld", "l402-token-hash-differs", "l402-several-macaroons"] }
+        }
+      },
+      "allOf": [
+        { "if": { "properties": { "form": { "enum": ["authorization", "challenge"] } } }, "then": { "properties": { "scheme": { "enum": ["L402", "LSAT"] } } }, "else": { "properties": { "scheme": { "const": null } } } },
+        { "if": { "properties": { "preimage": { "const": "absent" } } }, "then": { "properties": { "preimageSource": { "const": null }, "status": { "const": "unpaid" }, "countedAs": { "const": null } } }, "else": { "properties": { "preimageSource": { "enum": ["credential", "caveat"] } } } },
+        { "if": { "properties": { "preimage": { "const": "mismatch" } } }, "then": { "properties": { "status": { "const": "preimage-mismatch" }, "countedAs": { "const": null } } } },
+        { "if": { "properties": { "preimage": { "enum": ["matches", "unverifiable"] } } }, "then": { "properties": { "status": { "enum": ["live", "expired"] }, "countedAs": { "const": "READ" } } } },
+        { "if": { "properties": { "identifier": { "type": "null" } } }, "then": { "properties": { "preimage": { "enum": ["absent", "unverifiable"] } } }, "else": { "properties": { "preimage": { "enum": ["absent", "matches", "mismatch"] } } } }
+      ]
+    },
+    "l402Result": {
+      "description": "L402 credential facts. The preimage and the macaroon bytes never appear. fingerprint covers the canonical macaroon followed by the separately presented preimage; macaroonFingerprint covers the macaroon alone.",
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/l402Facts" }],
+      "required": ["kind", "fingerprint"],
+      "properties": { "kind": { "const": "l402" }, "fingerprint": { "$ref": "#/$defs/fingerprint" } },
+      "unevaluatedProperties": false
     }
   }
 }

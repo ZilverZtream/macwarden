@@ -179,7 +179,7 @@ it('SCALE/render-speed 100,000 findings render as JSON well under the old 0.3 ms
   }));
   const result = { command: 'scan', ok: true, warnings: [], error: null, result: { findings, skipped: [],
     summary: { filesScanned: 1, filesSkipped: 0, dropped: 0, ignored: 0, findings: findings.length, distinct: findings.length,
-      byGrade: { ADMIN: 0, SPEND: 0, OPERATE: 0, RECEIVE: 0, READ: 0, UNASSESSED: 0, NWC: 0, UNDECODABLE: findings.length } },
+      byGrade: { ADMIN: 0, SPEND: 0, OPERATE: 0, RECEIVE: 0, READ: 0, UNASSESSED: 0, NWC: 0, UNDECODABLE: findings.length, L402: 0 } },
     failOn: null } } as unknown as OutputResult;
   const started = performance.now();
   let length = 0;

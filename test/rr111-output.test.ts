@@ -18,7 +18,7 @@ function finding(path: string): ScanFinding {
 function result(paths: string[]): ScanResult {
   return { findings: paths.map(finding), skipped: [],
     summary: { filesScanned: paths.length, filesSkipped: 0, dropped: 0, ignored: 0, findings: paths.length, distinct: 1,
-      byGrade: { ADMIN: 0, SPEND: 0, OPERATE: 0, RECEIVE: 0, READ: 0, UNASSESSED: 0, NWC: 0, UNDECODABLE: paths.length } },
+      byGrade: { ADMIN: 0, SPEND: 0, OPERATE: 0, RECEIVE: 0, READ: 0, UNASSESSED: 0, NWC: 0, UNDECODABLE: paths.length, L402: 0 } },
     failOn: null };
 }
 

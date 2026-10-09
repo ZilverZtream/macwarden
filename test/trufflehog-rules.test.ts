@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { expect, it } from 'vitest';
-import { expectedRegex, jsRegex, kinds } from './gitleaks/rules-support.js';
+import { expectedRegex, jsRegex, kinds, scanPatterns } from './gitleaks/rules-support.js';
 
 const repo = resolve();
 
@@ -23,14 +23,13 @@ function detectors(): { name: string; keywords: string[]; regex: string }[] {
   });
 }
 
-it('TRUFFLEHOG-RULES/the custom detectors carry the four exact SPEC regexes', () => {
+it('TRUFFLEHOG-RULES/the custom detectors carry the exact SPEC regexes (four LND and NWC, three L402)', () => {
   expect(detectors().map(({ name, regex }) => ({ name, regex })))
     .toEqual(kinds.map(kind => ({ name: `macwarden-${kind}`, regex: expectedRegex[kind] })));
 });
 
 it('TRUFFLEHOG-RULES/every keyword occurs in every match of its detector, so the prefilter never drops a hit', async () => {
-  const patterns = await import('../src/scan/patterns.js');
-  const scan = [patterns.macaroonHex, patterns.macaroonBase64, patterns.lndconnect, patterns.nwc];
+  const scan = await scanPatterns();
   const fixtures = join(repo, 'test/scan-fixtures');
   const files = (dir: string): string[] => readdirSync(dir).flatMap(name => {
     const path = join(dir, name);

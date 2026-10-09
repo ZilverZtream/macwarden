@@ -170,7 +170,8 @@
       "READ": 4,
       "UNASSESSED": 0,
       "NWC": 3,
-      "UNDECODABLE": 0
+      "UNDECODABLE": 0,
+      "L402": 0
     }
   }
 }
