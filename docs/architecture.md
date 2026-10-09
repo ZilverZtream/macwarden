@@ -142,7 +142,7 @@ Because LND reuses an existing root key for an existing ID, reusing an ID would 
 
 ## Validation budgets
 
-Full validation (`npm run test:full`) gives each general command 600000 ms by default. `MACWARDEN_VALIDATION_TIMEOUT_MS` accepts integers from 1 through 600000 ms. The whole oracle command defaults to 2400000 ms; `MACWARDEN_ORACLE_TIMEOUT_MS` accepts integers from 1 through 2400000 ms and takes precedence over an explicit general override. With neither override the oracle deadline remains 2400000 ms. Unit/harness case and hook limits are 15000/30000 ms; oracle case and hook limits are each 180000 ms. CP-039/A3-leak-encodings and CP-030/FI-1 retain 30000 ms case overrides. Invalid relevant configuration and timeouts fail validation; fixture teardown remains mandatory. [CONTRIBUTING.md](../CONTRIBUTING.md#tests) describes the test levels.
+Full validation (`npm run test:full`) gives each general command 600000 ms by default. `MACWARDEN_VALIDATION_TIMEOUT_MS` accepts integers from 1 through 600000 ms. The whole oracle command (each LND shard's `test:oracle` and the Core Lightning `test:cln-oracle`) defaults to 2400000 ms; `MACWARDEN_ORACLE_TIMEOUT_MS` accepts integers from 1 through 2400000 ms and takes precedence over an explicit general override. With neither override the oracle deadline remains 2400000 ms. Unit/harness case and hook limits are 15000/30000 ms; oracle case and hook limits are each 180000 ms. CP-039/A3-leak-encodings and CP-030/FI-1 retain 30000 ms case overrides. Invalid relevant configuration and timeouts fail validation; fixture teardown remains mandatory. [CONTRIBUTING.md](../CONTRIBUTING.md#tests) describes the test levels.
 
 ## Regtest fixture
 

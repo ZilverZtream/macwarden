@@ -46,11 +46,14 @@ export function prepareFullControl(variant: 'complete' | 'changed-candidate' | '
     'test:harness': run('vitest.harness.config.ts'), 'test:gitleaks': run('vitest.harness.config.ts'),
     lint: 'node scripts/phase.mjs lint', build: 'node scripts/phase.mjs build',
     'fixture:up': 'node scripts/phase.mjs fixture-up', 'fixture:down': 'node scripts/phase.mjs fixture-down',
+    'test:cln-oracle': run('vitest.cln.config.ts'),
+    'fixture:cln:up': 'node scripts/phase.mjs fixture-cln-up', 'fixture:cln:down': 'node scripts/phase.mjs fixture-cln-down',
   } }));
   put('package-lock.json', JSON.stringify({ name: 'cp050-full-fixture', version: '1.0.0', lockfileVersion: 3,
     packages: { '': { name: 'cp050-full-fixture', version: '1.0.0' } } }));
   for (const [config, include] of [['vitest.config.ts', 'test/unit/**/*.test.ts'],
-    ['vitest.oracle.config.ts', 'test/oracle/**/*.test.ts'], ['vitest.harness.config.ts', 'test/harness/**/*.test.ts']])
+    ['vitest.oracle.config.ts', 'test/oracle/**/*.test.ts'], ['vitest.harness.config.ts', 'test/harness/**/*.test.ts'],
+    ['vitest.cln.config.ts', 'test/cln-oracle/**/*.test.ts']])
     put(config!, `export default {test:{include:[${JSON.stringify(include)}],${variant === 'oracle-config-exclusion' && config === 'vitest.oracle.config.ts' ? "exclude:['test/oracle/c.test.ts']," : ''}fileParallelism:false,maxWorkers:1}};\n`);
   const test = (title: string) => `import {it,expect} from ${JSON.stringify(api)};\nit(${JSON.stringify(title)},()=>expect(1).toBe(1));\n`;
   let firstProductTitle = 'CP-950/B1 first independent product case';
@@ -69,6 +72,7 @@ export function prepareFullControl(variant: 'complete' | 'changed-candidate' | '
   put('test/oracle/b.test.ts', test('CP-951/probe second independent reference'));
   if (variant === 'oracle-config-exclusion') put('test/oracle/c.test.ts', test('CP-950/probe third original reference'));
   put('test/harness/a.test.ts', test('CP-950/B1 independent harness case'));
+  put('test/cln-oracle/a.test.ts', test('CP-952/cln-probe independent Core Lightning reference'));
   put('src/input.ts', 'export const input = 1;\n');
   put('scripts/phase.mjs', `import {writeFileSync} from 'node:fs';import {spawnSync} from 'node:child_process';
 if(process.argv[2]==='build'&&${JSON.stringify(variant)}==='changed-candidate'){
@@ -149,7 +153,8 @@ ${(result.stdout + result.stderr).slice(-4000)}`).toBe(variant === 'complete' ? 
     expect(record.inputs.length).toBeGreaterThan(0);
     const recordedFiles = record.inputs.map(input => (isAbsolute(input.file) ? relative(root, input.file) : input.file).replaceAll('\\', '/'));
     for (const required of ['package.json', 'src/input.ts', 'scripts/phase.mjs', 'vitest.config.ts', 'vitest.oracle.config.ts',
-      'test/unit/a.test.ts', 'test/unit/b.test.ts', 'test/oracle/a.test.ts', 'test/oracle/b.test.ts']) expect(recordedFiles).toContain(required);
+      'vitest.cln.config.ts', 'test/unit/a.test.ts', 'test/unit/b.test.ts', 'test/oracle/a.test.ts', 'test/oracle/b.test.ts',
+      'test/cln-oracle/a.test.ts']) expect(recordedFiles).toContain(required);
     for (const input of record.inputs) {
       const file = (isAbsolute(input.file) ? relative(root, input.file) : input.file).replaceAll('\\', '/');
       expect(input.sha256, input.file).toBe(inputs.get(file));
@@ -162,7 +167,8 @@ ${(result.stdout + result.stderr).slice(-4000)}`).toBe(variant === 'complete' ? 
       return readFileSync(report.originalPath, 'utf8');
     }).join('\n');
     for (const title of ['CP-950/B1 first independent product case', 'CP-951/B1 second independent product case',
-      'CP-950/probe first independent reference', 'CP-951/probe second independent reference']) expect(originals).toContain(title);
+      'CP-950/probe first independent reference', 'CP-951/probe second independent reference',
+      'CP-952/cln-probe independent Core Lightning reference']) expect(originals).toContain(title);
   } else {
     expect(result.status).toBe(1); expect(record.status).toBe('FAIL');
     if (variant === 'metadata-leak') expect(record.checks.some(check => /^leak-check(?::|$)/.test(check.name) && check.status === 'FAIL'),

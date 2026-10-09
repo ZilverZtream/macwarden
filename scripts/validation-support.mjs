@@ -8,7 +8,7 @@ import { findLeaks, sentinelRedactor } from './leak-check.mjs';
 import { platformVariants } from './platform-variants.mjs';
 
 export function resolveVitestConfig(root, kind = 'unit', optional = false) {
-  const bases = { unit: 'vitest.config', oracle: 'vitest.oracle.config', harness: 'vitest.harness.config' };
+  const bases = { unit: 'vitest.config', oracle: 'vitest.oracle.config', harness: 'vitest.harness.config', cln: 'vitest.cln.config' };
   if (!Object.hasOwn(bases, kind)) throw new Error('unknown Vitest configuration');
   const candidates = ['ts', 'mts', 'cts', 'js', 'mjs', 'cjs'].map(extension =>
     join(root, `${bases[kind]}.${extension}`)).filter(path => existsSync(path));
@@ -173,9 +173,10 @@ function mapped(title, id, name) {
 
 /**
  * Checks that a Vitest JSON report is complete and passing and that every test
- * file of its kind ran. Kind 'unit' covers every file outside test/oracle and
- * test/gitleaks, minus this platform's variants, whose counterparts must have
- * passed their required case. Kind 'oracle' covers every file in test/oracle.
+ * file of its kind ran. Kind 'unit' covers every file outside test/oracle,
+ * test/cln-oracle and test/gitleaks, minus this platform's variants, whose
+ * counterparts must have passed their required case. Kind 'oracle' covers every
+ * file in test/oracle, kind 'cln-oracle' every file in test/cln-oracle.
  */
 export function fullSuite(root, kind, report, checks) {
   const tests = assertions(report);
@@ -187,8 +188,8 @@ export function fullSuite(root, kind, report, checks) {
   checks.push({ name: 'selected-suite', status: countsValid ? 'PASS' : 'FAIL',
     detail: `${tests.length} assertions; complete passing JSON report required` });
   const candidates = testFiles(root).filter(file => kind === 'unit'
-    ? !file.startsWith('test/oracle/') && !file.startsWith('test/gitleaks/')
-    : file.startsWith('test/oracle/'));
+    ? !file.startsWith('test/oracle/') && !file.startsWith('test/cln-oracle/') && !file.startsWith('test/gitleaks/')
+    : file.startsWith(kind === 'cln-oracle' ? 'test/cln-oracle/' : 'test/oracle/'));
   const variants = kind === 'unit' ? platformVariants(process.platform).filter(item => candidates.includes(item.file)) : [];
   const excluded = variants.map(item => item.file);
   const required = candidates.filter(file => !excluded.includes(file));

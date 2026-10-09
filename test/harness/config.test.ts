@@ -20,6 +20,9 @@ const scripts = {
   'test:gitleaks': 'vitest run --config vitest.gitleaks.config.ts',
   'fixture:up': 'node test/fixture/fixture.mjs up',
   'fixture:down': 'node test/fixture/fixture.mjs down',
+  'fixture:cln:up': 'node test/fixture/cln-fixture.mjs up',
+  'fixture:cln:down': 'node test/fixture/cln-fixture.mjs down',
+  'test:cln-oracle': 'vitest run --config vitest.cln.config.ts',
 };
 
 function listFor(yaml: string, key: string): string[] {
@@ -122,8 +125,10 @@ it('CP-001/B12 runs the pinned CI matrix and commands', () => {
   }
   const runsFor = (job: string) => [...job.matchAll(/^\s*-?\s*run:\s*(.+?)\s*$/gm)].map(match => match[1]);
   expect(runsFor(testJob)).toEqual(['npm ci', 'npm run lint', 'npm run build', 'npm test']);
-  expect(runsFor(oracleJob)).toEqual(['npm ci', 'npm run build', 'npm run fixture:up', 'npm run test:oracle', 'npm run fixture:down']);
+  expect(runsFor(oracleJob)).toEqual(['npm ci', 'npm run build', 'npm run fixture:up', 'npm run test:oracle', 'npm run fixture:down',
+    'npm run fixture:cln:up', 'npm run test:cln-oracle', 'npm run fixture:cln:down']);
   expect(oracleJob).toMatch(/^ {6}- if: always\(\)\n {8}run: npm run fixture:down$/m);
+  expect(oracleJob).toMatch(/^ {6}- if: always\(\)\n {8}run: npm run fixture:cln:down$/m);
   expect(runsFor(gitleaksJob)).toEqual(['npm ci', 'npm run build', '|', 'npm run test:gitleaks']);
   // The gitleaks tests run with private scratch and sentinel directories created inside the checkout.
   expect(gitleaksJob).toMatch(/^ {10}umask 077$/m);

@@ -60,7 +60,8 @@ async function validate(args) {
     const sentinels = await createPrivateDirectory(runtime, `macwarden-sentinels-${owner}-`);
     const env = { ...process.env, MACWARDEN_TEST_TMP: scratch, MACWARDEN_SENTINEL_DIR: sentinels };
     delete env.MACWARDEN_FIXTURE_SHARD;
-    if (owner !== 'unit') env.MACWARDEN_FIXTURE_SHARD = owner;
+    // LND fixture shards are numbered; the Core Lightning fixture has its own fixed project.
+    if (/^[1-4]$/.test(owner)) env.MACWARDEN_FIXTURE_SHARD = owner;
     const ctx = { owner, scratch, sentinels, env, output: '' };
     contexts.push(ctx);
     result.lifecycle.owners.push({ owner, scratch, sentinels, createdAt: new Date().toISOString() });
@@ -120,17 +121,20 @@ async function validate(args) {
     const unitConfig = resolveVitestConfig(root);
     const oracleConfig = resolveVitestConfig(root, 'oracle');
     const harnessConfig = resolveVitestConfig(root, 'harness', true);
+    const clnConfig = resolveVitestConfig(root, 'cln');
     const units = await inventory(unit, unitConfig, 'unit');
     const oracles = await inventory(unit, oracleConfig, 'oracle');
-    const oracleFileCoverage = (files, label) => {
+    const clnOracles = await inventory(unit, clnConfig, 'cln-oracle');
+    const oracleFileCoverage = (files, label, kind = 'oracle') => {
       const checks = [];
-      fullSuite(root, 'oracle', { testResults: files.map(name => ({
+      fullSuite(root, kind, { testResults: files.map(name => ({
         name, assertionResults: []
       })) }, checks);
       result.checks.push(...checks.filter(check => check.name === 'suite-inventory')
         .map(check => ({ ...check, name: `${label}:file-inventory` })));
     };
     oracleFileCoverage(oracles.map(item => item.file), 'oracle-collection');
+    oracleFileCoverage(clnOracles.map(item => item.file), 'oracle-cln-collection', 'cln-oracle');
     const unitReport = join(unit.scratch, 'unit-report.json');
     await perform(unit, ['run', '--config', unitConfig, '--cache=false', '--reporter=json', `--outputFile=${unitReport}`], timeout, true);
     report(unit, unitReport, 'unit', units);
@@ -151,8 +155,24 @@ async function validate(args) {
     }
     fullSuite(root, 'unit', unitData, result.checks);
     const oracleObserved = [];
+    // The Core Lightning rune comparison runs beside the LND shards against its own disposable
+    // regtest fixture (fixture:cln:up, test:cln-oracle, fixture:cln:down), recorded like them.
+    const clnShard = async () => {
+      const ctx = await context('cln');
+      const path = join(ctx.scratch, 'cln-oracle-report.json');
+      try {
+        if (await perform(ctx, ['run', 'fixture:cln:up'])) {
+          await perform(ctx, ['run', 'test:cln-oracle', '--', ...npmVitestConfigArgs(root, 'test:cln-oracle', clnConfig), '--cache=false', '--reporter=json', `--outputFile=${path}`], oracleTimeout);
+        }
+      } finally {
+        await perform(ctx, ['run', 'fixture:cln:down']);
+      }
+      if (!existsSync(path)) throw new Error('cln oracle report missing');
+      const observed = report(ctx, path, 'oracle-cln', clnOracles);
+      oracleFileCoverage(observed.map(item => item.file), 'oracle-cln-aggregate', 'cln-oracle');
+    };
     // Built-in Vitest file sharding keeps each stateful file with one owner.
-    const shards = await Promise.allSettled(['1', '2'].map(async owner => {
+    const shards = await Promise.allSettled([clnShard(), ...['1', '2'].map(async owner => {
       const ctx = await context(owner);
       const path = join(ctx.scratch, 'oracle-report.json');
       try {
@@ -166,7 +186,7 @@ async function validate(args) {
       const data = readJson(path);
       const files = new Set((data.testResults || []).map(suite => resolve(root, suite.name)));
       oracleObserved.push(...report(ctx, path, `oracle-${owner}`, oracles.filter(item => files.has(resolve(root, item.file)))));
-    }));
+    })]);
     if (shards.some(shard => shard.status === 'rejected')) throw new Error('shard validation failed');
     const keys = items => items.map(item => `${resolve(root, item.file)}\0${item.inventoryName ?? item.name}`).sort();
     const actual = keys(oracleObserved);
