@@ -7,6 +7,10 @@ import { expect, it } from 'vitest';
 import { Secret } from '../src/secret.js';
 import { directory, maxId, register, vector } from './helpers/cp026-revoke-support.mjs';
 import { safe } from './helpers/cp027-revoke-support.js';
+import { isolateLeakSuite } from './helpers/leak-suite.js';
+
+// Leak checks scan this file's own sentinels, not every credential the whole run registered.
+isolateLeakSuite('cp027-adapter');
 
 type Adapter = { deleteMacaroonId(id: bigint): Promise<{ deleted: boolean }> };
 async function server(work: (adapter: Adapter, seen: Array<{ method: string; path: string; body: string }>,
