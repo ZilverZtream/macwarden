@@ -115,6 +115,17 @@ describe('RUNE/assess structure', () => {
       expect(assess(`=1&${good}&method=getinfo`).grade, good).toBe('READ');
   });
 
+  it('RUNE/assess rate and per read their count as strtoul does: a negative count wraps around modulo 2^64', () => {
+    // strtoul("-18446744073709551615") is 1 and strtoul("-18446744073709551614") is 2, so Core
+    // Lightning accepts these as rate limits; a negative count that wraps outside 1..4294967294 fails.
+    for (const good of ['rate=-18446744073709551615', 'rate= -18446744073709551614', 'rate=-18446744069414584322',
+      'per=-18446744073709551615', 'per=-18446744073709551614sec', 'per=\t-18446744073709551610min'])
+      expect(assess(`=1&${good}&method=getinfo`), good).toMatchObject({ grade: 'READ', methods: 'listed', conditions: ['rate'] });
+    for (const bad of ['rate=-1', 'rate=-0', 'rate=-18446744069414584321', 'rate=-18446744073709551616', 'per=-5sec', 'per=-0',
+      'rate=--1', 'rate=+-1'])
+      expect(assess(`=1&${bad}`).methods, bad).toBe('none');
+  });
+
   it('RUNE/assess invoice fields: known suffixes are unknown, others always fail', () => {
     expect(assess('=1&method=pay&pinvbolt11_amount<1000').conditions).toEqual(['parameter']);
     expect(assess('=1&pinvbolt11_weird=1').methods).toBe('none');

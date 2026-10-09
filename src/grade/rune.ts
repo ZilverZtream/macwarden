@@ -47,7 +47,7 @@ export type RuneAssessment = {
 const FALSE = 0, TRUE = 1, UNKNOWN = 2;
 type Tri = typeof FALSE | typeof TRUE | typeof UNKNOWN;
 
-const LONG_MIN = -(2n ** 63n), LONG_MAX = 2n ** 63n - 1n;
+const LONG_MIN = -(2n ** 63n), LONG_MAX = 2n ** 63n - 1n, ULONG_MAX = 2n ** 64n - 1n;
 
 /** strtol(value, &end, 10) on a 64-bit long, accepted only when it consumes everything without overflow. */
 export function runeInteger(value: string): bigint | null {
@@ -89,17 +89,26 @@ function integerTest(alternative: RuneAlternative, field: bigint): boolean {
   return stringTest(alternative, field.toString());
 }
 
+/** strtoul(value, &end, 10) on a 64-bit unsigned long: a negative number wraps modulo 2^64, overflow gives ULONG_MAX. */
+function strtoul(value: string): { number: bigint; rest: string } | null {
+  const match = /^[ \t\n\v\f\r]*([+-]?)([0-9]+)(.*)$/s.exec(value);
+  if (!match) return null;
+  const magnitude = BigInt(match[2]);
+  const number = magnitude > ULONG_MAX ? ULONG_MAX : match[1] === '-' && magnitude !== 0n ? ULONG_MAX + 1n - magnitude : magnitude;
+  return { number, rest: match[3] };
+}
+
 /** True when a strtoul-style rate or per value is one Core Lightning accepts. */
 function validRate(alternative: RuneAlternative, per: boolean): boolean {
   if (alternative.condition !== '=') return false;
-  const match = /^[ \t\n\v\f\r]*\+?([0-9]+)(.*)$/s.exec(alternative.value);
-  if (!match) return false;
-  const number = BigInt(match[1]);
+  const parsed = strtoul(alternative.value);
+  if (!parsed) return false;
+  const { number, rest } = parsed;
   if (number === 0n || number >= 0xffffffffn) return false;
-  if (!per) return match[2] === '';
+  if (!per) return rest === '';
   const multipliers: Record<string, bigint> = { '': 1_000_000_000n, sec: 1_000_000_000n, nsec: 1n, usec: 1000n,
     msec: 1_000_000n, min: 60_000_000_000n, hour: 3_600_000_000_000n, day: 86_400_000_000_000n };
-  const multiplier = multipliers[match[2]];
+  const multiplier = multipliers[rest];
   return multiplier !== undefined && number * multiplier < 2n ** 64n;
 }
 

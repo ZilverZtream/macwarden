@@ -151,7 +151,7 @@ Test rows (each is a unit test; more are added with every bug):
 | `time` | unknown for capabilities (it depends on when the request is made); `!` false; `<` `>` with a value that is not a 64-bit integer (as `strtol` reads it) false; `#` true |
 | `id` | unknown (the requesting peer, absent for a local call); `<` `>` false; `#` true |
 | `pnum` | unknown; `!` false; `<` `>` with an invalid integer false; `#` true |
-| `rate`, `per` | unknown when Core Lightning accepts the value (condition `=`, a count from 1 to 4,294,967,294, for `per` a unit `sec`, `nsec`, `usec`, `msec`, `min`, `hour` or `day` without overflow); otherwise false, a comment included |
+| `rate`, `per` | unknown when Core Lightning accepts the value (condition `=`, a count from 1 to 4,294,967,294 as `strtoul` reads it, so a negative count wraps modulo 2⁶⁴, for `per` a unit `sec`, `nsec`, `usec`, `msec`, `min`, `hour` or `day` without overflow); otherwise false, a comment included |
 | `pinv…` | unknown when the name ends in `_amount`, `_description` or `_node`; otherwise false |
 | `pname…`, `parr…`, any other field | unknown; `#` true. A field Core Lightning v26.06.8 does not know is kept as an assessment limitation (warning `unknown-field`) and never excludes anything |
 
