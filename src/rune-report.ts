@@ -41,9 +41,12 @@ export type RuneInvalidReport = { recognition: 'invalid'; reason: RuneInvalidRep
 export type RuneAssessed = { grade: Grade; reasons: string[]; unassessed: string[]; report: RuneReport };
 
 const fatal = new TextDecoder('utf-8', { fatal: true });
-// Long runs of base64, base64url or hex characters are opaque tokens; a compressed public key
-// (a node ID) is shown, since `id` restrictions name one and it is public.
-const TOKEN = /[A-Za-z0-9+/_=-]{40,}/g;
+// Long runs of base64, base64url or hex characters are opaque tokens, also when '.', ':' or '~'
+// split them into shorter runs (a JWT, or a credential cut into pieces that would otherwise be
+// shown one by one): a token is redacted when its runs hold 40 or more characters together. A
+// compressed public key (a node ID) is shown, since `id` restrictions name one and it is public.
+const TOKEN = /[A-Za-z0-9+/_=-]+(?:[.:~][A-Za-z0-9+/_=-]+)*/g;
+const TOKEN_LENGTH = 40;
 const NODE_ID = /^0[23][0-9a-fA-F]{64}$/;
 
 /** A byte string from the credential, made safe and bounded for output. */
@@ -52,7 +55,7 @@ export function shownRuneText(bytes: string): string {
   let text: string;
   try { text = fatal.decode(raw); }
   catch { text = [...raw].map(byte => byte < 0x80 ? String.fromCharCode(byte) : `\\x${byte.toString(16).padStart(2, '0')}`).join(''); }
-  text = redactDecoded(text.replace(TOKEN, token => NODE_ID.test(token) ? token : '[redacted]'));
+  text = redactDecoded(text.replace(TOKEN, token => NODE_ID.test(token) || token.replace(/[.:~]/g, '').length < TOKEN_LENGTH ? token : '[redacted]'));
   const points = Array.from(text);
   return points.length <= RUNE_SHOWN_LENGTH ? text
     : `${points.slice(0, RUNE_SHOWN_LENGTH).join('')}…[+${points.length - RUNE_SHOWN_LENGTH}]`;

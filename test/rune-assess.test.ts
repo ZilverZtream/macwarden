@@ -243,6 +243,22 @@ describe('RUNE/report sanitised output facts', () => {
     expect(shownRuneText(Buffer.from('café').toString('latin1'))).toBe('café');
   });
 
+  it('RUNE/report an opaque value split by dots, colons or tildes into short runs is redacted as one token', () => {
+    // A rune (or a JWT) split into runs shorter than 40 characters used to be shown run by run, so the
+    // credential could be put back together by removing the separators.
+    const other = rune('=5&method=pay');
+    const half = Math.floor(other.length / 2);
+    for (const separator of ['.', ':', '~']) {
+      const split = `${other.slice(0, half)}${separator}${other.slice(half)}`;
+      expect(shownRuneText(`note ${split} end`), separator).toBe('note [redacted] end');
+    }
+    const jwt = `${Buffer.from('{"alg":"HS256","typ":"JWT"}').toString('base64url')}.${Buffer.from('{"sub":"agent"}').toString('base64url')}.${'s'.repeat(30)}`;
+    expect(shownRuneText(jwt)).toBe('[redacted]');
+    // Ordinary dotted text stays: host names, versions, method names, short IDs.
+    for (const text of ['api.example.com', 'v26.06.8', 'bkpr-listbalances', 'node.local:9735', 'a.b.c.d.e.f'])
+      expect(shownRuneText(text), text).toBe(text);
+  });
+
   it('RUNE/report lists at most 64 alternatives and counts the rest', () => {
     const many = Array.from({ length: 80 }, (_, index) => `method=m${index}`).join('|');
     const { report } = runeReport(facts(`=1&${many}`), NOW);
