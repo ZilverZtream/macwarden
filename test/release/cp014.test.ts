@@ -4,6 +4,9 @@ import { afterAll, expect, it } from 'vitest';
 import { artifact, installedCommand, relativePaths, repo, retainArtifactBytes } from './artifact.js';
 
 afterAll(retainArtifactBytes);
+// The first test to call artifact() packs, installs and cleanly rebuilds the package: about 1 to
+// 2.5 minutes on a two-core CI runner. The limit only stops a hang.
+const ARTIFACT_TIMEOUT_MS = 300_000;
 
 type Package = { name: string; version: string; license: string; engines: { node: string };
   dependencies?: Record<string, string>; files: string[]; scripts: Record<string, string>;
@@ -76,7 +79,7 @@ it('CP-014/B1 dry-run and extracted tarball have exactly the offline allow-list'
     || /^schemas\/output\/[a-z-]+\.schema\.json$/.test(path))).toBe(true);
   expect(actual.some(path => /^(test|src|scripts|\.ratchet|\.github|archive|docs)\//.test(path)))
     .toBe(false);
-}, 120_000);
+}, ARTIFACT_TIMEOUT_MS);
 
 it('CP-014/B2 installed tarball runs version inspect scan and dormant inventory', () => {
   const version = installedCommand(['--version']);
@@ -103,7 +106,7 @@ it('CP-014/B2 installed tarball runs version inspect scan and dormant inventory'
   } finally { rmSync(tree, { recursive: true, force: true }); }
 
   expect(installedCommand(['inventory']).status).toBe(2);
-}, 120_000);
+}, ARTIFACT_TIMEOUT_MS);
 
 it('CP-014/B2 installed command detects a broken npm shim and preserves literal arguments', () => {
   const a = artifact();
@@ -122,7 +125,7 @@ it('CP-014/B2 installed command detects a broken npm shim and preserves literal 
     expect(result.stdout.replace(/\r\n/g, '\n')).toBe(`${args.join('\n')}\n`);
     expect(result.stderr.trim()).toBe('broken shim control');
   } finally { writeFileSync(shim, original); }
-}, 120_000);
+}, ARTIFACT_TIMEOUT_MS);
 
 it('CP-014/B3 package metadata fixes version dependencies allow-list and future provenance', () => {
   const pkg = packageJson();
@@ -212,7 +215,7 @@ it('CP-014/B6 release documents give runnable offline examples and accurate loca
     const result = installedCommand([verb, ...args]);
     expect(result.status, `${verb} README example must not exit 2`).not.toBe(2);
   }
-}, 120_000);
+}, ARTIFACT_TIMEOUT_MS);
 
 it('CP-014/B16 prepack replaces stale dist with bytes from an independent clean build', () => {
   const a = artifact();
@@ -225,4 +228,4 @@ it('CP-014/B16 prepack replaces stale dist with bytes from an independent clean 
   expect(result.status).toBe(0);
   expect((JSON.parse(result.stdout) as { result: { grade: string } }).result.grade)
     .toBe(addInvoice.expectedGrade);
-}, 120_000);
+}, ARTIFACT_TIMEOUT_MS);
