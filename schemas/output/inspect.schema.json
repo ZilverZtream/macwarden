@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "macwarden inspect --json output",
-  "description": "The single JSON document `macwarden inspect --json` prints to stdout. Normative source: docs/spec.md, Global conventions > Output and Commands > 1. inspect. A Nostr Wallet Connect (NIP-47) input yields the nwcResult shape; its connection secret never appears.",
+  "description": "The single JSON document `macwarden inspect --json` prints to stdout. Normative source: docs/spec.md, Global conventions > Output and Commands > 1. inspect. A Nostr Wallet Connect (NIP-47) input yields the nwcResult shape; its connection secret never appears. A Core Lightning rune yields the runeResult shape; its authenticator never appears.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "command", "ok", "warnings", "result", "error"],
@@ -15,7 +15,7 @@
       "uniqueItems": true
     },
     "result": {
-      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/result" }, { "$ref": "#/$defs/nwcResult" }, { "$ref": "#/$defs/help" }]
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/result" }, { "$ref": "#/$defs/nwcResult" }, { "$ref": "#/$defs/runeResult" }, { "$ref": "#/$defs/help" }]
     },
     "error": {
       "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/error" }]
@@ -26,7 +26,7 @@
       "if": { "properties": { "ok": { "const": true } }, "required": ["ok"] },
       "then": {
         "properties": {
-          "result": { "oneOf": [{ "$ref": "#/$defs/result" }, { "$ref": "#/$defs/nwcResult" }, { "$ref": "#/$defs/help" }] },
+          "result": { "oneOf": [{ "$ref": "#/$defs/result" }, { "$ref": "#/$defs/nwcResult" }, { "$ref": "#/$defs/runeResult" }, { "$ref": "#/$defs/help" }] },
           "error": { "type": "null" }
         }
       },
@@ -69,6 +69,7 @@
                 "nwc-relay",
                 "nwc-secret",
                 "nwc-lud16",
+                "rune-syntax",
                 "internal"
               ]
             }
@@ -173,6 +174,280 @@
         "grade": { "const": "SPEND" },
         "reasons": { "type": "array", "minItems": 1, "maxItems": 1, "items": { "const": "nwc-wallet-side-limits" } },
         "warnings": { "type": "array", "items": { "enum": ["relay-details-removed"] }, "uniqueItems": true }
+      }
+    },
+    "runeText": {
+      "description": "A rune field, value, unique ID or method name from the credential: UTF-8 (invalid bytes as \\xNN), long opaque tokens and recognised credentials replaced by [redacted], at most 128 code points followed by …[+N].",
+      "type": "string"
+    },
+    "runeWarning": {
+      "enum": [
+        "broad-method-access",
+        "unreviewed-method",
+        "sensitive-method",
+        "no-matching-method",
+        "unknown-field",
+        "parameter-limits-not-a-budget",
+        "no-unique-id",
+        "unique-id-not-numeric",
+        "unique-id-out-of-range",
+        "version-suffix",
+        "non-canonical-encoding",
+        "possibly-truncated"
+      ]
+    },
+    "runeReport": {
+      "description": "Core Lightning rune facts (docs/spec.md, Core Lightning runes). Recognition, assessment and verification are separate: recognition says the text parses as a rune, the assessment says what its encoded restrictions may allow, and verification (authenticity, issuing node, blacklist, rate-limit state) is never done offline. Never contains the authenticator or Core Lightning's decoded string.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recognition",
+        "methodTable",
+        "uniqueId",
+        "version",
+        "restrictions",
+        "omittedAlternatives",
+        "methods",
+        "allowedMethods",
+        "capabilities",
+        "sensitiveMethods",
+        "conditions",
+        "expiry",
+        "verification",
+        "warnings"
+      ],
+      "properties": {
+        "recognition": {
+          "const": "rune-syntax"
+        },
+        "methodTable": {
+          "description": "The Core Lightning release the method table is pinned to.",
+          "type": "string",
+          "pattern": "^cln-v[0-9][0-9.]*$"
+        },
+        "uniqueId": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/runeText"
+            }
+          ]
+        },
+        "version": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/runeText"
+            }
+          ]
+        },
+        "restrictions": {
+          "description": "Every restriction after the unique ID, all of which must pass (AND); each lists its alternatives, any of which may pass (OR).",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "field",
+                "condition",
+                "value"
+              ],
+              "properties": {
+                "field": {
+                  "$ref": "#/$defs/runeText"
+                },
+                "condition": {
+                  "enum": [
+                    "!",
+                    "=",
+                    "/",
+                    "^",
+                    "$",
+                    "~",
+                    "<",
+                    ">",
+                    "{",
+                    "}",
+                    "#"
+                  ]
+                },
+                "value": {
+                  "$ref": "#/$defs/runeText"
+                }
+              }
+            }
+          }
+        },
+        "omittedAlternatives": {
+          "description": "Alternatives beyond the 64 listed.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "methods": {
+          "enum": [
+            "listed",
+            "broad",
+            "none"
+          ]
+        },
+        "allowedMethods": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        },
+        "capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "ADMIN",
+              "SPEND",
+              "OPERATE",
+              "RECEIVE",
+              "READ",
+              "UNASSESSED"
+            ]
+          }
+        },
+        "sensitiveMethods": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        },
+        "conditions": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "peer",
+              "parameter",
+              "rate",
+              "time",
+              "unknown-field"
+            ]
+          }
+        },
+        "expiry": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "deadline"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "none",
+                "time-conditions",
+                "deadline-ahead",
+                "deadline-passed"
+              ]
+            },
+            "deadline": {
+              "description": "UNIX seconds from which every request is refused, as a decimal string.",
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "string",
+                  "pattern": "^-?[0-9]+$"
+                }
+              ]
+            }
+          }
+        },
+        "verification": {
+          "const": "unchecked"
+        },
+        "warnings": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/runeWarning"
+          }
+        }
+      }
+    },
+    "runeInvalidReport": {
+      "description": "A value in rune context that does not parse as a Core Lightning rune, or exceeds macwarden's parser bounds.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recognition",
+        "reason",
+        "verification"
+      ],
+      "properties": {
+        "recognition": {
+          "const": "invalid"
+        },
+        "reason": {
+          "enum": [
+            "exceeds-bounds",
+            "not-base64url",
+            "too-short",
+            "nul-byte",
+            "restriction-syntax",
+            "unique-id-placement"
+          ]
+        },
+        "verification": {
+          "const": "unchecked"
+        }
+      }
+    },
+    "runeResult": {
+      "description": "inspect result for a Core Lightning rune (docs/spec.md, Core Lightning runes).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "fingerprint",
+        "grade",
+        "reasons",
+        "unassessed",
+        "rune"
+      ],
+      "properties": {
+        "kind": {
+          "const": "rune"
+        },
+        "fingerprint": {
+          "$ref": "#/$defs/fingerprint"
+        },
+        "grade": {
+          "$ref": "#/$defs/grade"
+        },
+        "reasons": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        },
+        "unassessed": {
+          "description": "Method names the restrictions allow by exact name that the pinned table does not list.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/runeText"
+          }
+        },
+        "rune": {
+          "$ref": "#/$defs/runeReport"
+        }
       }
     }
   }

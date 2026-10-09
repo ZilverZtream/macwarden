@@ -134,7 +134,9 @@
             "lndconnect",
             "nwc",
             "undecodable",
-            "undecodable-candidate"
+            "undecodable-candidate",
+            "rune",
+            "rune-invalid"
           ]
         },
         "fingerprint": { "$ref": "#/$defs/fingerprint" },
@@ -150,6 +152,7 @@
           "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"
         },
         "context": { "description": "Only when the credential is a string value inside an MCP server entry of a JSON config (an AI agent configuration).", "const": "mcp-config" },
+        "rune": { "description": "Only on kind rune (runeReport) or rune-invalid (runeInvalidReport): the sanitised facts of a Core Lightning rune found in rune context.", "oneOf": [{ "$ref": "#/$defs/runeReport" }, { "$ref": "#/$defs/runeInvalidReport" }] },
         "alsoAt": {
           "description": "With --git-history (a finding with commit): the same file content was also added at other paths. On a work-tree finding (no commit): the same file is also reachable under other hard-link names within the same path argument. One finding stands for all of them: count is how many other paths, paths lists up to five.",
           "type": "object",
@@ -185,13 +188,38 @@
             }
           },
           "else": {
-            "properties": {
-              "grade": { "$ref": "#/$defs/grade" },
-              "rootKeyId": { "$ref": "#/$defs/rootKeyId" },
-              "permissions": { "type": "array" },
-              "caveats": { "type": "array" }
+            "if": { "properties": { "kind": { "enum": ["rune", "rune-invalid"] } } },
+            "then": {
+              "required": ["rune"],
+              "properties": {
+                "grade": { "$ref": "#/$defs/grade" },
+                "rootKeyId": { "type": "null" },
+                "permissions": { "type": "null" },
+                "caveats": { "type": "null" },
+                "warnings": { "type": "array", "maxItems": 0 }
+              }
+            },
+            "else": {
+              "properties": {
+                "grade": { "$ref": "#/$defs/grade" },
+                "rootKeyId": { "$ref": "#/$defs/rootKeyId" },
+                "permissions": { "type": "array" },
+                "caveats": { "type": "array" }
+              }
             }
           }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "rune" } } },
+          "then": { "properties": { "rune": { "$ref": "#/$defs/runeReport" } } }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "rune-invalid" } } },
+          "then": { "properties": { "grade": { "const": "UNASSESSED" }, "unassessed": { "type": "array", "maxItems": 0 }, "rune": { "$ref": "#/$defs/runeInvalidReport" } } }
+        },
+        {
+          "if": { "properties": { "kind": { "not": { "enum": ["rune", "rune-invalid"] } } } },
+          "then": { "properties": { "rune": false } }
         }
       ]
     },
@@ -271,6 +299,238 @@
         },
         "summary": { "$ref": "#/$defs/summary" },
         "failOn": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/failOn" }] }
+      }
+    },
+    "runeText": {
+      "description": "A rune field, value, unique ID or method name from the credential: UTF-8 (invalid bytes as \\xNN), long opaque tokens and recognised credentials replaced by [redacted], at most 128 code points followed by …[+N].",
+      "type": "string"
+    },
+    "runeWarning": {
+      "enum": [
+        "broad-method-access",
+        "unreviewed-method",
+        "sensitive-method",
+        "no-matching-method",
+        "unknown-field",
+        "parameter-limits-not-a-budget",
+        "no-unique-id",
+        "unique-id-not-numeric",
+        "unique-id-out-of-range",
+        "version-suffix",
+        "non-canonical-encoding",
+        "possibly-truncated"
+      ]
+    },
+    "runeReport": {
+      "description": "Core Lightning rune facts (docs/spec.md, Core Lightning runes). Recognition, assessment and verification are separate: recognition says the text parses as a rune, the assessment says what its encoded restrictions may allow, and verification (authenticity, issuing node, blacklist, rate-limit state) is never done offline. Never contains the authenticator or Core Lightning's decoded string.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recognition",
+        "methodTable",
+        "uniqueId",
+        "version",
+        "restrictions",
+        "omittedAlternatives",
+        "methods",
+        "allowedMethods",
+        "capabilities",
+        "sensitiveMethods",
+        "conditions",
+        "expiry",
+        "verification",
+        "warnings"
+      ],
+      "properties": {
+        "recognition": {
+          "const": "rune-syntax"
+        },
+        "methodTable": {
+          "description": "The Core Lightning release the method table is pinned to.",
+          "type": "string",
+          "pattern": "^cln-v[0-9][0-9.]*$"
+        },
+        "uniqueId": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/runeText"
+            }
+          ]
+        },
+        "version": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/runeText"
+            }
+          ]
+        },
+        "restrictions": {
+          "description": "Every restriction after the unique ID, all of which must pass (AND); each lists its alternatives, any of which may pass (OR).",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "field",
+                "condition",
+                "value"
+              ],
+              "properties": {
+                "field": {
+                  "$ref": "#/$defs/runeText"
+                },
+                "condition": {
+                  "enum": [
+                    "!",
+                    "=",
+                    "/",
+                    "^",
+                    "$",
+                    "~",
+                    "<",
+                    ">",
+                    "{",
+                    "}",
+                    "#"
+                  ]
+                },
+                "value": {
+                  "$ref": "#/$defs/runeText"
+                }
+              }
+            }
+          }
+        },
+        "omittedAlternatives": {
+          "description": "Alternatives beyond the 64 listed.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "methods": {
+          "enum": [
+            "listed",
+            "broad",
+            "none"
+          ]
+        },
+        "allowedMethods": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        },
+        "capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "ADMIN",
+              "SPEND",
+              "OPERATE",
+              "RECEIVE",
+              "READ",
+              "UNASSESSED"
+            ]
+          }
+        },
+        "sensitiveMethods": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        },
+        "conditions": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "peer",
+              "parameter",
+              "rate",
+              "time",
+              "unknown-field"
+            ]
+          }
+        },
+        "expiry": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "deadline"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "none",
+                "time-conditions",
+                "deadline-ahead",
+                "deadline-passed"
+              ]
+            },
+            "deadline": {
+              "description": "UNIX seconds from which every request is refused, as a decimal string.",
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "string",
+                  "pattern": "^-?[0-9]+$"
+                }
+              ]
+            }
+          }
+        },
+        "verification": {
+          "const": "unchecked"
+        },
+        "warnings": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/runeWarning"
+          }
+        }
+      }
+    },
+    "runeInvalidReport": {
+      "description": "A value in rune context that does not parse as a Core Lightning rune, or exceeds macwarden's parser bounds.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recognition",
+        "reason",
+        "verification"
+      ],
+      "properties": {
+        "recognition": {
+          "const": "invalid"
+        },
+        "reason": {
+          "enum": [
+            "exceeds-bounds",
+            "not-base64url",
+            "too-short",
+            "nul-byte",
+            "restriction-syntax",
+            "unique-id-placement"
+          ]
+        },
+        "verification": {
+          "const": "unchecked"
+        }
       }
     }
   }

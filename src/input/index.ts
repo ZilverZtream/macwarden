@@ -6,6 +6,8 @@ import { Secret } from '../secret.js';
 import { isProtectedPath } from '../protected-path.js';
 import { parseLndconnect } from './lndconnect.js';
 import { InputError, UsageError } from '../errors.js';
+import { decodeMacaroon, DecodeError } from '../decode/index.js';
+import { decodeRuneText, RUNE_ALPHABET, RUNE_SHORTEST_TEXT, RUNE_TEXT_LIMIT } from '../decode/rune.js';
 
 export { InputError, UsageError } from '../errors.js';
 export type { InputStage } from '../errors.js';
@@ -39,8 +41,26 @@ function decodeBase64(value: string): Buffer {
 // NIP-47 canonical and legacy schemes; decode/index.ts validates the rest.
 const nwcScheme = /^(?:nostr\+walletconnect|nostrwalletconnect):/i;
 
-function parseText(text: string, nwc = false): Buffer {
+/**
+ * Whether trimmed text is a Core Lightning rune for inspect (1.2.0): URL-safe base64 that Core
+ * Lightning's rune parser accepts, unless the same text is a macaroon that decodes. A rune whose
+ * first decoded byte happens to be 0x02 is still a rune when the macaroon decoder refuses it.
+ */
+function isRuneText(trimmed: string): boolean {
+  if (trimmed.length < RUNE_SHORTEST_TEXT || trimmed.length > RUNE_TEXT_LIMIT || !RUNE_ALPHABET.test(trimmed)) return false;
+  if (!decodeRuneText(trimmed).ok) return false;
+  let macaroon: Buffer;
+  try { macaroon = parseText(trimmed); }
+  catch { return true; }
+  if (macaroon[0] !== 0x02) return true;
+  try { decodeMacaroon(new Secret(macaroon)); return false; }
+  catch (error) { if (error instanceof DecodeError) return true; throw error; }
+}
+
+function parseText(text: string, nwc = false, rune = false): Buffer {
   const trimmed = text.trim();
+  // A rune is kept verbatim inside the Secret container; decode/index.ts parses it.
+  if (rune && isRuneText(trimmed)) return Buffer.from(trimmed, 'latin1');
   // An NWC URI is kept verbatim inside the Secret container; decode/index.ts parses it.
   if (nwc && nwcScheme.test(trimmed)) return /\s/.test(trimmed) ? invalidForm() : Buffer.from(trimmed, 'utf8');
   if (/^lndconnect:\/\//i.test(trimmed)) return parseLndconnect(trimmed) ?? invalidForm();
@@ -56,20 +76,20 @@ function parseText(text: string, nwc = false): Buffer {
   return decodeBase64(value);
 }
 
-function parseBytes(bytes: Buffer, nwc = false): Buffer {
+function parseBytes(bytes: Buffer, nwc = false, rune = false): Buffer {
   if (bytes[0] === 0x02) return bytes;
   if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
     if ((bytes.length - 2) % 2 !== 0) return invalidForm();
-    return parseText(bytes.subarray(2).toString('utf16le'), nwc);
+    return parseText(bytes.subarray(2).toString('utf16le'), nwc, rune);
   }
   if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
     if ((bytes.length - 2) % 2 !== 0) return invalidForm();
     const swapped = Buffer.from(bytes.subarray(2));
     swapped.swap16();
-    return parseText(swapped.toString('utf16le'), nwc);
+    return parseText(swapped.toString('utf16le'), nwc, rune);
   }
   const start = bytes.subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf])) ? 3 : 0;
-  return parseText(bytes.subarray(start).toString('utf8'), nwc);
+  return parseText(bytes.subarray(start).toString('utf8'), nwc, rune);
 }
 
 async function stdinBytes(stream: Readable): Promise<Buffer> {
@@ -134,12 +154,13 @@ async function fileBytes(handle: fs.FileHandle): Promise<Buffer> {
 export async function readCredential(
   arg: string,
   io: InputIO,
-  opts: { unsafeArg: boolean; nwc?: boolean },
+  opts: { unsafeArg: boolean; nwc?: boolean; rune?: boolean },
 ): Promise<{ secret: Secret; literal: boolean }> {
   const nwc = opts.nwc === true;
+  const rune = opts.rune === true;
   if (arg === '-') {
     if (io.stdin.isTTY) throw new UsageError('stdin is a TTY');
-    return { secret: new Secret(parseBytes(await stdinBytes(io.stdin), nwc)), literal: false };
+    return { secret: new Secret(parseBytes(await stdinBytes(io.stdin), nwc, rune)), literal: false };
   }
 
   let sourceStat: BigIntStats | undefined;
@@ -181,12 +202,12 @@ export async function readCredential(
       }
     }
     if (readFailed || !bytes) throw new InputError('input-read');
-    return { secret: new Secret(parseBytes(bytes, nwc)), literal: false };
+    return { secret: new Secret(parseBytes(bytes, nwc, rune)), literal: false };
   }
 
   // An encoded literal can contain a protected-looking path component. Only
   // an established file path takes precedence over literal classification.
-  let supportedLiteral = /^lndconnect:\/\//i.test(arg) || (nwc && nwcScheme.test(arg));
+  let supportedLiteral = /^lndconnect:\/\//i.test(arg) || (nwc && nwcScheme.test(arg)) || (rune && isRuneText(arg.trim()));
   if (!supportedLiteral) {
     try {
       supportedLiteral = parseText(arg)[0] === 0x02;
@@ -197,5 +218,5 @@ export async function readCredential(
     if (supportedLiteral) throw new UsageError(literalRefusal);
     throw new InputError('input-read', 'no such file');
   }
-  return { secret: new Secret(parseText(arg, nwc)), literal: true };
+  return { secret: new Secret(parseText(arg, nwc, rune)), literal: true };
 }

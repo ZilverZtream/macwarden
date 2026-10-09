@@ -16,6 +16,8 @@ const KINDS: { id: ScanFinding['kind']; name: string; text: string }[] = [
   { id: 'nwc', name: 'NostrWalletConnect', text: 'Nostr Wallet Connect URI carrying a spending secret' },
   { id: 'undecodable', name: 'UndecodableMacaroonFile', text: 'Macaroon file that does not decode (treated as ADMIN)' },
   { id: 'undecodable-candidate', name: 'UndecodableCandidate', text: 'Macaroon-like text that does not decode (treated as ADMIN)' },
+  { id: 'rune', name: 'ClnRune', text: 'Core Lightning rune in rune context' },
+  { id: 'rune-invalid', name: 'ClnRuneInvalid', text: 'Value in rune context that does not parse as a Core Lightning rune (treated as UNASSESSED)' },
 ];
 
 const HELP = 'https://github.com/ZilverZtream/macwarden#scan';
@@ -24,21 +26,25 @@ const HELP = 'https://github.com/ZilverZtream/macwarden#scan';
 export const SARIF_MAX_RESULTS = 25_000;
 
 const GRADES = ['ADMIN', 'SPEND', 'UNASSESSED', 'OPERATE', 'RECEIVE', 'READ'] as const;
-const GRADED = new Set<string>(['macaroon-file', 'macaroon-hex', 'macaroon-base64', 'lndconnect']);
+const GRADED = new Set<string>(['macaroon-file', 'macaroon-hex', 'macaroon-base64', 'lndconnect', 'rune']);
+// Detection precision per kind (SARIF rule property): runes are found only in rune context and must parse
+// completely, but unlike macaroons they have no fixed prefix (docs/spec.md, measured false-positive rate).
+const PRECISION: Partial<Record<ScanFinding['kind'], string>> = { rune: 'high', 'rune-invalid': 'medium' };
 const titleCase = (grade: string) => grade.charAt(0) + grade.slice(1).toLowerCase();
 
 /**
  * One rule per kind, and per grade for decoded macaroons: GitHub reads security-severity
  * only from the rule, so a READ macaroon must not inherit an ADMIN rule's severity.
  */
-type Rule = { id: string; name: string; text: string; level: 'error' | 'warning' | 'note'; score: string };
+type Rule = { id: string; name: string; text: string; level: 'error' | 'warning' | 'note'; score: string; precision: string };
 const RULES: Rule[] = KINDS.flatMap(kind => GRADED.has(kind.id)
   ? GRADES.map(grade => {
     const { level, score } = findingSeverity({ kind: kind.id, grade });
     return { id: `macwarden/${kind.id}/${grade.toLowerCase()}`, name: `${kind.name}${titleCase(grade)}`,
-      text: `${kind.text}, ${grade} grade`, level, score };
+      text: `${kind.text}, ${grade} grade`, level, score, precision: PRECISION[kind.id] ?? 'very-high' };
   })
-  : [{ id: `macwarden/${kind.id}`, name: kind.name, text: kind.text, ...findingSeverity({ kind: kind.id, grade: null }) }]);
+  : [{ id: `macwarden/${kind.id}`, name: kind.name, text: kind.text, ...findingSeverity({ kind: kind.id, grade: null }),
+    precision: PRECISION[kind.id] ?? 'very-high' }]);
 
 export function ruleIdFor(finding: Pick<ScanFinding, 'kind' | 'grade'>): string {
   return GRADED.has(finding.kind) ? `macwarden/${finding.kind}/${(finding.grade ?? 'UNASSESSED').toLowerCase()}` : `macwarden/${finding.kind}`;
@@ -47,7 +53,8 @@ export function ruleIdFor(finding: Pick<ScanFinding, 'kind' | 'grade'>): string 
 /** SARIF result level and GitHub security-severity for one finding. */
 export function findingSeverity(finding: { kind: ScanFinding['kind']; grade: ScanFinding['grade'] | null }): { level: 'error' | 'warning' | 'note'; score: string } {
   if (finding.kind === 'nwc') return { level: 'error', score: '9.0' };
-  if (finding.kind === 'undecodable' || finding.kind === 'undecodable-candidate') return { level: 'error', score: '8.0' };
+  if (finding.kind === 'undecodable' || finding.kind === 'undecodable-candidate' || finding.kind === 'rune-invalid')
+    return { level: 'error', score: '8.0' };
   switch (finding.grade) {
     case 'ADMIN': return { level: 'error', score: '9.5' };
     case 'SPEND': return { level: 'error', score: '9.0' };
@@ -61,6 +68,11 @@ export function findingSeverity(finding: { kind: ScanFinding['kind']; grade: Sca
 // alsoAt on a history finding: other paths that added the content; on a work-tree finding:
 // the file's other hard-link names.
 const alsoText = (finding: ScanFinding) => finding.commit === undefined ? 'same file also at' : 'same content also added at';
+
+/** The unique ID of a rune finding, when it has one. */
+export function runeUniqueId(finding: Pick<ScanFinding, 'rune'>): string | null {
+  return finding.rune?.recognition === 'rune-syntax' ? finding.rune.uniqueId : null;
+}
 
 const gradeLabel = (finding: ScanFinding) => finding.kind === 'nwc' ? 'SPEND (NWC)'
   : finding.kind === 'undecodable' || finding.kind === 'undecodable-candidate' ? 'ADMIN (undecodable)'
@@ -111,11 +123,15 @@ export function* sarifPieces(result: ScanResult, root: string, version: string, 
   const rules = RULES.map(rule => ({
     id: rule.id, name: rule.name,
     shortDescription: { text: rule.text },
-    fullDescription: { text: `${rule.text}. Anyone holding it can call the node with its permissions until its root key ID is deleted.` },
+    fullDescription: { text: rule.id.startsWith('macwarden/rune') ? `${rule.text}. Anyone holding it can call the node with what its `
+      + 'restrictions allow until its unique ID is blacklisted (blacklistrune); macwarden does not check it against the node.'
+      : `${rule.text}. Anyone holding it can call the node with its permissions until its root key ID is deleted.` },
     helpUri: HELP,
-    help: { text: 'Remove the credential from the file and its history, then revoke or rotate it with macwarden revoke / rotate.' },
+    help: { text: rule.id.startsWith('macwarden/rune')
+      ? 'Remove the rune from the file and its history, then blacklist its unique ID on the node (lightning-cli blacklistrune) and issue a narrower one.'
+      : 'Remove the credential from the file and its history, then revoke or rotate it with macwarden revoke / rotate.' },
     defaultConfiguration: { level: rule.level },
-    properties: { tags: ['security', 'secret', 'lightning'], 'security-severity': rule.score, precision: 'very-high' },
+    properties: { tags: ['security', 'secret', 'lightning'], 'security-severity': rule.score, precision: rule.precision },
   }));
   const head = { $schema: 'https://json.schemastore.org/sarif-2.1.0.json', version: '2.1.0' };
   const driver = { name: 'macwarden', version, semanticVersion: version, informationUri: HELP, rules };
@@ -145,6 +161,8 @@ export function* sarifPieces(result: ScanResult, root: string, version: string, 
       ruleId, ruleIndex, level,
       message: { text: `${finding.kind} credential, grade ${gradeLabel(finding)}, ${finding.fingerprint}`
         + (finding.rootKeyId === null ? '' : `, root key ${finding.rootKeyId}`)
+        + (runeUniqueId(finding) === null ? '' : `, unique ID ${runeUniqueId(finding)}`)
+        + (finding.rune ? ', not checked against the node' : '')
         + (finding.commit === undefined ? '' : `, added in commit ${finding.commit}`)
         + (finding.context === 'mcp-config' ? ', configured for an AI agent (MCP server)' : '')
         + (finding.alsoAt ? `, ${alsoText(finding)} ${finding.alsoAt.count} other path(s)` : '') },
@@ -152,6 +170,7 @@ export function* sarifPieces(result: ScanResult, root: string, version: string, 
       ...(related?.length ? { relatedLocations: related } : {}),
       partialFingerprints: { 'macwardenFingerprint/v1': finding.fingerprint },
       properties: { grade: finding.grade, kind: finding.kind, fingerprint: finding.fingerprint, rootKeyId: finding.rootKeyId,
+        ...(finding.rune ? { runeUniqueId: runeUniqueId(finding), verification: 'unchecked' } : {}),
         'security-severity': score, ...(finding.commit !== undefined ? { commit: finding.commit } : {}),
         ...(finding.context !== undefined ? { context: finding.context } : {}),
         ...(finding.alsoAt ? { alsoAt: finding.alsoAt.count } : {}) },
@@ -199,6 +218,7 @@ export function* githubLines(result: ScanResult, root: string, clean: (text: str
     properties.push(`title=${escapeProperty(`macwarden ${finding.kind}`)}`);
     const message = `${gradeLabel(finding)} ${finding.fingerprint}`
       + (finding.rootKeyId === null ? '' : ` root key ${finding.rootKeyId}`)
+      + (runeUniqueId(finding) === null ? '' : ` unique ID ${runeUniqueId(finding)}`)
       + (finding.commit === undefined ? '' : ` in commit ${finding.commit.slice(0, 12)}`)
       + (finding.context === 'mcp-config' ? ' (MCP server config)' : '')
       + (finding.alsoAt ? ` (${alsoText(finding)} ${finding.alsoAt.count} other path(s))` : '');

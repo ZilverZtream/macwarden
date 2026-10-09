@@ -17,10 +17,13 @@ import { assertWorkTree, blobSizes, GitHistoryError, historyEntries, isShallowRe
   readBlobs } from './git-history.js';
 import { Cancelled, cancellable, checkCancellation } from '../cancellation.js';
 import { readBounded } from '../bounded-file.js';
+import { runeFindings } from './runes.js';
+import type { RuneInvalidReport, RuneReport } from '../rune-report.js';
 export { IgnoreFileError } from './ignore.js';
 export { GitHistoryError } from './git-history.js';
 
-export type FindingKind = 'macaroon-file' | 'undecodable' | 'macaroon-hex' | 'macaroon-base64' | 'lndconnect' | 'nwc' | 'undecodable-candidate';
+export type FindingKind = 'macaroon-file' | 'undecodable' | 'macaroon-hex' | 'macaroon-base64' | 'lndconnect' | 'nwc' | 'undecodable-candidate'
+  | 'rune' | 'rune-invalid';
 export type ScanFinding = {
   path: string;
   line: number | null;
@@ -37,6 +40,8 @@ export type ScanFinding = {
   commit?: string;
   /** Present only when the credential is a string value inside an MCP server entry of a JSON config. */
   context?: 'mcp-config';
+  /** Present only on a Core Lightning rune finding (kind rune or rune-invalid): its sanitised facts. */
+  rune?: RuneReport | RuneInvalidReport;
   /**
    * On a --git-history finding whose file content was also added at other paths, and on a
    * work-tree finding whose file has other hard-link names under the same path argument:
@@ -101,7 +106,7 @@ function fileIdentity(stat: FileStat, target: string): string {
 
 /** `truncated`: the match was cut by its window's end and may continue in the line (fail closed). */
 type Hit = {
-  start: number; text: string; kind: Exclude<FindingKind, 'undecodable-candidate'>; truncated?: true;
+  start: number; text: string; kind: Exclude<FindingKind, 'undecodable-candidate' | 'rune' | 'rune-invalid'>; truncated?: true;
   /** Code points the match covers in the line, when matched on an unescaped copy of it. */
   extent?: number;
 };
@@ -638,6 +643,7 @@ function scanBytes(safePath: string, bytes: Buffer, macaroonFile: boolean, now: 
     !(bytes[0] === 0xfe && bytes[1] === 0xff) && bytes.subarray(0, 8192).includes(0)) return { skip: 'binary' };
   const text = decodeText(bytes);
   const outcome = scanText(safePath, text, now, ctx);
+  for (const finding of runeFindings(text, now, ctx)) outcome.findings.push({ ...finding, path: safePath });
   if (outcome.findings.length && /\.jsonc?$/i.test(name)) tagMcpContext(name, text, outcome.findings);
   return outcome;
 }

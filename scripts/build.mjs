@@ -8,7 +8,8 @@ const src = resolve(root, 'src');
 const dist = resolve(root, 'dist');
 const trustedExports = new Map([
   ['decode/index.js', new Set(['DecodeError', 'macaroonPacketRange', 'macaroonSectionRange', 'parseTimeBefore',
-    'canonicalMacaroonForm', 'macaroonEosEnd', 'decodeMacaroon', 'encodeMacaroon', 'addFirstPartyCaveat', 'timeBeforeCondition', 'validMacaroonIdentifier', 'isNwcContainer', 'decodeNwc', 'macaroonId'])],
+    'canonicalMacaroonForm', 'macaroonEosEnd', 'decodeMacaroon', 'encodeMacaroon', 'addFirstPartyCaveat', 'timeBeforeCondition', 'validMacaroonIdentifier', 'isNwcContainer', 'decodeNwc', 'macaroonId',
+    'isRuneContainer', 'decodeRune'])],
   ['lnd/index.js', new Set(['createLndAdapter', 'registerMiddleware'])],
   ['commands/bake/write-out.js', new Set(['reserveOut'])],
 ]);

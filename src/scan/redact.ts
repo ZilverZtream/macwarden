@@ -1,14 +1,16 @@
 import { redactEncodedCredentials } from '../credential-recognition.js';
 import { nwcMatches, replaceNwc } from './nwc-match.js';
 import { lndconnect } from './patterns.js';
+import { redactRuneContexts } from './rune-context.js';
 
 const lndconnectAll = new RegExp(lndconnect.source, `${lndconnect.flags}g`);
 
 // The published nwc regex backtracks quadratically on repeated prefixes; the linear matcher
 // returns exactly its matches (src/scan/nwc-match.ts).
+// Rune values in rune context (rune=…, "rune": "…", Rune: …) are redacted too (1.2.0).
 function redactStructured(text: string): string {
   lndconnectAll.lastIndex = 0;
-  return replaceNwc(text.replace(lndconnectAll, '[redacted]'),
+  return replaceNwc(redactRuneContexts(text).replace(lndconnectAll, '[redacted]'),
     match => `[redacted]${/[^0-9a-f]$/i.test(match) ? match.slice(-1) : ''}`);
 }
 
