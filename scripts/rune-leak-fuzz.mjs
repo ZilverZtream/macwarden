@@ -58,13 +58,13 @@ function makeCase(seed, index, previous) {
  * Runs `cases` cases in batches; `api` = { scan, renderChunks, inspectRun, redactRuneContexts }.
  * Returns counts and the leaks found (seed, batch, where, encoding; never the value).
  * @param {Record<string, any>} api
- * @param {{ seed: number, cases: number, batch?: number, scratchRoot?: string, onProgress?: (report: any) => void }} options
+ * @param {{ seed: number, cases: number, batch?: number, start?: number, scratchRoot?: string, onProgress?: (report: any) => void }} options
  */
-export async function leakCampaign(api, { seed, cases, batch = 25, scratchRoot = tmpdir(), onProgress }) {
+export async function leakCampaign(api, { seed, cases, batch = 25, start = 0, scratchRoot = tmpdir(), onProgress }) {
   const report = { seed, cases: 0, batches: 0, outputBytes: 0, checkSeconds: 0, leaks: /** @type {object[]} */ ([]) };
   const root = mkdtempSync(join(scratchRoot, 'rune-leak-'));
   try {
-    for (let first = 0; first < cases; first += batch) {
+    for (let first = start; first < start + cases; first += batch) {
       const dir = join(root, `batch-${first}`);
       const sentinels = join(dir, 'sentinels');
       const files = join(dir, 'files');
@@ -73,7 +73,7 @@ export async function leakCampaign(api, { seed, cases, batch = 25, scratchRoot =
       const outputs = [];
       const lines = [];
       let previous = null;
-      const count = Math.min(batch, cases - first);
+      const count = Math.min(batch, start + cases - first);
       for (let index = first; index < first + count; index++) {
         const item = makeCase(seed, index, previous);
         previous = item.text;
@@ -98,7 +98,7 @@ export async function leakCampaign(api, { seed, cases, batch = 25, scratchRoot =
         report.cases++;
       }
       // A file whose name holds a short rune, and the batch's lines in LF, CRLF and UTF-16 files.
-      const short = lines.find(line => line.length < 150 && /^RUNE=/.test(line));
+      const short = lines.find(line => line.length < 150 && /^RUNE=[A-Za-z0-9_=-]+$/.test(line));
       if (short) writeFileSync(join(files, `cfg-rune=${short.slice(5).replace(/=+$/, '')}.env`), 'x\n');
       writeFileSync(join(files, 'a.env'), `${lines.join('\n')}\n`);
       writeFileSync(join(files, 'b.txt'), `${lines.join('\r\n')}\r\n`);
@@ -147,7 +147,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const cases = option('--cases', 20_000);
   process.stdout.write(`rune leak fuzz: seed ${seed}, ${cases} cases\n`);
   const began = performance.now();
-  const report = await leakCampaign(await builtLeakApi(), { seed, cases, batch: option('--batch', 25),
+  const report = await leakCampaign(await builtLeakApi(), { seed, cases, start: option("--start", 0), batch: option('--batch', 25),
     onProgress: partial => { if (partial.batches % 80 === 0) process.stdout.write(`  ${partial.cases} cases, ${partial.leaks.length} leaks, ${((performance.now() - began) / 1000).toFixed(0)} s\n`); } });
   process.stdout.write(`${JSON.stringify({ ...report, seconds: Number(((performance.now() - began) / 1000).toFixed(1)) }, null, 2)}\n`);
   process.exitCode = report.leaks.length ? 1 : 0;
