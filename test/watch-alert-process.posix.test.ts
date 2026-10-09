@@ -82,7 +82,14 @@ it('WATCH/alert-shutdown at shutdown the waiting alert never starts and the runn
   expect(result).toMatchObject({ ok: true, result: { canaryAlerts: 2, alertFailures: 2 } });
   expect(startedPids(starts)).toHaveLength(1);
   expect(startedPids(kids)).toHaveLength(1);
-  for (const pid of pids) expect(dead(pid), `pid ${pid}`).toBe(true);
+  // watch has sent SIGKILL to the alert's process group before returning; the kernel completes
+  // the exit asynchronously, so a killed process can still show in /proc for a moment. Each must
+  // be gone (or a zombie) within 2 s of watch returning.
+  for (const pid of pids) {
+    const until = performance.now() + 2_000;
+    while (!dead(pid) && performance.now() < until) await new Promise(resolve => setTimeout(resolve, 20));
+    expect(dead(pid), `pid ${pid}`).toBe(true);
+  }
   expect(elapsed).toBeLessThan(ALERT_KILL_MS + ALERT_CLEANUP_MS + 1_000);
   await new Promise(resolve => setTimeout(resolve, 500));
   expect(startedPids(starts)).toHaveLength(1);
