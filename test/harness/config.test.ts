@@ -96,10 +96,11 @@ it('CP-001/B12 runs the pinned CI matrix and commands', () => {
   const oracleJob = blockFor(jobs, 'oracle', 2);
   const gitleaksJob = blockFor(jobs, 'gitleaks', 2);
   expect(testJob).toMatch(/^ {4}runs-on: \$\{\{ matrix\.os \}\}$/m);
-  // Every Node version on Linux; Windows on the minimum and the latest 22/24 line; macOS on the latest.
+  // Every Node version on Linux; Windows on the minimum and the latest 22/24 line. macOS is not a
+  // supported platform (README), so CI does not run it.
   expect(listFor(testJob, 'os')).toEqual(['ubuntu-latest']);
   expect([...testJob.matchAll(/^ {10}- \{ os: ([\w-]+), node: '([^']+)' \}$/gm)].map(m => `${m[1]} ${m[2]}`))
-    .toEqual(['windows-latest 22.23.2', 'windows-latest 24.x', 'macos-latest 24.x']);
+    .toEqual(['windows-latest 22.23.2', 'windows-latest 24.x']);
   expect(listFor(testJob, 'node')).toEqual(['22.23.2', '22.x', '24.18.1', '24.x']);
   expect(testJob).toMatch(/^ {10}node-version: \$\{\{ matrix\.node \}\}$/m);
   expect(oracleJob).toMatch(/^ {4}runs-on: ubuntu-latest$/m);

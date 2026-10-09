@@ -32,16 +32,17 @@ async function validate(args) {
   // Windows, so full validation defaults to the documented 600000 ms maximum.
   const timeout = process.env.MACWARDEN_VALIDATION_TIMEOUT_MS === undefined ? 600_000 : commandTimeout();
   const oracleTimeout = oracleCommandTimeout(timeout);
-  if (timeout === null || oracleTimeout === null) return 1;
-  if (!['win32', 'linux'].includes(process.platform) || (process.platform === 'linux' && process.getuid() === 0)) return 1;
+  if (timeout === null || oracleTimeout === null) return refuse('invalid MACWARDEN_VALIDATION_TIMEOUT_MS');
+  if (!['win32', 'linux'].includes(process.platform)) return refuse(`unsupported platform ${process.platform} (Linux and Windows only)`);
+  if (process.platform === 'linux' && process.getuid() === 0) return refuse('refusing to run as root');
   let candidate;
   let inputs;
   try {
     candidate = git(root, ['rev-parse', 'HEAD']);
-    if (!candidateInputsClean(root, [evidence])) return 1;
+    if (!candidateInputsClean(root, [evidence])) return refuse('the candidate has uncommitted or untracked changes');
     inputs = git(root, ['ls-files', '-z']).split('\0').filter(Boolean).map(file => ({ file,
       sha256: hash(readFileSync(join(root, file))) }));
-  } catch { return 1; }
+  } catch { return refuse('cannot read the candidate with git'); }
   // New attempt directories retain every previous failed or invalid run.
   mkdirSync(evidence, { recursive: true });
   const attempt = await createPrivateDirectory(evidence, 'attempt-');
@@ -224,7 +225,18 @@ async function validate(args) {
     safeResult.status = result.status;
     writeFileSync(join(attempt, 'full-validation.json'), `${JSON.stringify(safeResult, null, 2)}\n`);
   }
+  if (result.status !== 'PASS') {
+    // Check names only: the evidence file holds the details.
+    const failed = result.checks.filter(check => check.status !== 'PASS').map(check => check.name);
+    process.stderr.write(`full validation FAIL: ${failed.join(', ') || 'see evidence'}; evidence in ${attempt}\n`);
+  }
   return result.status === 'PASS' ? 0 : 1;
+}
+
+/** One line naming why validation did not start. */
+function refuse(reason) {
+  process.stderr.write(`full validation not started: ${reason}\n`);
+  return 1;
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
