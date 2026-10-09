@@ -10,6 +10,8 @@
 - Rule packs: gitleaks and TruffleHog rules `macwarden-l402`, `macwarden-l402-macaroon-hex` and `macwarden-l402-macaroon-base64`.
 - The output redaction also covers L402 Authorization values and pairs, and L402 macaroons in every encoding it recognises.
 
+- A runnable example of safe agent payments, [`examples/agent-payments/`](examples/agent-payments/README.md): on a regtest Docker stack (two LND v0.21.4 nodes and Lightning Labs' Aperture L402 proxy in front of a paid API, every image pinned by digest), an agent pays for API access with a `pay-only`, one-hour credential from `bake`, `watch` shows its calls live, `scan` finds the credential after a leak drill, `revoke` and `verify` prove it is cut off, and a canary raises an alert, which also runs an alert command on Linux and macOS, when an intruder tries the decoy. `run.sh`/`run.ps1` run it, `teardown.sh`/`teardown.ps1` remove it, and `verify.sh` checks every step's outcome. The example's README states the limits: a macaroon limits what an agent may call, not how much it may spend, and an L402 token stays valid until it expires.
+
 ### Changed
 
 - `verify` refuses an L402 token at `input-form` with a message saying it is not an LND credential.

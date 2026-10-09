@@ -1,0 +1,135 @@
+# Regtest stack for the agent payments example. Every image is pinned by digest.
+# Host ports (loopback only), chosen apart from the test fixture (18009, 18080, 18109-18480):
+#   19380  alice LND REST   (the agent and macwarden)
+#   19309  alice LND gRPC   (macwarden watch)
+#   19381  Aperture         (the paid API, plain HTTP)
+# bob, bitcoind and the API are reachable only inside the Compose network.
+# demo.mjs starts the services with `docker compose up --wait`, which waits for
+# the health checks below.
+name: macwarden-agent-demo
+
+x-lnd: &lnd
+  image: lightninglabs/lnd:v0.21.4-beta@sha256:04d06edcc0f6e99a5e797ea34959f330add222226f840cd86afbc31f8f29627d
+  depends_on:
+    bitcoind:
+      condition: service_healthy
+  # Healthy once LND's RPC server answers (RPC_ACTIVE, or SERVER_ACTIVE after chain sync).
+  healthcheck:
+    test: ["CMD-SHELL", "lncli --network=regtest state | grep -Eq '\"(RPC_ACTIVE|SERVER_ACTIVE)\"'"]
+    interval: 2s
+    timeout: 5s
+    retries: 60
+    start_period: 5s
+
+x-lnd-args: &lnd-args
+  - --bitcoin.active
+  - --bitcoin.regtest
+  - --bitcoin.node=bitcoind
+  - --bitcoind.rpchost=bitcoind:18443
+  - --bitcoind.rpcuser=demo
+  - --bitcoind.rpcpass=regtest-demo-only
+  - --bitcoind.zmqpubrawblock=tcp://bitcoind:28332
+  - --bitcoind.zmqpubrawtx=tcp://bitcoind:28333
+  - --noseedbackup
+  - --listen=0.0.0.0:9735
+  - --rpclisten=0.0.0.0:10009
+  - --restlisten=0.0.0.0:8080
+
+services:
+  bitcoind:
+    image: lightninglabs/bitcoin-core:31.1@sha256:86e15e4348869a86343aacbbd1aff38e96cffddd87b61644694b1e1358d737cd
+    command:
+      - -regtest
+      - -server=1
+      - -txindex=1
+      - -fallbackfee=0.0002
+      - -rpcuser=demo
+      - -rpcpassword=regtest-demo-only
+      - -rpcbind=0.0.0.0
+      - -rpcallowip=0.0.0.0/0
+      - -zmqpubrawblock=tcp://0.0.0.0:28332
+      - -zmqpubrawtx=tcp://0.0.0.0:28333
+    healthcheck:
+      test: ["CMD", "bitcoin-cli", "-regtest", "-rpcuser=demo", "-rpcpassword=regtest-demo-only", "getblockchaininfo"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+      start_period: 3s
+    volumes:
+      - bitcoin-data:/home/bitcoin/.bitcoin
+
+  # The operator's node. The agent pays from it.
+  alice:
+    <<: *lnd
+    hostname: alice
+    ports:
+      - 127.0.0.1:19380:8080
+      - 127.0.0.1:19309:10009
+    entrypoint:
+      - lnd
+      - --alias=alice
+      - --tlsextradomain=localhost
+      - --tlsextradomain=alice
+      # macwarden watch registers a read-only RPC middleware. Never set
+      # rpcmiddleware.addmandatory: it blocks every RPC while no watcher runs.
+      - --rpcmiddleware.enable
+    command: *lnd-args
+    volumes:
+      - alice-data:/root/.lnd
+
+  # The merchant's node. Aperture creates invoices on it.
+  bob:
+    <<: *lnd
+    hostname: bob
+    entrypoint:
+      - lnd
+      - --alias=bob
+      - --tlsextradomain=bob
+    command: *lnd-args
+    volumes:
+      - bob-data:/root/.lnd
+
+  # The paid HTTP API. Only Aperture talks to it.
+  api:
+    image: node:22.23.2-alpine3.24@sha256:b6f26b36c8ff49624cfdac716b8ea1138d606df02586a77d364bb5536a634f85
+    user: node
+    command: ["node", "/srv/server.mjs"]
+    read_only: true
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:8000/healthz', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    volumes:
+      - ./api:/srv:ro
+
+  # Lightning Labs' L402 reverse proxy. It reads only bob's TLS certificate and
+  # invoice.macaroon (Aperture loads that file by name from macdir), mounted read-only.
+  aperture:
+    image: lightninglabs/aperture:v0.5.0@sha256:29e03e2c38dca0314f748cc07f483f03615dbf9876620c8e15b94b904fa16114
+    platform: linux/amd64
+    command: ["--configfile=/etc/aperture/aperture.yaml"]
+    depends_on:
+      bob:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    # Port check only: a request to the paid path would create an invoice on every probe.
+    # demo.mjs waits for a real 402 challenge before it continues.
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "8081"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    ports:
+      - 127.0.0.1:19381:8081
+    volumes:
+      - ./aperture.yaml:/etc/aperture/aperture.yaml:ro
+      - bob-data:/lnd:ro
+      - aperture-data:/root/.aperture
+
+volumes:
+  bitcoin-data:
+  alice-data:
+  bob-data:
+  aperture-data:
