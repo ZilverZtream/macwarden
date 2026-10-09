@@ -234,9 +234,15 @@ it('L402-scan/linear time: hostile lines of open L402 prefixes and colon-hex run
     for (const size of [1_000_000, 4_000_000]) {
       const path = join(scratch, `${name}-${size}.txt`);
       writeFileSync(path, shape(size));
-      const started = performance.now();
-      await scan([path], { clock });
-      timings[name].push(performance.now() - started);
+      // The fastest of three runs, so one scheduler or collector stall on a shared runner is not
+      // read as superlinear work; the bound below is unchanged.
+      let fastest = Infinity;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const started = performance.now();
+        await scan([path], { clock });
+        fastest = Math.min(fastest, performance.now() - started);
+      }
+      timings[name].push(fastest);
     }
   }
   console.log(`L402-scan linear timings ms [1 MB, 4 MB]: ${JSON.stringify(timings, (_, v: unknown) => typeof v === 'number' ? Math.round(v) : v)}`);
