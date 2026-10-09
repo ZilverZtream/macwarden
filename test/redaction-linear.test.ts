@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { expect, it } from 'vitest';
-import { compare, growth } from './helpers/growth.js';
+import { LINEAR_4X, compare, growth } from './helpers/growth.js';
 import { captureMain } from './support/capture.js';
 
 // Grouped base64 recognition used X+(?:SX+)+ regular expressions, which backtrack from
@@ -45,9 +45,9 @@ it.each(['A', '7', 'Ab0+', 'A-', 'A_', 'A.'])('LINEAR/redaction a run of %j four
     const text = filler.repeat(Math.ceil(size / filler.length));
     return () => expect(redactEncodedCredentials(text)).toBe(text);
   };
-  const timing = await growth(run, 64_000, 4);
+  const timing = await growth(run, 64_000, 4, 5);
   console.log(`LINEAR/redaction ${JSON.stringify(filler)} 64 KB and 256 KB: ${timing.summary}`);
-  expect(timing.ratio, timing.summary).toBeLessThan(8);
+  expect(timing.ratio, timing.summary).toBeLessThan(LINEAR_4X);
 }, 60_000);
 
 async function bigCaveat(value: string): Promise<{ file: string; dir: string }> {
@@ -74,9 +74,9 @@ it('LINEAR/display a 200 KB caveat is shown whole, at about four times the cost 
       json = await captureMain(main, ['inspect', file, '--json']);
       text = await captureMain(main, ['inspect', file]);
     };
-    const timing = await compare(inspect(small.file), inspect(large.file));
+    const timing = await compare(inspect(small.file), inspect(large.file), 5);
     console.log(`LINEAR/display 50 KB and 200 KB caveats: ${timing.summary}`);
-    expect(timing.ratio, timing.summary).toBeLessThan(8);
+    expect(timing.ratio, timing.summary).toBeLessThan(LINEAR_4X);
     // The last timed run inspected the 200 KB caveat.
     const caveats = (JSON.parse(json.stdout) as { result: { caveats: { type: string; value: string }[] } }).result.caveats;
     expect(caveats.at(-1)).toEqual({ type: 'lnd-custom', value: value(200_000) });
@@ -92,8 +92,8 @@ it('LINEAR/display a 1 MB caveat across many grouped shapes costs about four tim
   try {
     const { main } = await import('../src/cli.js');
     const inspect = (file: string) => async () => expect((await captureMain(main, ['inspect', file, '--json'])).code).toBe(0);
-    const timing = await compare(inspect(small.file), inspect(large.file));
+    const timing = await compare(inspect(small.file), inspect(large.file), 5);
     console.log(`LINEAR/display 250 KB and 1 MB grouped caveats: ${timing.summary}`);
-    expect(timing.ratio, timing.summary).toBeLessThan(8);
+    expect(timing.ratio, timing.summary).toBeLessThan(LINEAR_4X);
   } finally { for (const { dir } of [small, large]) rmSync(dir, { recursive: true, force: true }); }
 }, 60_000);

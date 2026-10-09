@@ -34,6 +34,13 @@ Promise<{ small: number; large: number; ratio: number; summary: string }> {
 }
 
 /**
+ * Bound for work timed at n and 4n. Linear work measured 2.5 to 7 on Linux and Windows,
+ * idle, loaded and on two-core CI runners (the larger input pays more garbage collection);
+ * the quadratic code these tests guard against measured 16.
+ */
+export const LINEAR_4X = 10;
+
+/**
  * Times the same operation at size `n` and `factor * n`. Linear work gives a ratio near
  * `factor`; quadratic work gives `factor ** 2`. Callers assert the ratio stays well below
  * the next complexity class, with headroom for noise on either side.

@@ -8,7 +8,7 @@ import { render } from '../src/output/index.js';
 import { replaceNwc } from '../src/scan/nwc-match.js';
 import { nwc } from '../src/scan/patterns.js';
 import { collectNwcSecrets, redactDecoded, redactPath } from '../src/scan/redact.js';
-import { growth } from './helpers/growth.js';
+import { LINEAR_4X, growth } from './helpers/growth.js';
 
 const prefix = `nostr+walletconnect:${'a'.repeat(64)}?`;
 const KIB = 1024;
@@ -32,9 +32,9 @@ it('PARSERS-L2/repeated NWC prefixes four times longer are redacted and collecte
       result: { caveat: text } } as never, 'json');
   };
   for (const [name, work, n] of [['collect', collect, 1024 * KIB], ['redact', redact, 64 * KIB], ['render', json, 64 * KIB]] as const) {
-    const timing = await growth(work, n, 4);
+    const timing = await growth(work, n, 4, 5);
     console.log(`PARSERS-L2 ${name} ${n / KIB} KiB and ${4 * n / KIB} KiB: ${timing.summary}`);
-    expect(timing.ratio, `${name}: ${timing.summary}`).toBeLessThan(8);
+    expect(timing.ratio, `${name}: ${timing.summary}`).toBeLessThan(LINEAR_4X);
   }
 }, 120_000);
 
