@@ -126,6 +126,11 @@ describe('RUNE/assess structure', () => {
       expect(assess(`=1&${bad}`).methods, bad).toBe('none');
   });
 
+  it('RUNE/assess a per unit named like an Object.prototype property is a malformed unit, not a crash', () => {
+    for (const unit of ['constructor', 'toString', '__proto__', 'valueOf', 'hasOwnProperty', 'isPrototypeOf', '__defineGetter__'])
+      expect(assess(`=1&per=5${unit}`).methods, unit).toBe('none');
+  });
+
   it('RUNE/assess invoice fields: known suffixes are unknown, others always fail', () => {
     expect(assess('=1&method=pay&pinvbolt11_amount<1000').conditions).toEqual(['parameter']);
     expect(assess('=1&pinvbolt11_weird=1').methods).toBe('none');

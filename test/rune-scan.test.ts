@@ -137,6 +137,12 @@ describe('RUNE/scan invalid values in rune context are reported', () => {
     }
   });
 
+  it('RUNE/scan a rune whose per unit is an Object.prototype name is reported, and the rest of the file is still scanned', async () => {
+    const findings = await scanText('x.env', `RUNE=${rune('=1&per=5constructor')}\nOTHER_RUNE=${SPEND_RUNE}\n`);
+    expect(findings.map(finding => [finding.line, finding.kind, finding.grade])).toEqual([[1, 'rune', 'READ'], [2, 'rune', 'SPEND']]);
+    expect(findings[0].rune).toMatchObject({ methods: 'none' });
+  });
+
   it('RUNE/scan a percent-encoded padding character does not mark the value as cut', async () => {
     const findings = await scanText('x.txt', `https://app/?rune=${READ_RUNE.replace(/=/g, '%3D')}\n`);
     expect(findings[0]).toMatchObject({ kind: 'rune', grade: 'READ' });

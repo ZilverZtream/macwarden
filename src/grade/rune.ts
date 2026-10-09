@@ -98,6 +98,10 @@ function strtoul(value: string): { number: bigint; rest: string } | null {
   return { number, rest: match[3] };
 }
 
+/** per_time_check's units, in nanoseconds. */
+const PER_UNITS: ReadonlyMap<string, bigint> = new Map([['', 1_000_000_000n], ['sec', 1_000_000_000n], ['nsec', 1n], ['usec', 1000n],
+  ['msec', 1_000_000n], ['min', 60_000_000_000n], ['hour', 3_600_000_000_000n], ['day', 86_400_000_000_000n]]);
+
 /** True when a strtoul-style rate or per value is one Core Lightning accepts. */
 function validRate(alternative: RuneAlternative, per: boolean): boolean {
   if (alternative.condition !== '=') return false;
@@ -106,9 +110,8 @@ function validRate(alternative: RuneAlternative, per: boolean): boolean {
   const { number, rest } = parsed;
   if (number === 0n || number >= 0xffffffffn) return false;
   if (!per) return rest === '';
-  const multipliers: Record<string, bigint> = { '': 1_000_000_000n, sec: 1_000_000_000n, nsec: 1n, usec: 1000n,
-    msec: 1_000_000n, min: 60_000_000_000n, hour: 3_600_000_000_000n, day: 86_400_000_000_000n };
-  const multiplier = multipliers[rest];
+  // A Map, not an object literal: a unit such as "constructor" must not find an inherited property.
+  const multiplier = PER_UNITS.get(rest);
   return multiplier !== undefined && number * multiplier < 2n ** 64n;
 }
 
