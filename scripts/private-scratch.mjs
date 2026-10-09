@@ -34,7 +34,7 @@ async function windowsIdentityAndAcl(directory, restrict = false) {
     ] : []),
     '$acl=Get-Acl -LiteralPath $directory;',
     '[pscustomobject]@{identity=$user.Value; owner=$acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value; rules=@($acl.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]) | ForEach-Object { [pscustomobject]@{sid=$_.IdentityReference.Value; type=$_.AccessControlType.ToString()} })} | ConvertTo-Json -Compress -Depth 4;',
-    '} catch { exit 1 }',
+    '} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }',
   ].join('\n');
   const { stdout } = await execute(windowsTool('WindowsPowerShell\\v1.0\\powershell.exe'),
     ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
@@ -100,7 +100,7 @@ export async function assertPrivateDirectories(directories) {
       '$acl=Get-Acl -LiteralPath $directory;',
       '[pscustomobject]@{index=$index; directory=$directory; identity=$user.Value; owner=$acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value; rules=@($acl.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]) | ForEach-Object { [pscustomobject]@{sid=$_.IdentityReference.Value; type=$_.AccessControlType.ToString()} })}',
       '}); [pscustomobject]@{results=$results} | ConvertTo-Json -Compress -Depth 5;',
-      '} catch { exit 1 }',
+      '} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }',
     ].join('\n');
     const { stdout } = await execute(windowsTool('WindowsPowerShell\\v1.0\\powershell.exe'),
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
@@ -153,7 +153,8 @@ export async function createPrivateDirectory(parent, prefix) {
     await rm(directory, { recursive: true, force: true });
     // The reason names the failing step (timeout, ACL check), never secret material.
     const reason = !(error instanceof Error) ? 'unknown'
-      : /** @type {{ killed?: boolean }} */ (error).killed ? 'powershell timed out' : error.message;
+      : /** @type {{ killed?: boolean }} */ (error).killed ? 'powershell timed out'
+      : String(/** @type {{ stderr?: unknown }} */ (error).stderr || '').trim().slice(0, 300) || error.message.slice(0, 120);
     throw new Error(`private scratch directory creation failed: ${reason}`, { cause: error });
   }
 }
