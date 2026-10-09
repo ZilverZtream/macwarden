@@ -36,13 +36,14 @@ npm run build
 | `npm run test:harness` | Tests of the test tooling, documentation consistency and repository configuration | Node.js |
 | `npm run test:related -- <files>` | The tests related to the files you changed, while you work | Node.js |
 | `npm run fixture:up`, `npm run test:oracle`, `npm run fixture:down` | The oracle tests against a pinned regtest LND node; the fixture refuses any other network or LND version | Docker |
+| `npm run fixture:cln:up`, `npm run test:cln-oracle`, `npm run fixture:cln:down` | The Core Lightning rune comparison tests against a pinned regtest Core Lightning v26.06.8 node (native `decode`, `help`, `checkrune`); the fixture publishes no port | Docker |
 | `npm run test:gitleaks` | Runs the pinned gitleaks image (always with `--redact`) with `rules/gitleaks.toml` over the scan fixtures | Docker |
 | `npm run test:full` | Everything on the current platform: build, lint, unit and harness tests, both oracle shards on their own regtest nodes, gitleaks, leak checks over all output, a check that no test is skipped, and a check that the inputs did not change during the run | Docker; Windows or Linux as an ordinary user; a clean, committed working tree |
 | `npm run lint` | ESLint, including the credential-boundary rules | Node.js |
 
-Always run `npm run fixture:down` after the oracle tests, also when they fail. `npm run test:full` starts and stops its own fixtures and writes its evidence to `.ratchet/evidence/full/` (ignored by git). It takes a while: on Windows the unit phase alone needs several minutes. `MACWARDEN_VALIDATION_TIMEOUT_MS` (up to 600000) and `MACWARDEN_ORACLE_TIMEOUT_MS` (up to 2400000) bound each command.
+Always run `npm run fixture:down` after the oracle tests, and `npm run fixture:cln:down` after the rune comparison tests, also when they fail. `node scripts/rune-false-positives.mjs` (after `npm run build`) measures how often rune scanning reports values that are not runes. `npm run test:full` starts and stops its own fixtures and writes its evidence to `.ratchet/evidence/full/` (ignored by git). It takes a while: on Windows the unit phase alone needs several minutes. `MACWARDEN_VALIDATION_TIMEOUT_MS` (up to 600000) and `MACWARDEN_ORACLE_TIMEOUT_MS` (up to 2400000) bound each command.
 
-Pull requests need `npm run lint`, `npm run build`, `npm test` and `npm run test:harness` to pass. Changes to online commands also need the oracle tests, and changes to the scan patterns or rule packs need `npm run test:gitleaks`.
+Pull requests need `npm run lint`, `npm run build`, `npm test` and `npm run test:harness` to pass. Changes to online commands also need the oracle tests, changes to the scan patterns or rule packs need `npm run test:gitleaks`, and changes to rune parsing, assessment or the method table need the rune comparison tests.
 
 ### Leak tests
 
