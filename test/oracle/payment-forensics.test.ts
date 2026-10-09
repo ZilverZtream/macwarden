@@ -111,7 +111,15 @@ beforeAll(async () => {
   const address = String(lncli(['newaddress', 'p2wkh']).address);
   mine(101, address);
   await waitFor('payer funds confirmed', () => Number(lncli(['walletbalance']).confirmed_balance) > 2_000_000 && lncli(['getinfo']).synced_to_chain === true);
-  await waitFor('payee synced', () => payee(['getinfo']).synced_to_chain === true);
+  // The payee starts after 101 blocks were mined and must catch up; under full validation the
+  // LND shards and the Core Lightning fixture share Docker, so catching up can take minutes.
+  // A block every 20 s gives it a fresh tip to sync to; the budget is the oracle hook limit.
+  let lastBlock = Date.now();
+  await waitFor('payee synced', () => {
+    if (payee(['getinfo']).synced_to_chain === true) return true;
+    if (Date.now() - lastBlock >= 20_000) { mine(1, address); lastBlock = Date.now(); }
+    return null;
+  }, 170_000);
   const payeeKey = String(payeeInfo.identity_pubkey);
   await waitFor('peer connection', () => {
     const peers = lncli(['listpeers']).peers as { pub_key: string }[];
