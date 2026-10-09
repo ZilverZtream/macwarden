@@ -201,7 +201,7 @@ describe('RUNE/table the method table is pinned and complete', () => {
   });
 
   it('RUNE/table rune administration and secret export are ADMIN; payments SPEND', () => {
-    for (const method of ['createrune', 'invokerune', 'blacklistrune', 'destroyrune', 'showrunes', 'exposesecret', 'makesecret', 'plugin', 'setconfig'])
+    for (const method of ['createrune', 'invokerune', 'blacklistrune', 'destroyrune', 'showrunes', 'exposesecret', 'makesecret', 'plugin', 'setconfig', 'commando'])
       expect(methodClass(method), method).toBe('ADMIN');
     for (const method of ['pay', 'xpay', 'keysend', 'withdraw', 'sendpay', 'fundchannel', 'close', 'signpsbt', 'txsend'])
       expect(methodClass(method), method).toBe('SPEND');

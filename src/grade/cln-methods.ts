@@ -49,7 +49,7 @@ export const CLN_METHODS: Readonly<Record<string, Grade>> = Object.freeze({
   'checkrune': 'OPERATE',
   'clnrest-register-path': 'ADMIN',
   'close': 'SPEND',
-  'commando': 'OPERATE',
+  'commando': 'ADMIN',
   'connect': 'OPERATE',
   'createinvoice': 'RECEIVE',
   'createinvoicerequest': 'SPEND',
