@@ -17,6 +17,13 @@ function canonicalSid(identity) {
   return authority <= 0xffffffffffffn && subAuthorities.every(value => value <= 0xffffffffn);
 }
 
+/** Windows PowerShell 5.1 with only its own module path: a PowerShell 7 parent's PSModulePath makes
+ * Get-Acl fail to load Microsoft.PowerShell.Security (as on GitHub's Windows runners). */
+function windowsPowerShellEnvironment() {
+  const root = process.env.SystemRoot || 'C:\\Windows';
+  return { ...process.env, PSModulePath: win32.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules') };
+}
+
 async function windowsIdentityAndAcl(directory, restrict = false) {
   // Decode path data rather than inserting user content into executable script.
   // New directories are restricted and freshly inspected in the same process;
@@ -38,7 +45,7 @@ async function windowsIdentityAndAcl(directory, restrict = false) {
   ].join('\n');
   const { stdout } = await execute(windowsTool('WindowsPowerShell\\v1.0\\powershell.exe'),
     ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
-    { shell: false, windowsHide: true, timeout: 60_000, maxBuffer: 16_384 });
+    { shell: false, windowsHide: true, timeout: 60_000, maxBuffer: 16_384, env: windowsPowerShellEnvironment() });
   const acl = JSON.parse(stdout);
   if (!canonicalSid(acl.identity) || acl.owner !== acl.identity || !Array.isArray(acl.rules) ||
       !acl.rules.some(rule => rule.type === 'Allow' && rule.sid === acl.identity) ||
@@ -104,7 +111,7 @@ export async function assertPrivateDirectories(directories) {
     ].join('\n');
     const { stdout } = await execute(windowsTool('WindowsPowerShell\\v1.0\\powershell.exe'),
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
-      { shell: false, windowsHide: true, timeout: 60_000, maxBuffer: 16_384 });
+      { shell: false, windowsHide: true, timeout: 60_000, maxBuffer: 16_384, env: windowsPowerShellEnvironment() });
     const report = JSON.parse(stdout);
     if (!report || typeof report !== 'object' || Object.keys(report).length !== 1 ||
         !Array.isArray(report.results) || report.results.length !== paths.length) {

@@ -98,7 +98,8 @@ for(const args of [['add','src/input.ts'],['commit','-m','Private input mutation
     paths: variant === 'metadata-leak' ? [join(scratch, 'captured-output.txt'), ...(existsSync(evidence) ? [evidence] : [])] : [scratch],
     testTmp: variant === 'metadata-leak' ? undefined : scratch, commandOutput: result.stdout + result.stderr })).toBeNull();
   expect(result.error).toBeUndefined();
-  if (variant !== 'oracle-config-exclusion') expect(result.status, `${variant} public full validation exit`).toBe(variant === 'complete' ? 0 : 1);
+  if (variant !== 'oracle-config-exclusion') expect(result.status, `${variant} public full validation exit; output tail:
+${(result.stdout + result.stderr).slice(-1500)}`).toBe(variant === 'complete' ? 0 : 1);
   expect(existsSync(evidence), 'Public CLI must retain its original attempt evidence').toBe(true);
   const artifacts = files(evidence).filter(path => path.endsWith('full-validation.json'));
   expect(artifacts).toHaveLength(1);
