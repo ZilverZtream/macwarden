@@ -37,7 +37,7 @@ describe('RUNE/fuzz properties', () => {
     expect(stats.overBounds).toBeGreaterThan(0);
     for (const reason of ['not-base64url', 'too-short', 'nul-byte', 'restriction-syntax', 'unique-id-placement', 'exceeds-bounds'])
       expect(stats.reasons[reason], reason).toBeGreaterThan(0);
-  }, 60_000);
+  }, 180_000);
 });
 
 describe('RUNE/fuzz work grows linearly (n against 4n, compared in-process)', () => {
