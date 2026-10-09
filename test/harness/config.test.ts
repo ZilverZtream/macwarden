@@ -61,7 +61,7 @@ it('CP-001/B10 pins the package, lockfile, scripts and strict TypeScript', () =>
   const lock = JSON.parse(read('package-lock.json'));
   const tsconfig = JSON.parse(read('tsconfig.json'));
   expect(pkg).toMatchObject({
-    name: 'macwarden', version: '1.1.1', type: 'module', license: 'MIT',
+    name: 'macwarden', version: '1.2.0', type: 'module', license: 'MIT',
     engines: { node: '^22.23.2 || ^24.18.1 || >=26.5.1' },
   });
   expect(pkg.dependencies ?? {}).toEqual({});
@@ -70,7 +70,7 @@ it('CP-001/B10 pins the package, lockfile, scripts and strict TypeScript', () =>
   expect(pkg.devDependencies).toEqual(pinned);
   expect(pkg.scripts).toMatchObject(scripts);
   expect(lock.packages['']).toMatchObject({
-    name: 'macwarden', version: '1.1.1', devDependencies: pinned,
+    name: 'macwarden', version: '1.2.0', devDependencies: pinned,
   });
   expect(tsconfig.compilerOptions.strict).toBe(true);
 });

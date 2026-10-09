@@ -38,7 +38,7 @@ npm i -g macwarden
 On production hosts, install an exact version and check the registry signatures of what you installed with `npm audit signatures` in a project that depends on MacWarden:
 
 ```sh
-npm i -g macwarden@1.1.1
+npm i -g macwarden@1.2.0
 ```
 
 After installing on a new host or upgrading, the [field check](docs/field-check.md) confirms a release against your own node in about 15 minutes.
@@ -61,7 +61,7 @@ In GitHub Actions:
 - uses: actions/checkout@v5
   with:
     fetch-depth: 0
-- run: npx --yes macwarden@1.1.1 scan . --git-history --fail-on READ --format github
+- run: npx --yes macwarden@1.2.0 scan . --git-history --fail-on READ --format github
 ```
 
 [CI integration](docs/ci-integration.md) covers SARIF upload for GitHub code scanning, the pre-commit hook and the gitleaks and TruffleHog rule packs.

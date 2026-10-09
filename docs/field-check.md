@@ -11,8 +11,8 @@ Record only versions, exit codes and fingerprints. Never paste a macaroon, an `l
 - A working directory you can delete afterwards, for example `~/macwarden-field-check`.
 
 ```sh
-npm install -g macwarden@1.1.1
-macwarden --version            # expect 1.1.1
+npm install -g macwarden@1.2.0
+macwarden --version            # expect 1.2.0
 lncli getinfo | grep version   # record the LND version
 ```
 
