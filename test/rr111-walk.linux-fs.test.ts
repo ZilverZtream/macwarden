@@ -1,12 +1,13 @@
 // Linux variant of the 1.1.1 scan walk fixes (robustness review RR-04, RR-07, RR-08, RR-12).
 // These need Linux file system semantics: a backslash inside a file name, case-sensitive
 // names and FIFOs. The Windows counterpart is test/rr111-walk.windows-fs.test.ts.
-import { closeSync, constants, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import { spawn, spawnSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { childEnvironment } from './helpers/environment.js';
+import { compare } from './helpers/growth.js';
 import { expect, it } from 'vitest';
 import { renderChunks, type OutputResult } from '../src/output/index.js';
 import { scan } from '../src/scan/index.js';
@@ -130,9 +131,9 @@ it('RR-111/walk-linux RR-04 smoke: the CLI never hangs while a real process keep
 
 // RR-05: realpath per entry made the walk's cost grow with the cube of directory depth (Linux:
 // 2,000 nested directories 52 s against 1 s flat; 2,000 files at depth 1,000 22 s against 1.5 s).
-// The bound below is a small constant factor of the same work laid out flat. It is a Linux
-// proof: Windows realpath was already linear per call, and its path lookups cost far more per
-// component, so the portable proof (rr111-walk.test.ts) counts realpath calls instead.
+// The bounds below are small constant factors of work timed in the same process. They are a
+// Linux proof: Windows realpath was already linear per call, and its path lookups cost far more
+// per component, so the portable proof (rr111-walk.test.ts) counts realpath calls instead.
 async function timed(work: () => Promise<unknown>): Promise<number> {
   const started = performance.now();
   await work();
@@ -145,25 +146,36 @@ function removeChain(deepest: string, top: string): void {
 }
 const DEPTH_FACTOR = 5;
 const DEPTH_SLACK_MS = 5_000;
+// The chain walk is measured against a reference workload, not against flat directories: one
+// lstat of every directory in the chain by its full path. The kernel resolves every component of
+// such a path, so the reference grows with the square of the depth, as the fixed walk does with
+// its lstat per entry (1.5 s for 2,000 levels on a workstation, 8 s on a two-core CI runner).
+// realpath per entry repeats that for every component, one more factor of the depth. Measured on
+// Linux: the walk takes about 33 times the reference now, idle or with both cores of a two-core
+// slice busy, and up to 60 times during a full parallel test run (the walk's asynchronous calls
+// wait for a busy scheduler, the synchronous reference does not); about 540 times before the fix.
+const LSTAT_FACTOR = 180;
 
-it('RR-111/walk-linux RR-05 a directory chain about 2,000 deep is walked within a small factor of as many flat directories', async () => temp(async dir => {
+it('RR-111/walk-linux RR-05 a directory chain about 2,000 deep is walked within a small factor of one lstat per level', async () => temp(async dir => {
   const chain = join(dir, 'c');
   // As deep as Linux PATH_MAX (4,096 bytes) allows under this test's temp root, at most 2,000 levels:
   // the full validation runs in a deeper temp directory than a plain run.
   const depth = Math.min(2_000, Math.floor((4_000 - Buffer.byteLength(chain) - 8) / 2));
   expect(depth).toBeGreaterThan(1_500);
-  const flat = join(dir, 'flat');
-  for (let i = 0; i < depth; i++) mkdirSync(join(flat, `d${i}`), { recursive: true });
-  const deepest = join(chain, ...Array.from({ length: depth }, () => 'd'));
+  const levels = Array.from({ length: depth + 1 }, (_, level) => join(chain, ...Array.from({ length: level }, () => 'd')));
+  const deepest = levels.at(-1)!;
   try {
     mkdirSync(deepest, { recursive: true });
     writeFileSync(join(deepest, 'x.env'), `X=${readonlyHex}\n`);
-    const flatMs = await timed(async () => expect((await scan([flat])).summary.filesScanned).toBe(0));
-    let deep: Awaited<ReturnType<typeof scan>> | undefined;
-    const deepMs = await timed(async () => { deep = await scan([chain]); });
-    expect(deep!.findings.map(finding => finding.fingerprint)).toEqual([readonly.fingerprint]);
-    expect(deep!.skipped).toEqual([]);
-    expect(deepMs, `flat ${flatMs.toFixed(0)} ms, chain ${deepMs.toFixed(0)} ms`).toBeLessThan(DEPTH_FACTOR * flatMs + DEPTH_SLACK_MS);
+    const reference = () => { for (const level of levels) lstatSync(level); };
+    const walk = async () => {
+      const result = await scan([chain]);
+      expect(result.findings.map(finding => finding.fingerprint)).toEqual([readonly.fingerprint]);
+      expect(result.skipped).toEqual([]);
+    };
+    const timing = await compare(reference, walk, 2);
+    console.log(`RR-05 chain ${depth} deep, lstat per level against the walk: ${timing.summary}`);
+    expect(timing.ratio, timing.summary).toBeLessThan(LSTAT_FACTOR);
   } finally { removeChain(deepest, chain); }
 }), 300_000);
 
