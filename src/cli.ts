@@ -21,12 +21,13 @@ const synopses: Record<string, string[]> = {
   rotate: [`rotate <label> --out <file> [--allow-admin] [--registry <path>] [--break-lock] [--dry-run] [--json]${online}`,
     `rotate <label> --finish [--yes] [--registry <path>] [--break-lock] [--dry-run] [--json]${online}`],
   attenuate: ['attenuate <file | -> --out <file> [--expires <n>(m|h|d)] [--ip <address> | --ip-range <cidr>] [--dry-run] [--unsafe-arg] [--json]'],
-  watch: [`watch [--lnd-grpc <host:port>] [--registry <path>] [--middleware-name <name>] [--until <n>(s|m|h|d)] [--alert-command <path>] [--alerts-only] [--json]${online}`],
+  watch: [`watch [--lnd-grpc <host:port>] [--registry <path>] [--middleware-name <name>] [--until <n>(s|m|h|d)] [--alert-command <path>] [--alerts-only] [--payment-journal <path>] [--json]${online}`],
   recommend: [`recommend (<label> | <root-key-id> | id:<16 hex> | --target-file <file>) [--accept-short-observation] [--registry <path>] [--json]${online}`],
   respond: [`respond --out-dir <directory> [--allow-admin] [--yes] [--registry <path>] [--break-lock] [--dry-run] [--json]${online}`,
     `respond --finish [--yes] [--registry <path>] [--break-lock] [--dry-run] [--json]${online}`],
   verify: [`verify <file | -> [--registry <path>] [--json]${online}`,
     `verify <hex | base64 | lndconnect://...> --unsafe-arg [--registry <path>] [--json]${online}`],
+  reconcile: [`reconcile --payment-journal <path> [--since <time|n(m|h|d)>] [--until <time|n(m|h|d)>] [--registry <path>] [--json]${online}`],
 };
 const summaries: [string, string][] = [
   ['inspect', 'decode a macaroon or NWC URI offline and grade what it can do'],
@@ -40,6 +41,7 @@ const summaries: [string, string][] = [
   ['recommend', 'suggest the least permissions a credential needs from observed usage'],
   ['respond', 'after a suspected leak: stage replacements for every credential, then --finish with proof'],
   ['verify', 'ask LND whether one credential file is still accepted (after a leak)'],
+  ['reconcile', "match watch's payment journal against LND's payment records, per credential"],
 ];
 const usage = ['Usage: macwarden <command> [options]', '       macwarden <command> --help', '       macwarden --help | --version',
   '', 'Commands:', ...summaries.map(([name, summary]) => `  ${name.padEnd(10)} ${summary}`)].join('\n');

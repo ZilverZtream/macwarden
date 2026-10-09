@@ -220,6 +220,39 @@
           ]
         }
       }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "event",
+        "time",
+        "status",
+        "reason"
+      ],
+      "properties": {
+        "schema": {
+          "const": 1
+        },
+        "time": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "event": {
+          "const": "status"
+        },
+        "status": {
+          "const": "payment-journal-stopped"
+        },
+        "reason": {
+          "enum": [
+            "full",
+            "write-failed",
+            "stalled"
+          ]
+        }
+      }
     }
   ],
   "$defs": {

@@ -118,6 +118,15 @@ macwarden verify /path/to/old/btcpay.macaroon
 # exit 0: LND rejects it conclusively. The output says what to run next in either case.
 ```
 
+To know which credential spent what, run `watch` with a payment journal and reconcile it against the node later:
+
+```sh
+macwarden watch --payment-journal ./payments.journal      # as a supervised service
+macwarden reconcile --payment-journal ./payments.journal --since 7d
+```
+
+The journal records, for each SendPaymentV2 and SendToRouteV2 call, the caller's credential ID and root key ID, the payment hash, the requested amount and the fee limit, and it records every period in which `watch` was not registered. It never stores the invoice text, preimages or macaroons. `reconcile` then asks LND (read-only, `info:read` and `offchain:read`) how each journaled payment ended: settled amount, routing fees over all attempts, failure reason, or still in flight. It keeps the two kinds of evidence apart: a journaled request is not a payment, and a payment LND lists in a period the journal does not cover is reported as unattributed with that gap, never assigned to anyone. Exit 0 means the window was fully covered and everything matched; exit 1 lists what did not.
+
 The [incident playbook](docs/incident-playbook.md) walks through the whole response: what patching fixes, replacing and revoking credentials with `respond`, `rotate` and `revoke`, what to do about root key 0, re-pairing apps and checking for unauthorized activity.
 
 ## Commands
@@ -136,7 +145,8 @@ Online (against your LND node):
 - `bake` issues one macaroon per app, each on its own fresh root key ID so it can be revoked alone, from presets (`read-only`, `invoice-only`, `pay-only`, `btcpay`) or explicit permissions, with an optional expiry. LND verifies it before it is written. `--canary` creates a decoy.
 - `revoke` deletes a credential's root key ID and confirms that LND now rejects it.
 - `rotate` replaces a credential in two steps: stage a verified replacement, switch the app, then `--finish` to revoke the old one.
-- `watch` registers a read-only LND RPC middleware that attributes each call to the credential that made it, records last use without storing macaroon bytes, and guards canaries.
+- `watch` registers a read-only LND RPC middleware that attributes each call to the credential that made it, records last use without storing macaroon bytes, and guards canaries. With `--payment-journal <file>` it also journals each payment request with the credential that made it.
+- `reconcile` compares that payment journal with LND's payment records: per credential, what was requested, settled and paid in fees, and which payments LND made that no journal entry explains.
 - `recommend` suggests a narrower permission set from what `watch` observed, with the commands to apply it.
 - `verify` asks the node whether one credential file is still accepted.
 - `respond` stages a replacement for every registered credential in one confirmed batch; `respond --finish` revokes the old root key IDs and reports, per credential, that the old one is rejected and the new one accepted.

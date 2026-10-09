@@ -10,7 +10,8 @@ import { watch } from './watch.js';
 import { recommend } from './recommend.js';
 import { respond } from './respond.js';
 import { verify } from './verify.js';
+import { reconcile } from './reconcile.js';
 
 export type CommandHandler = (args: string[]) => Promise<OutputResult & { exitCode?: number }>;
 
-export const handlers: Record<string, CommandHandler> = { inspect, scan, inventory, bake, revoke, rotate, attenuate, watch, recommend, respond, verify };
+export const handlers: Record<string, CommandHandler> = { inspect, scan, inventory, bake, revoke, rotate, attenuate, watch, recommend, respond, verify, reconcile };

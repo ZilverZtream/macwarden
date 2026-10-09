@@ -397,6 +397,43 @@
         "usageFile": {
           "type": "string",
           "minLength": 1
+        },
+        "paymentJournal": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "payments",
+            "deletions",
+            "dropped",
+            "stopped"
+          ],
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1
+            },
+            "payments": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "deletions": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "dropped": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "stopped": {
+              "enum": [
+                "full",
+                "write-failed",
+                "stalled",
+                null
+              ]
+            }
+          }
         }
       }
     }

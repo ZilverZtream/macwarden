@@ -1,5 +1,6 @@
-// Generates schemas/output/{inventory,bake,revoke,rotate,attenuate,watch,recommend,respond,verify,macwarden}.schema.json
-// and watch-event.schema.json (the NDJSON lines watch --json prints before its final document)
+// Generates schemas/output/{inventory,bake,revoke,rotate,attenuate,watch,recommend,respond,verify,reconcile,macwarden}.schema.json,
+// watch-event.schema.json (the NDJSON lines watch --json prints before its final document) and
+// payment-journal-record.schema.json (one line of the file watch --payment-journal writes)
 // from the hand-written inspect and registry-entry schemas, so shared definitions have one source.
 // Run: node scripts/output-schemas.mjs [--check]. --check exits 1 when a file is stale.
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -96,9 +97,66 @@ const watchEvent = {
     event(['status', 'dropped'], { event: { const: 'status' }, status: { const: 'output-dropped' }, dropped: { type: 'integer', minimum: 1 } }),
     event(['status', 'rootKeyId', 'label'], { event: { const: 'status' }, status: { const: 'alert-failed' },
       rootKeyId: eventWho.rootKeyId, label: eventWho.label }),
+    event(['status', 'reason'], { event: { const: 'status' }, status: { const: 'payment-journal-stopped' },
+      reason: { enum: ['full', 'write-failed', 'stalled'] } }),
   ],
   $defs: { rootKeyId: defs.rootKeyId },
 };
+// Millisatoshi amounts are canonical decimal strings: uint64 values JSON numbers cannot carry exactly.
+const msat = { type: 'string', pattern: '^(0|[1-9][0-9]{0,19})$' };
+const nullableMsat = { oneOf: [{ type: 'null' }, msat] };
+const paymentHash = { type: 'string', pattern: '^[0-9a-f]{64}$' };
+const journalCredential = { type: 'string', pattern: '^id:([0-9a-f]{16}|none|undecodable)$' };
+const journalRootKeyId = { oneOf: [{ $ref: '#/$defs/rootKeyId' }, { const: 'none' }] };
+const paymentMethods = ['/routerrpc.Router/SendPaymentV2', '/routerrpc.Router/SendToRouteV2'];
+const deletionMethods = ['/lnrpc.Lightning/DeletePayment', '/lnrpc.Lightning/DeleteAllPayments'];
+const extractions = ['complete', 'no-hash', 'amp', 'payload-too-large', 'malformed', 'invoice-invalid', 'invoice-too-long'];
+const deletionScopes = ['payment', 'failed-htlcs', 'all-payments', 'failed-payments', 'none'];
+const gapReasons = ['before-journal', 'not-running', 'not-registered', 'unconfirmed', 'journal-full', 'dropped'];
+
+// One line of the payment journal (docs/spec.md, Payment journal format): a version 1 record.
+const journalRecord = (type, required, properties, extra = {}) => ({ type: 'object', additionalProperties: false,
+  required: ['v', 'type', 'time', 'run', ...required],
+  properties: { v: { const: 1 }, type: { const: type }, time: isoTime,
+    run: { type: 'string', pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' }, ...properties }, ...extra });
+const journalWho = { requestId: msat, credential: journalCredential, rootKeyId: journalRootKeyId };
+const paymentJournalRecord = {
+  $schema: 'https://json-schema.org/draft/2020-12/schema',
+  $id: `${base}payment-journal-record.schema.json`,
+  title: 'macwarden payment journal record (format version 1)',
+  description: 'Normative source: docs/spec.md, Payment journal format. One line of the file watch --payment-journal appends to; '
+    + 'reconcile reads it. Coverage is only what registered markers prove; every other time is a gap.',
+  oneOf: [
+    journalRecord('run-start', ['node', 'version', 'repairedTail'], { node: registryEntry.properties.nodePubkey,
+      version: { type: 'string', pattern: '^[ -~]{1,64}$' }, repairedTail: { type: 'boolean' } }),
+    journalRecord('registered', ['session'], { session: { type: 'integer', minimum: 1 } }),
+    journalRecord('unregistered', ['session', 'reason'], { session: { type: 'integer', minimum: 1 },
+      reason: { enum: ['stream-lost', 'stopping', 'refresh'] } }),
+    journalRecord('alive', [], {}),
+    journalRecord('payment', ['requestId', 'method', 'credential', 'rootKeyId', 'paymentHash', 'amountMsat', 'amountSource', 'feeLimitMsat',
+      'amp', 'extraction'], { ...journalWho, method: { enum: paymentMethods },
+      paymentHash: { oneOf: [{ type: 'null' }, paymentHash] }, amountMsat: nullableMsat,
+      amountSource: { enum: ['request', 'invoice', 'route', null] }, feeLimitMsat: nullableMsat, amp: { type: 'boolean' },
+      extraction: { enum: extractions } }, {
+      allOf: [{ if: { properties: { extraction: { const: 'complete' } } }, then: { properties: { paymentHash: paymentHash } },
+        else: { properties: { paymentHash: { type: 'null' } } } }] }),
+    journalRecord('deletion', ['requestId', 'method', 'credential', 'rootKeyId', 'paymentHash', 'scope', 'extraction'], { ...journalWho,
+      method: { enum: deletionMethods }, paymentHash: { oneOf: [{ type: 'null' }, paymentHash] }, scope: { enum: deletionScopes },
+      extraction: { enum: ['complete', 'payload-too-large', 'malformed'] } }),
+    journalRecord('drop', ['count', 'first', 'last', 'reason'], { count: { type: 'integer', minimum: 1 }, first: isoTime, last: isoTime,
+      reason: { const: 'overload' } }),
+    journalRecord('full', [], {}),
+    journalRecord('run-end', ['payments', 'deletions', 'dropped'], { payments: count, deletions: count, dropped: count }),
+  ],
+  $defs: { rootKeyId: defs.rootKeyId },
+};
+
+const reconcileObservation = { type: 'object', additionalProperties: false,
+  required: ['time', 'run', 'requestId', 'method', 'credential', 'rootKeyId', 'label', 'amountMsat', 'amountSource', 'feeLimitMsat', 'extraction'],
+  properties: { time: isoTime, run: { type: 'string', minLength: 1 }, requestId: msat, method: { enum: paymentMethods },
+    credential: journalCredential, rootKeyId: journalRootKeyId, label: { type: ['string', 'null'] }, amountMsat: nullableMsat,
+    amountSource: { enum: ['request', 'invoice', 'route', null] }, feeLimitMsat: nullableMsat, extraction: { enum: extractions } } };
+
 const schemas = {
   inventory: envelope('inventory', 'macwarden inventory --json output',
     'Normative source: docs/spec.md, Commands > 3. inventory. Exit 1 with --expiring-within still has ok: true.', {
@@ -224,6 +282,10 @@ const schemas = {
         node: registryEntry.properties.nodePubkey, startedAt: isoTime, endedAt: isoTime,
         ...Object.fromEntries(watchCounts.map(name => [name, count])),
         usageFile: { type: 'string', minLength: 1 },
+        // Present only with --payment-journal.
+        paymentJournal: { type: 'object', additionalProperties: false, required: ['path', 'payments', 'deletions', 'dropped', 'stopped'],
+          properties: { path: { type: 'string', minLength: 1 }, payments: count, deletions: count, dropped: count,
+            stopped: { enum: ['full', 'write-failed', 'stalled', null] } } },
       } }),
   recommend: envelope('recommend', 'macwarden recommend --json output',
     'Normative source: docs/spec.md, Commands > 9. recommend. A recommendation only; commands is empty whenever the evidence does not support narrowing.', {
@@ -325,11 +387,78 @@ const schemas = {
       ] }, {
       fingerprint: inspect.$defs.fingerprint, caveat: inspect.$defs.caveat, macaroonWarning: inspect.$defs.macaroonWarning,
     }),
+  reconcile: envelope('reconcile', 'macwarden reconcile --json output',
+    'Normative source: docs/spec.md, Commands > 12. reconcile. Observation (the payment journal) and settlement (LND) are separate '
+      + 'evidence. Exit 1 (ok: true) when the reconciliation is incomplete: a coverage gap, an unattributed LND payment, a journaled '
+      + 'payment without a final outcome, a request without a hash, an ambiguous attribution, a journaled deletion or a limited lookup.', {
+      type: 'object', additionalProperties: false,
+      required: ['node', 'journal', 'window', 'coverage', 'credentials', 'payments', 'unmatched', 'unattributed', 'deletions', 'lookups'],
+      properties: {
+        node: { type: 'object', additionalProperties: false, required: ['pubkey', 'alias', 'network'],
+          properties: { pubkey: registryEntry.properties.nodePubkey, alias: { type: 'string' }, network: { type: 'string' } } },
+        journal: { type: 'object', additionalProperties: false,
+          required: ['path', 'size', 'runs', 'records', 'firstRecord', 'lastRecord', 'otherNodeRecords', 'tornTail', 'repairedLines'],
+          properties: { path: { type: 'string', minLength: 1 }, size: count, runs: count, records: count,
+            firstRecord: { oneOf: [{ type: 'null' }, isoTime] }, lastRecord: { oneOf: [{ type: 'null' }, isoTime] },
+            otherNodeRecords: count, tornTail: { type: 'boolean' }, repairedLines: count } },
+        window: { type: 'object', additionalProperties: false, required: ['since', 'until'], properties: { since: isoTime, until: isoTime } },
+        coverage: { type: 'object', additionalProperties: false,
+          required: ['windowSeconds', 'coveredSeconds', 'complete', 'gapCount', 'gapSeconds', 'gaps'],
+          properties: { windowSeconds: count, coveredSeconds: count, complete: { type: 'boolean' }, gapCount: count, gapSeconds: count,
+            gaps: { type: 'array', maxItems: 1000, items: { type: 'object', additionalProperties: false, required: ['from', 'to', 'reason', 'dropped'],
+              properties: { from: isoTime, to: isoTime, reason: { enum: gapReasons }, dropped: count } } } } },
+        credentials: { type: 'array', items: { type: 'object', additionalProperties: false,
+          required: ['credential', 'rootKeyIds', 'label', 'payments', 'succeeded', 'failed', 'inFlight', 'notFound', 'unknown', 'ambiguous',
+            'unmatched', 'deletions', 'requestedMsat', 'settledMsat', 'feesMsat', 'inFlightMsat'],
+          properties: { credential: journalCredential, rootKeyIds: { type: 'array', uniqueItems: true, items: journalRootKeyId },
+            label: { type: ['string', 'null'] }, payments: count, succeeded: count, failed: count, inFlight: count, notFound: count,
+            unknown: count, ambiguous: count, unmatched: count, deletions: count, requestedMsat: msat, settledMsat: msat, feesMsat: msat,
+            inFlightMsat: msat } } },
+        payments: { type: 'array', items: { type: 'object', additionalProperties: false,
+          required: ['paymentHash', 'attribution', 'credentials', 'observation', 'settlement', 'deletedBy'],
+          properties: {
+            paymentHash, attribution: { enum: ['single', 'ambiguous'] },
+            credentials: { type: 'array', minItems: 1, uniqueItems: true, items: journalCredential },
+            observation: { type: 'object', additionalProperties: false,
+              required: ['first', 'last', 'calls', 'requestedMsat', 'routeAttemptsMsat', 'feeLimitMsat', 'observations'],
+              properties: { first: isoTime, last: isoTime, calls: { type: 'integer', minimum: 1 }, requestedMsat: nullableMsat,
+                routeAttemptsMsat: nullableMsat, feeLimitMsat: nullableMsat,
+                observations: { type: 'array', minItems: 1, maxItems: 100, items: { $ref: '#/$defs/observation' } } } },
+            settlement: { type: 'object', additionalProperties: false,
+              required: ['status', 'source', 'createdAt', 'settledMsat', 'feesMsat', 'inFlightMsat', 'attempts', 'failureReason', 'predatesObservation'],
+              properties: { status: { enum: ['succeeded', 'failed', 'in-flight', 'not-found', 'unknown'] },
+                source: { enum: ['list-payments', 'track-payment', null] }, createdAt: { oneOf: [{ type: 'null' }, isoTime] },
+                settledMsat: nullableMsat, feesMsat: nullableMsat, inFlightMsat: nullableMsat,
+                attempts: { oneOf: [{ type: 'null' }, count] }, failureReason: { type: ['string', 'null'] },
+                predatesObservation: { type: 'boolean' } },
+              allOf: [{ if: { properties: { source: { const: null } } },
+                then: { properties: { status: { enum: ['not-found', 'unknown'] }, settledMsat: { type: 'null' }, feesMsat: { type: 'null' },
+                  attempts: { type: 'null' } } },
+                else: { properties: { settledMsat: msat, feesMsat: msat, attempts: count } } }] },
+            deletedBy: { type: 'array', uniqueItems: true, items: journalCredential },
+          } } },
+        unmatched: { type: 'array', items: { $ref: '#/$defs/observation' } },
+        unattributed: { type: 'array', items: { type: 'object', additionalProperties: false,
+          required: ['paymentHash', 'createdAt', 'status', 'settledMsat', 'feesMsat', 'inFlightMsat', 'attempts', 'failureReason', 'coverage'],
+          properties: { paymentHash, createdAt: isoTime, status: { enum: ['succeeded', 'failed', 'in-flight', 'unknown'] },
+            settledMsat: msat, feesMsat: msat, inFlightMsat: msat, attempts: count, failureReason: { type: ['string', 'null'] },
+            coverage: { enum: ['covered', 'boundary', 'gap'] } } } },
+        deletions: { type: 'array', items: { type: 'object', additionalProperties: false,
+          required: ['time', 'run', 'requestId', 'method', 'credential', 'rootKeyId', 'label', 'scope', 'paymentHash', 'extraction'],
+          properties: { time: isoTime, run: { type: 'string', minLength: 1 }, requestId: msat, method: { enum: deletionMethods },
+            credential: journalCredential, rootKeyId: journalRootKeyId, label: { type: ['string', 'null'] }, scope: { enum: deletionScopes },
+            paymentHash: { oneOf: [{ type: 'null' }, paymentHash] }, extraction: { enum: ['complete', 'payload-too-large', 'malformed'] } } } },
+        lookups: { type: 'object', additionalProperties: false,
+          required: ['listed', 'listTruncated', 'tracked', 'trackFailed', 'trackLimited', 'attributedOutsideWindow'],
+          properties: { listed: count, listTruncated: { type: 'boolean' }, tracked: count, trackFailed: count, trackLimited: count,
+            attributedOutsideWindow: count } },
+      } }, { observation: reconcileObservation }),
 };
 // attenuate's and verify's results reuse inspect's grade definition name.
 schemas.attenuate.$defs.grade = inspect.$defs.grade;
 schemas.verify.$defs.grade = inspect.$defs.grade;
 schemas['watch-event'] = watchEvent;
+schemas['payment-journal-record'] = paymentJournalRecord;
 // Documents with command: null: `macwarden --help --json`, and a usage error before any command is
 // known (missing or unknown command, unknown leading flag).
 const topLevel = envelope('macwarden', 'macwarden --json output without a command',

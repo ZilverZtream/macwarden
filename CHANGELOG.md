@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.0 (unreleased)
+
+### Added
+
+- `watch --payment-journal <path>` (off by default) journals every call to the payment-initiating methods of LND v0.21.4-beta (`SendPaymentV2`, `SendToRouteV2`) and to the methods that delete payment records (`DeletePayment`, `DeleteAllPayments`) with the credential that made it: its credential ID (from the macaroon identifier, so copies with added caveats share it) and root key ID, the payment hash (from the BOLT11 invoice or the request), the requested amount, the fee limit, LND's request ID and the time. Only these fields are decoded from the request, in one bounded pass (at most 64 KiB per request, 8,192 characters per invoice); the invoice text, keysend preimages, other custom records and macaroons are never stored. The journal is an append-only, owner-only file of JSON lines, synced after each write and at most 64 MiB; it records every registration, lost stream, restart and stop of `watch`, and every payment it could not journal under overload, so periods without coverage are recorded rather than implied. Journal writes run off the intercept path and never delay LND. The journal format is versioned and published as `schemas/output/payment-journal-record.schema.json`.
+- `macwarden reconcile --payment-journal <path> [--since …] [--until …]` (online, read-only; needs `info:read` and `offchain:read`) looks up each journaled payment hash in LND (ListPayments, TrackPaymentV2) and reports, per credential, what was requested against what LND settled, the routing fees over all HTLC attempts, the number of attempts, failure reasons and payments still in flight or unknown; payments LND lists in the window that the journal does not attribute, with whether they fell in a coverage gap; journaled payment-record deletions; and the journal's coverage gaps. Exit 1 when anything is unexplained. Output schema: `schemas/output/reconcile.schema.json`.
+
 ## 1.1.1 (2026-10-09)
 
 Security release. It fixes every finding of the independent audit of 1.1.0 ([report](docs/reviews/2026-10-09-audit-1.1.0.md)) and of four further internal reviews (threat model, lifecycle logic, scan robustness, output files and environment): 38 issues, each proven by a test that failed on 1.1.0. The most important: a long or punctuation-terminated `lndconnect://` URI could be missed by `scan`; `verify` could report a live credential as conclusively rejected (clock skew, an altered copy); a FIFO could hang `scan`; a new `--out` file was briefly readable under the folder's inherited Windows permissions.
