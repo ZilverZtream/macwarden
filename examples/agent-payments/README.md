@@ -133,9 +133,137 @@ Aperture reads only bob's TLS certificate and `invoice.macaroon` (it loads that 
 
 ## Expected output
 
-<!-- PLACEHOLDER: replace this block with an excerpt from a real run of run.sh on the release candidate. -->
+Steps 4 to 6 of a real run of `verify.sh` on the 1.2.0 release candidate (WSL Ubuntu, Node.js 22.23.3, Docker), 2026-10-09. Invoices and node keys are from the disposable regtest stack; no credential is printed.
 
-> **Placeholder.** This section is filled in from a real run of the released code. Until then, run the example to see its output: every step prints the commands it runs, their output and its checks.
+```text
+== Step 4/7: The agent buys data from the paid API with its pay-only credential
+ $ node agent.mjs buy
+    agent> GET http://127.0.0.1:19381/api/forecast
+    agent> 402 Payment Required: L402 challenge, invoice lnbcrt2500n1…ntg4pe
+   watch | 2026-10-09T19:00:40.353Z  /lnrpc.Lightning/DecodePayReq  root key 7025894489540552293  id:8cf0699196d857de  agent
+    agent> DecodePayReq: 250 sat to 02478dceabc2…4bb314, "L402", hash 9efe6a25d0c3…1bd8bf
+   watch | 2026-10-09T19:00:40.357Z  /routerrpc.Router/SendPaymentV2  root key 7025894489540552293  id:8cf0699196d857de  agent
+    agent> SendPaymentV2: SUCCEEDED, 250 sat + 0 sat fee
+    agent> GET with Authorization: L402 <token> → 200
+    agent> data: {"location":"Regtest Harbour","hours":[{"hour":"06:00","windKnots":12,"direction":"SW"},{"hour":"09:00","windKnots":15,"direction":"SW"},{"hour":"12:00","windKnots":18,"direction":"W"}]}
+   [ok] agent paid the L402 invoice and got the data
+   [ok] watch attributed the payment to the agent
+   # The same credential is refused for everything that is not a payment:
+ $ node agent.mjs probe
+   watch | 2026-10-09T19:00:40.529Z  /lnrpc.Lightning/GetInfo  root key 7025894489540552293  id:8cf0699196d857de  agent
+    agent> GetInfo (info:read, granted)                             allowed
+    agent> WalletBalance (needs onchain:read)                       refused (HTTP 500: permission denied)
+    agent> ListChannels (needs offchain:read)                       refused (HTTP 500: permission denied)
+    agent> NewAddress (needs address:write)                         refused (HTTP 500: permission denied)
+    agent> OpenChannelSync (needs onchain:write, offchain:write)    refused (HTTP 500: permission denied)
+    agent> BakeMacaroon (needs macaroon:generate)                   refused (HTTP 500: permission denied)
+   [ok] non-payment calls are refused
+   # LND checks permissions before RPC middleware runs, so watch lists only the calls LND accepted.
+== Step 5/7: Leak drill: a careless debug log writes the agent's secrets to disk
+ $ node agent.mjs buy --simulate-leak
+    agent> GET http://127.0.0.1:19381/api/forecast
+    agent> 402 Payment Required: L402 challenge, invoice lnbcrt2500n1…nwvkcy
+   watch | 2026-10-09T19:00:40.601Z  /lnrpc.Lightning/DecodePayReq  root key 7025894489540552293  id:8cf0699196d857de  agent
+    agent> DecodePayReq: 250 sat to 02478dceabc2…4bb314, "L402", hash 486c31e311ec…9f6d0c
+   watch | 2026-10-09T19:00:40.605Z  /routerrpc.Router/SendPaymentV2  root key 7025894489540552293  id:8cf0699196d857de  agent
+    agent> SendPaymentV2: SUCCEEDED, 250 sat + 0 sat fee
+    agent> GET with Authorization: L402 <token> → 200
+    agent> data: {"location":"Regtest Harbour","hours":[{"hour":"06:00","windKnots":12,"direction":"SW"},{"hour":"09:00","windKnots":15,"direction":"SW"},{"hour":"12:00","windKnots":18,"direction":"W"}]}
+    agent> leak drill: wrote runtime/agent/agent.log (request headers with the macaroon, the L402 Authorization header)
+    agent> leak drill: wrote runtime/agent/.env (LND_REST, LND_MACAROON_PATH, L402_TOKEN)
+   [ok] leak drill wrote agent.log and .env
+ $ macwarden scan runtime/agent --fail-on READ
+  runtime/agent/.env:3:12  l402  fp:7cf2eedba77764a1 live (counted as READ)
+  runtime/agent/agent.log:1:365  macaroon-hex  fp:3464daa548a32d9b SPEND root key 7025894489540552293
+  runtime/agent/agent.log:2:100  macaroon-hex  fp:3464daa548a32d9b SPEND root key 7025894489540552293
+  runtime/agent/agent.log:3:60  l402  fp:7cf2eedba77764a1 live (counted as READ)
+  runtime/agent/agent.macaroon  macaroon-file  fp:3464daa548a32d9b SPEND root key 7025894489540552293
+  runtime/agent/backup/readonly.macaroon  macaroon-file  fp:c55ae8498cdeed4e READ root key 3398524538690212698
+  6 findings (3 distinct) in 5 files; 0 skipped; 0 ignored; 6 at or above READ
+   (exit 1)
+   [ok] scan finds the leaked agent macaroon in agent.log (exit 1)
+   # The decoy is a macaroon file too, so scan lists it; it grants only reads and every use is denied and alerted.
+   [ok] scan also reports the leaked L402 token (2 finding(s))
+== Step 6/7: Incident response: revoke the agent, prove it is cut off
+ $ macwarden revoke agent --yes --registry runtime/operator/registry.json
+   watch | 2026-10-09T19:00:40.877Z  /lnrpc.Lightning/GetInfo  root key 7001  id:91205099efac68cc  unregistered
+   watch | 2026-10-09T19:00:40.889Z  /lnrpc.Lightning/ListPermissions  root key 7001  id:91205099efac68cc  unregistered
+   watch | 2026-10-09T19:00:40.899Z  /lnrpc.Lightning/ListMacaroonIDs  root key 7001  id:91205099efac68cc  unregistered
+   watch | 2026-10-09T19:00:40.905Z  /lnrpc.Lightning/CheckMacaroonPermissions  root key 7001  id:91205099efac68cc  unregistered
+   watch | 2026-10-09T19:00:40.917Z  /lnrpc.Lightning/DeleteMacaroonID  root key 7001  id:91205099efac68cc  unregistered
+   watch | 2026-10-09T19:00:40.923Z  /lnrpc.Lightning/ListMacaroonIDs  root key 7001  id:91205099efac68cc  unregistered
+   watch | 2026-10-09T19:00:40.927Z  /lnrpc.Lightning/CheckMacaroonPermissions  root key 7001  id:91205099efac68cc  unregistered
+   watch | 2026-10-09T19:00:40.928Z  error /lnrpc.Lightning/CheckMacaroonPermissions  root key 7001  id:91205099efac68cc  unregistered
+  revoked  agent  root key ID 7025894489540552293  fp:3464daa548a32d9b
+  proof    ID absent from LND; macaroon rejected
+  New requests with this macaroon are now rejected. Streams opened before the revoke stay open until they disconnect; if the credential may be compromised, restart LND.
+   (exit 0)
+   [ok] revoke agent
+   # watch also lists macwarden's own calls: its session credential (root key 7001) is not in the registry, so it shows as unregistered.
+ $ macwarden verify runtime/agent/agent.macaroon --registry runtime/operator/registry.json
+   watch | 2026-10-09T19:00:41.011Z  /lnrpc.Lightning/GetInfo  root key 7001  id:91205099efac68cc  unregistered
+   watch | 2026-10-09T19:00:41.024Z  /lnrpc.Lightning/ListPermissions  root key 7001  id:91205099efac68cc  unregistered
+   watch | 2026-10-09T19:00:41.030Z  /lnrpc.Lightning/ListMacaroonIDs  root key 7001  id:91205099efac68cc  unregistered
+   watch | 2026-10-09T19:00:41.035Z  /lnrpc.Lightning/CheckMacaroonPermissions  root key 7001  id:91205099efac68cc  unregistered
+   watch | 2026-10-09T19:00:41.036Z  error /lnrpc.Lightning/CheckMacaroonPermissions  root key 7001  id:91205099efac68cc  unregistered
+  fingerprint  fp:3464daa548a32d9b
+  location     lnd
+  root key ID  7025894489540552293
+  grade        SPEND   (uri:/routerrpc.Router/SendPaymentV2)
+  permissions  info:read uri:/lnrpc.Lightning/DecodePayReq uri:/routerrpc.Router/SendPaymentV2 uri:/routerrpc.Router/TrackPaymentV2
+  caveats      time-before 2026-10-09T20:00:38Z (valid)
+  snapshot     LND 0.21.4-beta
+  node         0300882a3c825b7d0cacb46ad354ad2859c9a2f159673379108d8615a5959b8912 (alice) regtest
+  status       rejected by LND (root-key-missing)
+  root key     not listed in LND
+  registry     agent (revoked, same credential)
+  next         LND rejects this credential now: its root key ID no longer exists. It can no longer be used against this node.
+   (exit 0)
+   [ok] verify: conclusively rejected (exit 0)
+ $ node agent.mjs buy
+    agent> GET http://127.0.0.1:19381/api/forecast
+    agent> 402 Payment Required: L402 challenge, invoice lnbcrt2500n1…q3dnmf
+    agent> error: GET /v1/payreq/<invoice> failed with HTTP 500: cannot retrieve macaroon: cannot get macaroon: root key with id 7025894489540552293 doesn't exist
+   [ok] the agent can no longer pay
+   # Limit: the L402 token the agent already paid for is a separate bearer credential. Aperture honours it
+   # until it expires (timeout: 3600 in aperture.yaml); revoking the macaroon does not end it.
+ $ node agent.mjs reuse
+    agent> GET with the L402 token from .env, no payment → 200
+    agent> data: {"location":"Regtest Harbour","hours":[{"hour":"06:00","windKnots":12,"direction":"SW"},{"hour":"09:00","windKnots":15,"direction":"SW"},{"hour":"12:00","windKnots":18,"direction":"W"}]}
+   [ok] the already-paid L402 token still works until it expires
+   # An intruder who found the leaked files tries the decoy next to them:
+ $ node agent.mjs intruder runtime/agent/backup/readonly.macaroon
+   watch | 2026-10-09T19:00:41.687Z  /lnrpc.Lightning/GetInfo  root key 3398524538690212698  id:3bdf293602e60c3d  decoy
+   watch | 2026-10-09T19:00:41.688Z  ALERT canary decoy used: /lnrpc.Lightning/GetInfo  root key 3398524538690212698  id:3bdf293602e60c3d  decoy  request denied
+    agent> intruder GetInfo        → refused (HTTP 500: permission denied)
+   watch | 2026-10-09T19:00:41.695Z  /lnrpc.Lightning/WalletBalance  root key 3398524538690212698  id:3bdf293602e60c3d  decoy
+    agent> intruder WalletBalance  → refused (HTTP 500: permission denied)
+   [ok] watch raised a canary alert, LND denied the call
+ $ cat runtime/alerts.jsonl
+  {"schema":1,"event":"canary","time":"2026-10-09T19:00:41.688Z","method":"/lnrpc.Lightning/GetInfo","rootKeyId":"3398524538690212698","credential":"id:3bdf293602e60c3d","label":"decoy","denied":true}
+   [ok] the alert command received the canary event
+   watch | 2026-10-09T19:00:42.264Z  /lnrpc.State/SubscribeState  root key none  id:none  unregistered
+   watch | 2026-10-09T19:00:44.337Z  /lnrpc.State/SubscribeState  root key none  id:none  unregistered
+ $ macwarden inventory --registry runtime/operator/registry.json
+   watch | 2026-10-09T19:00:45.815Z  /lnrpc.Lightning/GetInfo  root key 7001  id:91205099efac68cc  unregistered
+   watch | 2026-10-09T19:00:45.828Z  /lnrpc.Lightning/ListPermissions  root key 7001  id:91205099efac68cc  unregistered
+   watch | 2026-10-09T19:00:45.835Z  /lnrpc.Lightning/ListMacaroonIDs  root key 7001  id:91205099efac68cc  unregistered
+  node 0300882a3c825b7d0cacb46ad354ad2859c9a2f159673379108d8615a5959b8912 (alice) regtest
+  ROOT KEY ID          LABEL  GRADE  AGE  EXPIRES  STATUS
+  0                    —      —      —    —        default root key: cannot be individually revoked
+  7001                 —      —      —    —        macwarden's own credential; last used 2026-10-09T19:00:41.036Z (11 calls, 2 errors)
+  3398524538690212698  decoy  READ   0d   —        CANARY TRIGGERED 2 times, last 2026-10-09T19:00:41.695Z: assume this credential's location is compromised; active; last used 2026-10-09T19:00:41.695Z (2 calls)
+  CANARY TRIGGERED: decoy; someone has read where each was stored: treat that place as compromised and rotate every credential kept there
+   (exit 0)
+   [ok] inventory: agent root key gone, canary triggered
+ $ (stop watch: Ctrl+C)
+   watch | 2026-10-09T19:00:41.695Z  ALERT canary decoy used: /lnrpc.Lightning/WalletBalance  root key 3398524538690212698  id:3bdf293602e60c3d  decoy  request denied (+1 more denied uses since the last alert)
+   watch | watched 24 calls (2 errors) from 4 credentials; 2 canary alerts; 0 reconnects; usage saved to /home/dennis/mw-120/examples/agent-payments/runtime/operator/registry.json.usage.json
+   [ok] watch stopped cleanly (exit 0)
+...
+20/20 checks passed
+verify: all checks passed
+```
 
 ### What `watch` shows, and what it does not
 
