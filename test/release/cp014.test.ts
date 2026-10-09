@@ -156,16 +156,25 @@ it('CP-014/B4 dormant release workflow pins trusted publishing and scoped token 
   expect(entries.filter(job => /^\s+id-token:\s*write\s*$/m.test(job))).toHaveLength(1);
 });
 
-it('CP-014/B5 dormant CI retains triggers pins and future three-OS jobs', () => {
+it('CP-014/B5 CI keeps its triggers and pins and tests the supported platforms and Node lines', () => {
   const text = workflow('ci.yml');
-  const push = block(block(text, 'on', 0), 'push', 2);
+  const triggers = block(text, 'on', 0);
+  const push = block(triggers, 'push', 2);
   expect(push).toContain('main');
-  expect(block(text, 'on', 0)).toMatch(/^ {2}pull_request:/m);
+  expect(triggers).toMatch(/^ {2}pull_request:/m);
+  expect(triggers).toMatch(/^ {2}workflow_dispatch:/m);
   checkDefaultPermissions(text);
   checkPinnedUses(text);
   const entries = Object.values(jobs(text));
-  expect(entries.some(job => ['ubuntu-latest', 'macos-latest', 'windows-latest']
-    .every(platform => job.includes(platform)))).toBe(true);
+  // README and CONTRIBUTING: Linux and Windows are tested before each release; macOS is not part
+  // of release validation. Both engine floors and both current Node lines run on Linux.
+  const unit = entries.filter(job => ['ubuntu-latest', 'windows-latest'].every(platform => job.includes(platform)));
+  expect(unit).toHaveLength(1);
+  for (const node of ['22.23.2', '22.x', '24.18.1', '24.x']) expect(unit[0]).toContain(`'${node}'`);
+  const steps = ['npm ci', 'npm run lint', 'npm run build', 'npm test'].map(step => unit[0].indexOf(`run: ${step}`));
+  expect(steps.every(at => at >= 0)).toBe(true);
+  expect([...steps].sort((a, b) => a - b)).toEqual(steps);
+  expect(text).not.toMatch(/macos/i);
   expect(entries.some(job => job.includes('ubuntu-latest') &&
     job.indexOf('npm run fixture:up') >= 0 &&
     job.indexOf('npm run fixture:up') < job.indexOf('npm run test:oracle') &&
