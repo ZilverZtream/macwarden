@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.0 (unreleased)
+
+### Added
+
+- A runnable example of safe agent payments, [`examples/agent-payments/`](examples/agent-payments/README.md): on a regtest Docker stack (two LND v0.21.4 nodes and Lightning Labs' Aperture L402 proxy in front of a paid API, every image pinned by digest), an agent pays for API access with a `pay-only`, one-hour credential from `bake`, `watch` shows its calls live, `scan` finds the credential after a leak drill, `revoke` and `verify` prove it is cut off, and a canary raises an alert, which also runs an alert command on Linux and macOS, when an intruder tries the decoy. `run.sh`/`run.ps1` run it, `teardown.sh`/`teardown.ps1` remove it, and `verify.sh` checks every step's outcome. The example's README states the limits: a macaroon limits what an agent may call, not how much it may spend, and an L402 token stays valid until it expires.
+
 ## 1.1.1 (2026-10-09)
 
 Security release. It fixes every finding of the independent audit of 1.1.0 ([report](docs/reviews/2026-10-09-audit-1.1.0.md)) and of four further internal reviews (threat model, lifecycle logic, scan robustness, output files and environment): 38 issues, each proven by a test that failed on 1.1.0. The most important: a long or punctuation-terminated `lndconnect://` URI could be missed by `scan`; `verify` could report a live credential as conclusively rejected (clock skew, an altered copy); a FIFO could hang `scan`; a new `--out` file was briefly readable under the folder's inherited Windows permissions.
