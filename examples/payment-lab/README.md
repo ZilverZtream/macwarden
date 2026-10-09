@@ -109,6 +109,8 @@ The payer cannot list payments or read balances; the evidence that no second pay
 
 ## Scenarios
 
+The output below is from a real run of the 1.2.0 release candidate on WSL Ubuntu (Node.js 22.23.3, Docker), 2026-10-09: setup, then each scenario in turn. Node keys, payment hashes and invoices are from the disposable regtest stack; long invoices are shortened.
+
 ### 1. Dropped connection after submission
 
 `scenarios/1-dropped-connection.sh [--cut kill|drop]`
@@ -118,7 +120,75 @@ The merchant creates a hold invoice, so LND holds the HTLC and the payment stays
 It proves: after the cut the record is unresolved, not failed, and the operation stays open with nothing posted; LND still holds the payment; no replacement invoice can be issued while the first is unresolved; recovery uses TrackPaymentV2 only; there is one payment for the hash in ListPayments and one SendPaymentV2 call in total; the record's principal and routing fee equal LND's; the operation completes and the ledger is posted once; the repeated request is answered from the record; the merchant fulfills the order once.
 
 ```text
-[placeholder: output of scenarios/1-dropped-connection.sh from the release run]
+Scenario 1: dropped connection after submission
+===============================================
+  A hold invoice keeps the payment in flight; the payer loses its connection; recovery goes through TrackPaymentV2.
+  lab run: /home/dennis/mw-120/examples/payment-lab/runtime/lab-20261009T191604Z
+  run tag: 1009T191622922
+
+> Merchant creates a hold invoice for order ORD-1-1009T191622922 (25,000 sat)
+  The merchant generates the preimage and stores it before calling AddHoldInvoice, so LND will hold any HTLC until the merchant releases it.
+  $ node src/cli.ts receiver create-invoice --as merchant --order ORD-1-1009T191622922 --amount-msat 25000000 --memo ORD-1-1009T191622922 --hold
+  invoice created with AddHoldInvoice for ORD-1-1009T191622922
+  outcome: created
+  payment hash: 1a7c776231b8a01a953e8e31b8a158ad68b8a6090c3691e676b3fcc5e403396d
+
+> Customer worker records operation PAY-ORD-1-1009T191622922 and the payment hash, then calls SendPaymentV2
+  $ node src/cli.ts payer pay --as customer-payer --operation PAY-ORD-1-1009T191622922 --kind order-payment --invoice lnbcrt250u1p4vj0v8…ju3ahc --fee-limit-msat 1000000
+  recorded intent: operation PAY-ORD-1-1009T191622922 -> payment 1a7c776231b8a01a...
+  SendPaymentV2 called (submission counted in the record)
+  SendPaymentV2: IN_FLIGHT (attempts 0: 0 in flight, 0 succeeded, 0 failed; fee 0 msat) -> record in_flight
+  SendPaymentV2: IN_FLIGHT (attempts 1: 1 in flight, 0 succeeded, 0 failed; fee 0 msat) -> record in_flight
+  The merchant node holds the HTLC (invoice state ACCEPTED). Nothing will settle or fail until the merchant decides.
+
+> Kill the worker process while the HTLC is held
+  worker exit: 128
+  record state: in_flight
+  operation state: open
+  ok   record is unresolved after the cut, not failed: state in_flight (the last thing this worker knew; it had no chance to write anything)
+  ok   business operation still open, nothing posted: operation open, 0 ledger entries
+  ok   LND still holds the payment in flight: 1 payment(s) for the hash, status IN_FLIGHT
+
+> Merchant tries to issue a replacement invoice for the same order
+  $ node src/cli.ts receiver create-invoice --as merchant --order ORD-1-1009T191622922 --amount-msat 25000000 --hold
+  outcome: refused (order ORD-1-1009T191622922 already has invoice 1a7c776231b8a01a953e8e31b8a158ad68b8a6090c3691e676b3fcc5e403396d in state open)
+  ok   no replacement invoice while the first is unresolved: create-invoice exit 3 (3 = refused by the one-live-invoice-per-order constraint)
+
+> Restart: a new process reconciles the record with TrackPaymentV2 (it never calls SendPaymentV2)
+  $ node src/cli.ts payer reconcile --as customer-payer --payment-hash 1a7c776231b8a01a953e8e31b8a158ad68b8a6090c3691e676b3fcc5e403396d --timeout-s 300
+  TrackPaymentV2 started (record in_flight)
+  TrackPaymentV2: IN_FLIGHT (attempts 1: 1 in flight, 0 succeeded, 0 failed; fee 0 msat) -> record in_flight
+
+> Merchant settles the hold invoice with its stored preimage
+  $ node src/cli.ts receiver settle --as merchant --order ORD-1-1009T191622922
+  invoice update via lookup: ACCEPTED (settle index 0) -> state-updated
+  SettleInvoice called with the stored preimage
+  invoice update via settle-call: SETTLED (settle index 1) -> fulfilled
+  outcome: settled
+  TrackPaymentV2: SUCCEEDED (attempts 1: 0 in flight, 1 succeeded, 0 failed; fee 51000 msat) -> record succeeded
+  ok   merchant settled the hold invoice: settle exit 0
+  outcome: succeeded
+  ok   reconciler reached a terminal state: reconcile exit 0 (0 = succeeded)
+
+> A client repeats the original request for the same operation
+  $ node src/cli.ts payer pay --as customer-payer --operation PAY-ORD-1-1009T191622922 --kind order-payment --invoice lnbcrt250u1p4vj0v8…ju3ahc --fee-limit-msat 1000000
+  outcome: succeeded
+  ok   repeat is answered from the record, not paid again: exit 0, SendPaymentV2 calls in the repeat: 0
+
+> Merchant reconciles its order from the invoice state
+  $ node src/cli.ts receiver reconcile --as merchant --order ORD-1-1009T191622922
+  invoice update via lookup: SETTLED (settle index 1) -> duplicate
+  outcome: 
+
+> Verdict from node state and durable records
+  ok   exactly one payment for the hash on the customer node: ListPayments: 1 payment(s)
+  ok   LND reports it succeeded: status SUCCEEDED
+  ok   one SendPaymentV2 call in total: submissions recorded: 1
+  ok   record matches LND: principal and routing fee: record succeeded, value 25,000 sat / LND 25,000 sat, fee 51 sat / LND 51 sat
+  ok   operation completed exactly once, ledger posted once: operation completed, completion events 1, ledger entries 2
+  ok   merchant: one invoice, settled for the full amount, order fulfilled once: 1 invoice(s), LND state SETTLED, paid 25,000 sat, 1 fulfillment(s), 1 sales entry
+
+VERDICT scenario 1: PASS (13/13 checks passed, computed from node state and durable records)
 ```
 
 ### 2. Settlement notification repeats after a restart
@@ -132,7 +202,73 @@ The listener commits each effect and its cursor in one transaction, so a crash a
 It proves, from the merchant's durable records: the settlement was delivered at least twice, including once by LND after the restart; the order was fulfilled once and the sale posted once (both keyed on payment hash and order ID), for the amount LND reports paid; the cursor caught up.
 
 ```text
-[placeholder: output of scenarios/2-settlement-replay.sh from the release run]
+Scenario 2: settlement notification repeats after a restart
+===========================================================
+  Two orders are paid while the merchant listener runs; a restarted listener receives the second settlement again.
+  lab run: /home/dennis/mw-120/examples/payment-lab/runtime/lab-20261009T191604Z
+  run tag: 1009T191626729
+
+> Start the merchant settlement listener (SubscribeInvoices from its stored cursor)
+  $ node src/cli.ts receiver listen --as merchant --reconcile-interval-s 5
+  SubscribeInvoices from settle index 0
+
+> Create and pay order ORD-2A-1009T191626729 (10,000 sat)
+  $ node src/cli.ts receiver create-invoice --as merchant --order ORD-2A-1009T191626729 --amount-msat 10000000 --memo ORD-2A-1009T191626729
+  invoice update via subscription: OPEN (settle index 0) -> state-updated
+  invoice created with AddInvoice for ORD-2A-1009T191626729
+  outcome: created
+  $ node src/cli.ts payer pay --as customer-payer --operation PAY-ORD-2A-1009T191626729 --kind order-payment --invoice lnbcrt100u1p4vj0v2…2wuvg2 --fee-limit-msat 1000000
+  recorded intent: operation PAY-ORD-2A-1009T191626729 -> payment d9cd96977a4c1ea4...
+  SendPaymentV2 called (submission counted in the record)
+  SendPaymentV2: IN_FLIGHT (attempts 0: 0 in flight, 0 succeeded, 0 failed; fee 0 msat) -> record in_flight
+  SendPaymentV2: IN_FLIGHT (attempts 1: 1 in flight, 0 succeeded, 0 failed; fee 0 msat) -> record in_flight
+  invoice update via subscription: SETTLED (settle index 3) -> fulfilled
+  SendPaymentV2: SUCCEEDED (attempts 1: 0 in flight, 1 succeeded, 0 failed; fee 21000 msat) -> record succeeded
+  outcome: succeeded
+  settle index of ORD-2A-1009T191626729: 3
+
+> Create and pay order ORD-2B-1009T191626729 (12,000 sat)
+  $ node src/cli.ts receiver create-invoice --as merchant --order ORD-2B-1009T191626729 --amount-msat 12000000 --memo ORD-2B-1009T191626729
+  invoice update via subscription: OPEN (settle index 0) -> state-updated
+  invoice created with AddInvoice for ORD-2B-1009T191626729
+  outcome: created
+  $ node src/cli.ts payer pay --as customer-payer --operation PAY-ORD-2B-1009T191626729 --kind order-payment --invoice lnbcrt120u1p4vj0vt…6dfuwq --fee-limit-msat 1000000
+  recorded intent: operation PAY-ORD-2B-1009T191626729 -> payment 105a79cfed570290...
+  SendPaymentV2 called (submission counted in the record)
+  SendPaymentV2: IN_FLIGHT (attempts 0: 0 in flight, 0 succeeded, 0 failed; fee 0 msat) -> record in_flight
+  SendPaymentV2: IN_FLIGHT (attempts 1: 1 in flight, 0 succeeded, 0 failed; fee 0 msat) -> record in_flight
+  invoice update via subscription: SETTLED (settle index 4) -> fulfilled
+  SendPaymentV2: SUCCEEDED (attempts 1: 0 in flight, 1 succeeded, 0 failed; fee 25000 msat) -> record succeeded
+  outcome: succeeded
+
+> Stop the listener
+  settled deliveries of ORD-2B-1009T191626729 so far: 1
+  stored cursor (settle index): 4
+
+> Restart the listener from an older cursor: settle index 3, as it was after ORD-2A-1009T191626729
+  Simulates a listener whose cursor is behind its effects (cursor in another store, a second instance, a restored cursor).
+  $ node src/cli.ts receiver cursor-set --as merchant --settle-index 3
+  $ node src/cli.ts receiver listen --as merchant --reconcile-interval-s 5
+  SubscribeInvoices from settle index 3
+  invoice update via subscription: SETTLED (settle index 4) -> duplicate
+
+> A reconciliation pass looks the invoice up as well (a third path to the same settlement)
+  $ node src/cli.ts receiver reconcile --as merchant --order ORD-2B-1009T191626729
+  invoice update via lookup: SETTLED (settle index 4) -> duplicate
+  outcome: 
+
+> Verdict from the merchant's durable records and LND
+  delivery 2026-10-09T19:16:27.375Z via subscription: OPEN -> state-updated
+  delivery 2026-10-09T19:16:27.713Z via subscription: SETTLED -> fulfilled
+  delivery 2026-10-09T19:16:27.925Z via subscription: SETTLED -> duplicate
+  delivery 2026-10-09T19:16:28.029Z via lookup: SETTLED -> duplicate
+  ok   the settlement was delivered more than once: 3 SETTLED deliveries (subscription, subscription, lookup)
+  ok   the restarted listener received it again from LND: 1 subscription redelivery(ies); outcomes fulfilled, duplicate, duplicate
+  ok   order fulfilled exactly once: order fulfilled, 1 fulfillment row(s)
+  ok   sale posted exactly once, for the amount LND received: 1 ledger entry of 12,000 sat; LND: SETTLED, paid 12,000 sat
+  ok   cursor caught up with the replayed settlement: cursor 4, invoice settle index 4
+
+VERDICT scenario 2: PASS (5/5 checks passed, computed from node state and durable records)
 ```
 
 ### 3. Directional liquidity
@@ -146,7 +282,71 @@ The diagnosis explains: on-chain funds are not Lightning liquidity until they ar
 It proves: the refund failed as LND reports it; on-chain funds and capacity each exceed the amount while the sendable balance does not; the record and operation are failed with nothing posted; after the new channel the retry succeeds, the customer receives the amount once, and the record shows two submissions of one payment with the actual fee.
 
 ```text
-[placeholder: output of scenarios/3-directional-liquidity.sh from the release run]
+Scenario 3: directional liquidity
+=================================
+  A refund fails although the merchant has on-chain funds and channel capacity; the lab explains why, fixes it and retries.
+  lab run: /home/dennis/mw-120/examples/payment-lab/runtime/lab-20261009T191604Z
+  run tag: 1009T191628150
+
+> Merchant liquidity before the refund (merchant read-only credential)
+  on-chain confirmed: 400,000,000 sat
+  channel capacity: 2,000,000 sat
+  sendable from channels: 52,000 sat
+  refund amount: 77,000 sat (sendable + 25000 sat, rounded up)
+
+> Lab precondition, checked with the router's read-only credential (a real sender cannot see this)
+  router outbound toward the customer: 1,048,678 sat
+
+> Customer issues a refund invoice RFD-3-1009T191628150 for 77,000 sat
+  $ node src/cli.ts receiver create-invoice --as customer --order RFD-3-1009T191628150 --amount-msat 77000000 --memo RFD-3-1009T191628150
+  invoice created with AddInvoice for RFD-3-1009T191628150
+  outcome: created
+
+> Merchant refund worker pays it (operation REFUND-RFD-3-1009T191628150)
+  $ node src/cli.ts payer pay --as merchant-refunds --operation REFUND-RFD-3-1009T191628150 --kind refund --invoice lnbcrt770u1p4vj0vv…e7f6ur --fee-limit-msat 1770000
+  recorded intent: operation REFUND-RFD-3-1009T191628150 -> payment b50a0943b396bf3c...
+  SendPaymentV2 called (submission counted in the record)
+  SendPaymentV2: IN_FLIGHT (attempts 0: 0 in flight, 0 succeeded, 0 failed; fee 0 msat) -> record in_flight
+  SendPaymentV2: FAILED (attempts 0: 0 in flight, 0 succeeded, 0 failed; fee 0 msat) -> record failed
+  outcome: failed (FAILURE_REASON_INSUFFICIENT_BALANCE)
+  worker exit: 1 (1 = LND reported the payment failed)
+  ok   the refund failed, as LND reports it: exit 1; LND status FAILED, reason FAILURE_REASON_INSUFFICIENT_BALANCE, 0 HTLC attempt(s)
+
+> Diagnosis from the merchant's own view (read-only credential)
+  $ node src/cli.ts analysis diagnose --node merchant --payer merchant-refunds --operation REFUND-RFD-3-1009T191628150
+  On-chain funds are not Lightning liquidity. The wallet holds 400,000,000 sat confirmed, enough for 77,000 sat, but a Lightning payment can only spend channel balance, and the channels can send at most 52,000 sat. On-chain funds become sendable only after they are moved into a channel (a new channel, or a splice).
+  Capacity is not spendable balance. The 1 channel(s) have 2,000,000 sat capacity in total, split into 72,000 sat on this side (can be sent) and 1,924,530 sat on the peers' side (can be received). A payment moves balance from the local side to the remote side of every channel it crosses.
+    channel 118747255996416: capacity 2,000,000 sat, local 72,000 sat (reserve 20,000 sat, sendable up to 52,000 sat), remote 1,924,530 sat (peer reserve 20,000 sat), commitment fee 2,810 sat paid by the peer, 0 pending HTLC(s)
+  Reserves: each side must keep its channel reserve (20,000 sat on this side in total) and cannot send it; the side that opened a channel also pays its commitment fee from its balance, and LND keeps a further fee buffer for new HTLCs.
+  Sending and receiving need opposite sides. Sending 77,000 sat needs that much local balance here and on the outgoing side of every hop to the destination; receiving needs remote (inbound) balance toward the receiver. This node could still receive up to 1,904,530 sat, which does not help it send.
+  Route check: QueryRoutes: LND error (gRPC code 2): insufficient local balance.
+  LND failed the payment with INSUFFICIENT_BALANCE: the local balance of this node's channels together was below the amount plus fees, so no HTLC was sent and nothing was learned about other nodes.
+  Limits of this diagnosis: a failure names the first node that refused one attempt. The balances of other nodes' channels are not visible from here, a later attempt may fail elsewhere, and balances change between attempts, so one failure does not always locate all the missing liquidity.
+  ok   diagnosis: on-chain funds cover the refund, channel balance does not: on-chain 400,000,000 sat, sendable 52,000 sat, refund 77,000 sat
+  ok   diagnosis: capacity exceeds the refund, directional balance does not: capacity 2,000,000 sat
+  ok   record and operation failed, nothing posted: record failed (FAILURE_REASON_INSUFFICIENT_BALANCE), operation failed
+
+> Operator fix: move 177,000 sat of on-chain funds into a new channel merchant -> router
+  Channel management needs the node operator's authority; the refund worker's pay-only credential cannot open channels.
+  $ lncli openchannel --node_key <router> --local_amt 177000 --sat_per_vbyte 2   # on merchant
+  mined to height: 119
+  sendable from channels now: 223,760 sat
+
+> Retry the same refund: the same invoice and payment hash, allowed because LND reported the first attempt failed
+  $ node src/cli.ts payer retry --as merchant-refunds --operation REFUND-RFD-3-1009T191628150
+  SendPaymentV2 called (submission counted in the record)
+  SendPaymentV2: IN_FLIGHT (attempts 0: 0 in flight, 0 succeeded, 0 failed; fee 0 msat) -> record in_flight
+  SendPaymentV2: IN_FLIGHT (attempts 1: 1 in flight, 0 succeeded, 0 failed; fee 0 msat) -> record in_flight
+  SendPaymentV2: SUCCEEDED (attempts 1: 0 in flight, 1 succeeded, 0 failed; fee 155000 msat) -> record succeeded
+  outcome: succeeded
+
+> Verdict from node state and durable records
+  ok   the retried refund succeeded: retry exit 0; LND payments for the hash: SUCCEEDED
+  ok   the customer received the refund once, in full: customer invoice SETTLED, paid 77,000 sat
+  ok   record shows two submissions of one payment and the actual fee: submissions 2, fee 155 sat / LND 155 sat
+  ok   refund operation completed and posted once: operation completed, 2 ledger entries
+
+VERDICT scenario 3: PASS (8/8 checks passed, computed from node state and durable records)
 ```
 
 ### 4. Multi-attempt settlement
@@ -158,7 +358,54 @@ The amount is set above the local balance of each of the customer's two channels
 It proves: the payment succeeded with at least two successful HTLC attempts and is one payment in ListPayments; the successful shards add up to the invoice amount; LND's total fee equals the sum of the successful attempts' route fees; the books hold one principal entry and one fee entry equal to LND's values; the stored attempts match LND's; the fee equals the router's policy (1,000 msat + 2,000 ppm) applied to each shard; the router's ForwardingHistory shows the same shards and the same total fee; the merchant received the amount once, in several HTLCs.
 
 ```text
-[placeholder: output of scenarios/4-multi-attempt.sh from the release run]
+Scenario 4: multi-attempt settlement
+====================================
+  One payment, several HTLC attempts over two channels; the books show one principal and the real total fee.
+  lab run: /home/dennis/mw-120/examples/payment-lab/runtime/lab-20261009T191604Z
+  run tag: 1009T191629839
+
+> Customer channel balances (customer read-only credential)
+  channel 118747255865344 local: 461,458 sat
+  channel 118747256061952 local: 459,454 sat
+  payment amount: 482,000 sat (above the largest single channel balance, 461,458 sat)
+
+> Merchant creates an invoice for order ORD-4-1009T191629839
+  $ node src/cli.ts receiver create-invoice --as merchant --order ORD-4-1009T191629839 --amount-msat 482000000 --memo ORD-4-1009T191629839
+  invoice created with AddInvoice for ORD-4-1009T191629839
+  outcome: created
+
+> Customer pays it with up to 16 parts
+  $ node src/cli.ts payer pay --as customer-payer --operation PAY-ORD-4-1009T191629839 --kind order-payment --invoice lnbcrt4820u1p4vj0v…gt22z5 --fee-limit-msat 14820000 --max-parts 16
+  recorded intent: operation PAY-ORD-4-1009T191629839 -> payment 9b31820520104cda...
+  SendPaymentV2 called (submission counted in the record)
+  SendPaymentV2: IN_FLIGHT (attempts 0: 0 in flight, 0 succeeded, 0 failed; fee 0 msat) -> record in_flight
+  SendPaymentV2: IN_FLIGHT (attempts 1: 1 in flight, 0 succeeded, 0 failed; fee 0 msat) -> record in_flight
+  SendPaymentV2: IN_FLIGHT (attempts 2: 2 in flight, 0 succeeded, 0 failed; fee 0 msat) -> record in_flight
+  SendPaymentV2: IN_FLIGHT (attempts 2: 1 in flight, 1 succeeded, 0 failed; fee 483000 msat) -> record in_flight
+  SendPaymentV2: SUCCEEDED (attempts 2: 0 in flight, 2 succeeded, 0 failed; fee 966000 msat) -> record succeeded
+  outcome: succeeded
+  worker exit: 0
+  SendPaymentV2 updates received: 5
+
+> Merchant reconciles its order from the invoice state
+  $ node src/cli.ts receiver reconcile --as merchant --order ORD-4-1009T191629839
+  invoice update via lookup: SETTLED (settle index 5) -> fulfilled
+  outcome: 
+
+> Verdict: the books against LND, the router's forwarding log and its fee policy
+  attempt 5: SUCCEEDED, 241,000 sat over 118747255865344 > 118747255996416, fee 483 sat
+  attempt 6: SUCCEEDED, 241,000 sat over 118747256061952 > 118747255996416, fee 483 sat
+  ok   payment succeeded over several HTLC attempts: status SUCCEEDED; 2 attempts: 2 succeeded, 0 failed
+  ok   one payment for the hash: ListPayments: 1
+  ok   principal: the shards add up to the invoice amount: LND value 482,000 sat, sum of successful shards 482,000 sat, invoice 482,000 sat
+  ok   fee: LND's total equals the fees of the successful attempts: LND fee 966 sat, sum over successful attempts 966 sat
+  ok   books: one principal entry and one fee entry, equal to LND: principal 482,000 sat, fee 966 sat, operation completed
+  ok   stored attempts match LND's attempts: 2 stored, 2 in LND
+  ok   fee equals the router's policy applied per shard: 2 x 1000 msat base + 2000 ppm of each shard = 966 sat
+  ok   the router's forwarding log shows the same fees: 2/2 shards found in ForwardingHistory, router earned 966 sat
+  ok   merchant received the amount once, in several HTLCs: invoice SETTLED, paid 482,000 sat in 2 HTLCs, 1 fulfillment(s)
+
+VERDICT scenario 4: PASS (9/9 checks passed, computed from node state and durable records)
 ```
 
 ### 5. Concurrent budget enforcement
@@ -172,7 +419,113 @@ It proves: exactly one of the two concurrent payouts is admitted and the refusal
 The budget is enforced by this service. It does not limit anyone who holds the `pay-only` macaroon itself: a copy of that file can call SendPaymentV2 directly and LND will pay within the node's balances. Enforcement against a leaked credential has to live where the credential is checked, in the wallet or account backend, for example [Lightning Terminal accounts](https://docs.lightning.engineering/lightning-network-tools/lightning-terminal/accounts), which bind a macaroon to a balance that LND enforces. macwarden keeps credentials short-lived, scoped and revocable; it does not cap amounts.
 
 ```text
-[placeholder: output of scenarios/5-concurrent-budget.sh from the release run]
+Scenario 5: concurrent budget enforcement
+=========================================
+  Two concurrent payouts race for one budget; reservations hold while a payment is unresolved and settle to the actual fee.
+  lab run: /home/dennis/mw-120/examples/payment-lab/runtime/lab-20261009T191604Z
+  run tag: 1009T191630581
+
+> Set payout budget PAYOUTS-5-1009T191630581 to 100,000 sat
+  $ node src/cli.ts payer budget-set --as customer-payer --budget PAYOUTS-5-1009T191630581 --limit-msat 100000000
+  budget at start: limit 100,000 sat, held 0 sat, consumed 0 sat, available 100,000 sat
+
+> Payee creates two hold invoices of 60,000 sat: each fits the budget, both together do not
+  $ node src/cli.ts receiver create-invoice --as merchant --order PO-5-1-1009T191630581 --amount-msat 60000000 --memo PO-5-1-1009T191630581 --hold
+  invoice created with AddHoldInvoice for PO-5-1-1009T191630581
+  outcome: created
+  $ node src/cli.ts receiver create-invoice --as merchant --order PO-5-2-1009T191630581 --amount-msat 60000000 --memo PO-5-2-1009T191630581 --hold
+  invoice created with AddHoldInvoice for PO-5-2-1009T191630581
+  outcome: created
+
+> Two worker processes decode their invoices, wait at a barrier, then reserve at the same instant
+  $ node src/cli.ts payer pay --as customer-payer --operation PO-5-1-1009T191630581 --kind payout --invoice lnbcrt600u1p4vj0vw…m5fgag --fee-limit-msat 1000000 --budget PAYOUTS-5-1009T191630581 --wait-for-go
+  $ node src/cli.ts payer pay --as customer-payer --operation PO-5-2-1009T191630581 --kind payout --invoice lnbcrt600u1p4vj0vw…2ydxde --fee-limit-msat 1000000 --budget PAYOUTS-5-1009T191630581 --wait-for-go
+  [worker 1] recorded intent: operation PO-5-1-1009T191630581 -> payment 85da82f5e9147f08...
+  [worker 2] refused: budget PAYOUTS-5-1009T191630581 has 39000000 msat available, 61000000 msat requested
+  [worker 1] SendPaymentV2 called (submission counted in the record)
+  [worker 1] SendPaymentV2: IN_FLIGHT (attempts 0: 0 in flight, 0 succeeded, 0 failed; fee 0 msat) -> record in_flight
+  [worker 1] SendPaymentV2: IN_FLIGHT (attempts 1: 1 in flight, 0 succeeded, 0 failed; fee 0 msat) -> record in_flight
+  ok   exactly one of the two concurrent payouts was admitted: admitted: worker 1, refused: worker 2
+  ok   refusal follows from the reservation arithmetic: requested 61,000 sat, available 39,000 sat
+
+> Kill the admitted worker while its HTLC is held: its payment is unresolved
+  budget while unresolved: limit 100,000 sat, held 61,000 sat, consumed 0 sat, available 39,000 sat
+  ok   the reservation stays held while the payment is unresolved: held 61,000 sat, consumed 0 sat
+
+> A small payout (10,000 sat) fits; the payee cancels it, so LND reports it failed
+  $ node src/cli.ts receiver create-invoice --as merchant --order PO-5-3-1009T191630581 --amount-msat 10000000 --memo PO-5-3-1009T191630581 --hold
+  invoice created with AddHoldInvoice for PO-5-3-1009T191630581
+  outcome: created
+  $ node src/cli.ts payer pay --as customer-payer --operation PO-5-3-1009T191630581 --kind payout --invoice lnbcrt100u1p4vj0vs…nrlzhc --fee-limit-msat 1000000 --budget PAYOUTS-5-1009T191630581
+  recorded intent: operation PO-5-3-1009T191630581 -> payment 5c3c5f4bae7d57f7...
+  SendPaymentV2 called (submission counted in the record)
+  SendPaymentV2: IN_FLIGHT (attempts 0: 0 in flight, 0 succeeded, 0 failed; fee 0 msat) -> record in_flight
+  SendPaymentV2: IN_FLIGHT (attempts 1: 1 in flight, 0 succeeded, 0 failed; fee 0 msat) -> record in_flight
+  budget with the small payout in flight: limit 100,000 sat, held 72,000 sat, consumed 0 sat, available 28,000 sat
+  $ node src/cli.ts receiver cancel --as merchant --order PO-5-3-1009T191630581
+  CancelInvoice called
+  invoice update via lookup: CANCELED (settle index 0) -> state-updated
+  outcome: canceled
+  SendPaymentV2: IN_FLIGHT (attempts 1: 1 in flight, 0 succeeded, 0 failed; fee 0 msat) -> record in_flight
+  SendPaymentV2: FAILED (attempts 1: 0 in flight, 0 succeeded, 1 failed; fee 0 msat) -> record failed
+  outcome: failed (FAILURE_REASON_INCORRECT_PAYMENT_DETAILS)
+  budget after the failure: limit 100,000 sat, held 61,000 sat, consumed 0 sat, available 39,000 sat
+  ok   a failed payment releases its reservation: small payout exit 1 (1 = failed per LND), available back to 39,000 sat
+
+> A payout of 38,500 sat + 1,000 sat allowance while the first is still unresolved
+  $ node src/cli.ts receiver create-invoice --as merchant --order PO-5-4-1009T191630581 --amount-msat 38500000 --memo PO-5-4-1009T191630581
+  invoice created with AddInvoice for PO-5-4-1009T191630581
+  outcome: created
+  $ node src/cli.ts payer pay --as customer-payer --operation PO-5-4-1009T191630581 --kind payout --invoice lnbcrt385u1p4vj0v3…0t7mj3 --fee-limit-msat 1000000 --budget PAYOUTS-5-1009T191630581
+  refused: budget PAYOUTS-5-1009T191630581 has 39000000 msat available, 39500000 msat requested
+  ok   refused while the held reservation counts in full: exit 3; needs 39,500 sat, available 39,000 sat
+
+> Restart: reconcile the first payout with TrackPaymentV2 while the payee settles it
+  $ node src/cli.ts payer reconcile --as customer-payer --payment-hash 85da82f5e9147f081859f240f19e24d25d1f5b078b0a50ff2bfa82adbec38d57 --timeout-s 300
+  TrackPaymentV2 started (record in_flight)
+  TrackPaymentV2: IN_FLIGHT (attempts 1: 1 in flight, 0 succeeded, 0 failed; fee 0 msat) -> record in_flight
+  $ node src/cli.ts receiver settle --as merchant --order PO-5-1-1009T191630581
+  invoice update via lookup: ACCEPTED (settle index 0) -> state-updated
+  SettleInvoice called with the stored preimage
+  invoice update via settle-call: SETTLED (settle index 6) -> fulfilled
+  outcome: settled
+  TrackPaymentV2: SUCCEEDED (attempts 1: 0 in flight, 1 succeeded, 0 failed; fee 121000 msat) -> record succeeded
+  outcome: succeeded
+  budget after settlement: limit 100,000 sat, held 0 sat, consumed 60,121 sat, available 39,879 sat
+  ok   on success the reservation becomes principal + actual fee: consumed 60,121 sat = 60,000 sat + fee 121 sat; 879 sat of the allowance released
+
+> The same payout request again, now that the reservation reflects the actual fee
+  needs 39,500 sat, available 39,879 sat: fits
+  $ node src/cli.ts payer pay --as customer-payer --operation PO-5-4-1009T191630581 --kind payout --invoice lnbcrt385u1p4vj0v3…0t7mj3 --fee-limit-msat 1000000 --budget PAYOUTS-5-1009T191630581
+  recorded intent: operation PO-5-4-1009T191630581 -> payment aee3b4a21660c09d...
+  SendPaymentV2 called (submission counted in the record)
+  SendPaymentV2: IN_FLIGHT (attempts 0: 0 in flight, 0 succeeded, 0 failed; fee 0 msat) -> record in_flight
+  SendPaymentV2: IN_FLIGHT (attempts 1: 1 in flight, 0 succeeded, 0 failed; fee 0 msat) -> record in_flight
+  SendPaymentV2: SUCCEEDED (attempts 1: 0 in flight, 1 succeeded, 0 failed; fee 78000 msat) -> record succeeded
+  outcome: succeeded
+  ok   admission follows the budget arithmetic: exit 0, expected 0 (paid)
+
+> Release the refused payout's invoice
+  $ node src/cli.ts receiver cancel --as merchant --order PO-5-2-1009T191630581
+  CancelInvoice called
+  invoice update via lookup: CANCELED (settle index 0) -> state-updated
+  outcome: canceled
+
+> Verdict from LND and the durable records
+  ok   LND: the admitted payout paid once, the refused one never sent: admitted: SUCCEEDED; refused: 0 payment(s)
+  ok   LND: the canceled payout failed; the near-limit payout matches its admission: small: FAILED; near-limit: SUCCEEDED
+  budget at the end: limit 100,000 sat, held 0 sat, consumed 98,699 sat, available 1,301 sat
+  ok   budget consumed equals what LND actually paid, within the limit: consumed 98,699 sat, LND paid 98,699 sat including fees, limit 100,000 sat
+  budget refusals recorded: 2
+
+> What this budget does not do
+  The budget is enforced by this service, in its own database. It limits what this service sends. It does not limit
+  anyone who holds the pay-only macaroon itself: a copy of that file can call SendPaymentV2 directly, and LND will pay
+  within the node's balances. Enforcement against a leaked credential has to live where the credential is checked:
+  in the wallet or account backend, for example Lightning Terminal accounts, which bind a macaroon to a spending
+  balance that LND enforces. macwarden keeps such credentials short-lived, scoped and revocable; it does not cap amounts.
+
+VERDICT scenario 5: PASS (10/10 checks passed, computed from node state and durable records)
 ```
 
 ## Design decisions
