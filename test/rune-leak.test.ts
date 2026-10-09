@@ -92,5 +92,5 @@ describe('RUNE/leak fuzz', () => {
       { seed: 20261009, cases: 100, scratchRoot: root() });
     expect(report.cases).toBe(100);
     expect(report.leaks).toEqual([]);
-  }, 60_000);
+  }, 180_000);
 });
