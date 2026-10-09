@@ -13,6 +13,7 @@ import { renderChunks, type OutputResult } from '../src/output/index.js';
 import { readBounded, scan } from '../src/scan/index.js';
 import { knownSecretRedactor } from '../src/scan/redact.js';
 import { childEnvironment } from './helpers/environment.js';
+import { compare } from './helpers/growth.js';
 
 // Scale and robustness audit of 2026-10-07 (owner-delegated fixes). Titles use the
 // SCALE/ prefix: no checkpoint contract owns these cases. Every timing bound is several
@@ -172,22 +173,40 @@ it('SCALE/render-fast-path printable ASCII shorter than 36 characters is never c
   expect(checked).toBeGreaterThan(3000);
 });
 
-it('SCALE/render-speed 100,000 findings render as JSON well under the old 0.3 ms per finding', () => {
-  const findings = Array.from({ length: 100_000 }, (_, i) => ({
-    path: `/srv/app/config-${i % 400}/settings-${i}.env`, line: i + 1, column: 1, kind: 'undecodable-candidate',
-    fingerprint: fp(String(i)), grade: null, rootKeyId: null, permissions: null, caveats: null, warnings: [], unassessed: [],
+// Rendering ran full credential recognition on every string: paths, kinds and fingerprints
+// alike (11.7 s for 100,000 findings, against 2.8 s once short printable ASCII skips
+// recognition and repeated strings are memoized). Both costs are linear in the findings, so
+// the bound is relative to a reference workload timed in the same process: serializing the
+// same findings with recognition run on every string, which is what rendering did before.
+// Measured on Linux with Node 24, idle and with every core of a four-core slice busy:
+// rendering takes 0.7 times the reference now, 2.0 times before the fix.
+function findingsResult(count: number, tag: string): OutputResult {
+  // Every round gets new strings, so the render memo never sees a path it rendered before.
+  const findings = Array.from({ length: count }, (_, i) => ({
+    path: `/srv/app/config-${i % 400}/settings-${tag}${i}.env`, line: i + 1, column: 1, kind: 'undecodable-candidate',
+    fingerprint: fp(tag + String(i)), grade: null, rootKeyId: null, permissions: null, caveats: null, warnings: [], unassessed: [],
   }));
-  const result = { command: 'scan', ok: true, warnings: [], error: null, result: { findings, skipped: [],
+  return { command: 'scan', ok: true, warnings: [], error: null, result: { findings, skipped: [],
     summary: { filesScanned: 1, filesSkipped: 0, dropped: 0, ignored: 0, findings: findings.length, distinct: findings.length,
       byGrade: { ADMIN: 0, SPEND: 0, OPERATE: 0, RECEIVE: 0, READ: 0, UNASSESSED: 0, NWC: 0, UNDECODABLE: findings.length } },
     failOn: null } } as unknown as OutputResult;
-  const started = performance.now();
+}
+
+it('SCALE/render-speed findings render as JSON well under the cost of recognising every string', async () => {
+  const count = 25_000;
+  const reference = findingsResult(count, 'reference');
+  // One fresh result per render: the warm-up and three timed rounds.
+  const results = Array.from({ length: 4 }, (_, round) => findingsResult(count, `r${round}-`));
+  const recognise = (_key: string, value: unknown) => typeof value === 'string' ? redactEncodedCredentials(value) : value;
   let length = 0;
-  for (const chunk of renderChunks(result, 'json')) length += chunk.length;
-  // Measured under load: 2.8 s now, 11.7 s before.
-  expect(performance.now() - started).toBeLessThan(7_000);
-  expect(length).toBeGreaterThan(15_000_000);
-});
+  const timing = await compare(() => JSON.stringify(reference, recognise, 2), () => {
+    length = 0;
+    for (const chunk of renderChunks(results.shift()!, 'json')) length += chunk.length;
+  });
+  console.log(`SCALE/render-speed ${count} findings, recognising every string against render: ${timing.summary}`);
+  expect(length).toBeGreaterThan(count * 150);
+  expect(timing.ratio, timing.summary).toBeLessThan(1.2);
+}, 120_000);
 
 it('SCALE/read-bounded a small file gets a small buffer; growth and the limit are still honoured', async () => {
   const handle = (content: Buffer) => {

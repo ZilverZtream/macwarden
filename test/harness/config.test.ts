@@ -87,6 +87,7 @@ it('CP-001/B12 runs the pinned CI matrix and commands', () => {
   expect(triggers).toMatch(/^on:\n {2}push:\n {4}branches:/);
   expect(listFor(triggers, 'branches')).toEqual(['main']);
   expect(triggers).toMatch(/^ {2}pull_request:$/m);
+  expect(triggers).toMatch(/^ {2}workflow_dispatch:$/m);
   expect(blockFor(yaml, 'permissions', 0)).toBe('permissions:\n  contents: read');
 
   const jobs = blockFor(yaml, 'jobs', 0);

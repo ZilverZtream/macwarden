@@ -9,6 +9,7 @@ import { run as respond } from '../src/commands/respond.js';
 import { Secret } from '../src/secret.js';
 import { childEnvironment } from './helpers/environment.js';
 import { entry, fixture, oldId, ownId, root } from './helpers/cp038-online.js';
+import { sddlTrustee } from './helpers/sddl.js';
 
 // Real Windows proof for RO-1 and RO-2. The folder grants Everyone inheritable read and
 // change-permissions (WRITE_DAC), the precondition under which a second principal could
@@ -67,10 +68,10 @@ it('RO-1/owner-only-from-creation the first DACL any process can observe on a ne
     await reserved.reservation.write(new Secret(SYNTHETIC));
     const first = (await line(/^(FIRST|TIMEOUT)/)).replace(/^FIRST /, '');
     expect(first).toMatch(/^D:P/);
-    expect(aces(first)).toEqual([`(A;;FA;;;${sid})`]);
+    expect(aces(first)).toEqual([`(A;;FA;;;${sddlTrustee(sid)})`]);
     expect(reserved.aclWarning).toBe(false);
     const final = saved(out, dir);
-    expect(final).toContain('D:P'); expect(aces(final)).toEqual([`(A;;FA;;;${sid})`]);
+    expect(final).toContain('D:P'); expect(aces(final)).toEqual([`(A;;FA;;;${sddlTrustee(sid)})`]);
     expect(readFileSync(out).equals(SYNTHETIC)).toBe(true);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }, 30_000);

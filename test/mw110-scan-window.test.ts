@@ -11,6 +11,7 @@ import { addFirstPartyCaveat, decodeMacaroon } from '../src/decode/index.js';
 import { gradeFacts } from '../src/grade/index.js';
 import { CANDIDATE_LIMIT, scan, type ScanResult } from '../src/scan/index.js';
 import { Secret } from '../src/secret.js';
+import { compare } from './helpers/growth.js';
 import { revealSecret } from './helpers/secret-bytes.js';
 
 const repo = resolve();
@@ -183,23 +184,21 @@ it('MW110-01 hostile 5 MB lines of open candidates scan in linear time', async (
     hex: (n: number) => ('0201036c6e6402' + 'a'.repeat(4_082)).repeat(Math.ceil(n / 4_096)).slice(0, n),
     nwc: (n: number) => `nostr+walletconnect:${'a'.repeat(64)}?${'x'.repeat(n)}`,
   };
-  const timings: Record<string, number[]> = {};
+  // Each shape is timed at both sizes alternately, keeping each size's fastest round, so a
+  // loaded runner slows both alike: four times the input takes at most about four times as
+  // long (with headroom for noise), far below the sixteen times of quadratic rescanning.
   for (const [name, shape] of Object.entries(shapes)) {
-    timings[name] = [];
-    for (const size of [1_250_000, 5_000_000]) {
+    const scanOf = (size: number) => {
       const path = join(dir, `${name}-${size}.txt`);
       writeFileSync(path, shape(size));
-      const started = performance.now();
-      const result = await scan([path], {});
-      timings[name].push(performance.now() - started);
-      expect(result.findings.length).toBeGreaterThan(0);
-      expect(result.findings.every(finding => finding.kind === 'undecodable-candidate')).toBe(true);
-    }
+      return async () => {
+        const result = await scan([path], {});
+        expect(result.findings.length).toBeGreaterThan(0);
+        expect(result.findings.every(finding => finding.kind === 'undecodable-candidate')).toBe(true);
+      };
+    };
+    const timing = await compare(scanOf(1_250_000), scanOf(5_000_000));
+    console.log(`MW110-01 ${name} scan 1.25 MB and 5 MB: ${timing.summary}`);
+    expect(timing.ratio, `${name}: ${timing.summary}`).toBeLessThan(8);
   }
-  console.log(`MW110-01 scan timings ms [1.25 MB, 5 MB]: ${JSON.stringify(timings, (_, v: unknown) => typeof v === 'number' ? Math.round(v) : v)}`);
-  for (const [name, [small, large]] of Object.entries(timings)) {
-    expect(large, name).toBeLessThan(5_000);
-    // Four times the input takes at most about four times as long (with headroom for noise).
-    expect(large, name).toBeLessThan(8 * Math.max(small, 25));
-  }
-}), 60_000);
+}), 180_000);

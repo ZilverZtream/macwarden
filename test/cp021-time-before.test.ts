@@ -6,6 +6,10 @@ import { join, resolve } from 'node:path';
 import { expect, it } from 'vitest';
 import { Secret } from '../src/secret.js';
 import { findLeaks } from "./helpers/leak-check.js";
+import { isolateLeakSuite } from './helpers/leak-suite.js';
+
+// Leak checks scan this file's own sentinels, not every credential the whole run registered.
+isolateLeakSuite('cp021');
 
 type Facts = { location: string | null; rootKeyId: bigint; permissions: string[];
   caveats: { type: string; value: string; expired?: boolean }[]; fingerprint: string };

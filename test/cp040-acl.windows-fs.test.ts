@@ -22,6 +22,7 @@ vi.mock('node:child_process', async importOriginal => {
   return { ...real, execFile: tracked };
 });
 import { run } from '../src/commands/bake/index.js';
+import { sddlTrustee } from './helpers/sddl.js';
 
 it('CP-040/B10-strict-platform Windows executes the System32 owner-only helper and persists an owner-only output ACL', async () => {
   const f = fixture(); executions.length = 0; argumentLists.length = 0;
@@ -49,7 +50,7 @@ it('CP-040/B10-strict-platform Windows executes the System32 owner-only helper a
   expect(whoami.status).toBe(0);
   const sid = whoami.stdout.trim().split(',').at(-1)!.replaceAll('"', '');
   expect(sid).toMatch(/^S-1-5-21-\d+(?:-\d+)+$/);
-  expect(saved.match(/\(A;[^)]*\)/g)![0]).toBe(`(A;;FA;;;${sid})`);
+  expect(saved.match(/\(A;[^)]*\)/g)![0]).toBe(`(A;;FA;;;${sddlTrustee(sid)})`);
 }, 20000);
 
 it('CP-040/A8-clean-suite Windows refuses an unsafe existing fixture copy destination before any Docker call', async () => {

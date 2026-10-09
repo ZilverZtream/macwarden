@@ -17,12 +17,21 @@ function canonicalSid(identity) {
   return authority <= 0xffffffffffffn && subAuthorities.every(value => value <= 0xffffffffn);
 }
 
-/** Windows PowerShell 5.1 with only its own module path: a PowerShell 7 parent's PSModulePath makes
- * Get-Acl fail to load Microsoft.PowerShell.Security (as on GitHub's Windows runners). */
+/** Windows PowerShell 5.1 in a minimal environment with only its own module path, as the product's
+ * System32 helpers run. Inherited settings broke it on GitHub's Windows runners: a PowerShell 7
+ * parent's module path, or the test run's private profile directories, left Get-Acl unable to
+ * load Microsoft.PowerShell.Security. Environment names are case-insensitive on Windows, so
+ * nothing is copied that could duplicate PSModulePath under another spelling. */
 function windowsPowerShellEnvironment() {
   const root = process.env.SystemRoot || 'C:\\Windows';
-  return { ...process.env, PSModulePath: win32.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules') };
+  const temp = process.env.TEMP || process.env.TMP || win32.join(root, 'Temp');
+  return { SystemRoot: root, WINDIR: root, TEMP: temp, TMP: temp, PATH: win32.join(root, 'System32'),
+    PSModulePath: win32.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules') };
 }
+
+// Loads the cmdlets the scripts use by name from the pinned module path. Autoloading them first
+// analyses every module on the path, which took 18 to 33 s on GitHub's Windows runners.
+const importModules = 'Import-Module Microsoft.PowerShell.Utility, Microsoft.PowerShell.Security;';
 
 async function windowsIdentityAndAcl(directory, restrict = false) {
   // Decode path data rather than inserting user content into executable script.
@@ -30,7 +39,7 @@ async function windowsIdentityAndAcl(directory, restrict = false) {
   // borrowed directories are inspected on every call without changing the ACL.
   const encodedPath = Buffer.from(directory, 'utf16le').toString('base64');
   const script = [
-    "$ErrorActionPreference='Stop'; try {",
+    "$ErrorActionPreference='Stop'; try {", importModules,
     `$directory=[System.Text.Encoding]::Unicode.GetString([System.Convert]::FromBase64String('${encodedPath}'));`,
     '$user=[System.Security.Principal.WindowsIdentity]::GetCurrent().User;',
     ...(restrict ? [
@@ -100,7 +109,7 @@ export async function assertPrivateDirectories(directories) {
   if (process.platform === 'win32') {
     const encodedPaths = Buffer.from(JSON.stringify(paths), 'utf16le').toString('base64');
     const script = [
-      "$ErrorActionPreference='Stop'; try {",
+      "$ErrorActionPreference='Stop'; try {", importModules,
       `$paths=ConvertFrom-Json -InputObject ([System.Text.Encoding]::Unicode.GetString([System.Convert]::FromBase64String('${encodedPaths}')));`,
       '$results=@(for ($index=0; $index -lt $paths.Count; $index++) {',
       '$directory=$paths[$index]; $user=[System.Security.Principal.WindowsIdentity]::GetCurrent().User;',

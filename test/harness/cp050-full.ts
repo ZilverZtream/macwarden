@@ -18,6 +18,11 @@ function files(root: string): string[] {
     entry.isDirectory() ? files(join(root, entry.name)) : [join(root, entry.name)]);
 }
 
+// Bounds one synthetic full validation (about a dozen npm and Vitest processes): 5 to 30 s
+// depending on the machine. The limit only stops a hung run; every check failure ends the run
+// with exit 1 long before it, and a timeout is reported as such.
+export const FULL_CONTROL_TIMEOUT_MS = 150_000;
+
 export function fullControl(variant: 'complete' | 'changed-candidate' | 'selective-as-full' | 'metadata-leak' | 'oracle-config-exclusion', producerRoot = resolve()) {
   prepareFullControl(variant, producerRoot)();
 }
@@ -85,7 +90,7 @@ for(const args of [['add','src/input.ts'],['commit','-m','Private input mutation
   const inputs = new Map(git('ls-files').split(/\r?\n/).map(file => [file, digest(join(root, file))]));
   expect(git('status', '--porcelain'), 'Private inputs including selected metadata must be committed before validation').toBe('');
   const result = spawnSync(process.execPath, [resolve(producerRoot, 'scripts/full-validation.mjs'), '--root', root, '--evidence-dir', evidence],
-    { cwd: resolve(), env: childEnvironment(), encoding: 'utf8', timeout: 30_000, maxBuffer: 2_000_000 });
+    { cwd: resolve(), env: childEnvironment(), encoding: 'utf8', timeout: FULL_CONTROL_TIMEOUT_MS, maxBuffer: 2_000_000 });
   writeFileSync(join(scratch, 'captured-output.txt'), result.stdout + result.stderr);
   // The selected-case metadata is a private input. Remove the planted source
   // after execution so the caller's standing scan examines retained output.
@@ -97,9 +102,10 @@ for(const args of [['add','src/input.ts'],['commit','-m','Private input mutation
   expect(findLeaks({ root: process.cwd(), sentinels: 'test/sentinels.json', sentinelDir: process.env.MACWARDEN_SENTINEL_DIR,
     paths: variant === 'metadata-leak' ? [join(scratch, 'captured-output.txt'), ...(existsSync(evidence) ? [evidence] : [])] : [scratch],
     testTmp: variant === 'metadata-leak' ? undefined : scratch, commandOutput: result.stdout + result.stderr })).toBeNull();
-  expect(result.error).toBeUndefined();
+  expect(result.error, `${variant} public full validation did not finish (${result.error?.message}); output tail:
+${(result.stdout + result.stderr).slice(-1500)}`).toBeUndefined();
   if (variant !== 'oracle-config-exclusion') expect(result.status, `${variant} public full validation exit; output tail:
-${(result.stdout + result.stderr).slice(-1500)}`).toBe(variant === 'complete' ? 0 : 1);
+${(result.stdout + result.stderr).slice(-4000)}`).toBe(variant === 'complete' ? 0 : 1);
   expect(existsSync(evidence), 'Public CLI must retain its original attempt evidence').toBe(true);
   const artifacts = files(evidence).filter(path => path.endsWith('full-validation.json'));
   expect(artifacts).toHaveLength(1);

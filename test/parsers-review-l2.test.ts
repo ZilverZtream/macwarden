@@ -8,23 +8,35 @@ import { render } from '../src/output/index.js';
 import { replaceNwc } from '../src/scan/nwc-match.js';
 import { nwc } from '../src/scan/patterns.js';
 import { collectNwcSecrets, redactDecoded, redactPath } from '../src/scan/redact.js';
+import { LINEAR_4X, growth } from './helpers/growth.js';
 
 const prefix = `nostr+walletconnect:${'a'.repeat(64)}?`;
-const MIB = 1024 * 1024;
-const elapsed = (work: () => unknown): number => { const start = performance.now(); work(); return performance.now() - start; };
+const KIB = 1024;
 
-it('PARSERS-L2/1 MiB of repeated NWC prefixes is redacted and collected in linear time', () => {
-  // Before: collectNwcSecrets 5 to 6 s, render 11.7 s. The remaining cost is the other
-  // (linear) credential recognisers, which run on the same text.
-  const text = prefix.repeat(Math.ceil(MIB / prefix.length));
-  const secrets = new Set<string>();
-  expect(elapsed(() => collectNwcSecrets(text, secrets))).toBeLessThan(500);
-  expect(secrets.size).toBe(0);
-  expect(elapsed(() => expect(redactPath(text)).toBe(text))).toBeLessThan(4_000);
-  const json = elapsed(() => render({ schema: 1, command: 'inspect', ok: true, warnings: [], error: null,
-    result: { caveat: text } } as never, 'json'));
-  expect(json).toBeLessThan(4_000);
-});
+// Cost is measured as growth, not against a fixed limit, so a slow runner cannot fail it and a
+// fast one cannot hide a regression: four times the text must cost well under the sixteen times
+// that quadratic backtracking needs.
+it('PARSERS-L2/repeated NWC prefixes four times longer are redacted and collected at about four times the cost', async () => {
+  // Before: at 1 MiB collectNwcSecrets took 5 to 6 s and render 11.7 s, growing with the
+  // square of the text. The remaining cost is the other (linear) credential recognisers,
+  // which run on the same text.
+  const repeated = (size: number) => prefix.repeat(Math.ceil(size / prefix.length));
+  const collect = (size: number) => {
+    const text = repeated(size);
+    return () => { const secrets = new Set<string>(); collectNwcSecrets(text, secrets); expect(secrets.size).toBe(0); };
+  };
+  const redact = (size: number) => { const text = repeated(size); return () => expect(redactPath(text)).toBe(text); };
+  const json = (size: number) => {
+    const text = repeated(size);
+    return () => render({ schema: 1, command: 'inspect', ok: true, warnings: [], error: null,
+      result: { caveat: text } } as never, 'json');
+  };
+  for (const [name, work, n] of [['collect', collect, 1024 * KIB], ['redact', redact, 64 * KIB], ['render', json, 64 * KIB]] as const) {
+    const timing = await growth(work, n, 4, 5);
+    console.log(`PARSERS-L2 ${name} ${n / KIB} KiB and ${4 * n / KIB} KiB: ${timing.summary}`);
+    expect(timing.ratio, `${name}: ${timing.summary}`).toBeLessThan(LINEAR_4X);
+  }
+}, 120_000);
 
 it('PARSERS-L2/a secret after many repeated prefixes is still found and redacted', () => {
   const secret = randomBytes(32).toString('hex');

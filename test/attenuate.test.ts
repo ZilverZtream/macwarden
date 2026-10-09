@@ -9,6 +9,7 @@ import { run as attenuate } from '../src/commands/attenuate.js';
 import { run as inspect } from '../src/commands/inspect.js';
 import { canonicalCidr, canonicalIp } from '../src/caveat-address.js';
 import { render } from '../src/output/index.js';
+import { sddlTrustee } from './helpers/sddl.js';
 
 // Owner request 2026-10-07: offline attenuation. Titles use the ATTENUATE/ prefix
 // because no checkpoint contract covers this command yet.
@@ -154,7 +155,7 @@ it('ATTENUATE/A6-owner-only output is created owner-only through the shared bake
     expect(sid).toMatch(/^S-1-\d+(?:-\d+)+$/);
     const text = readFileSync(acl).toString('utf16le');
     expect(text).toContain('D:P'); // protected: nothing inherited from the folder
-    expect(text.match(/\(A;[^)]*\)/g)).toEqual([`(A;;FA;;;${sid})`]);
+    expect(text.match(/\(A;[^)]*\)/g)).toEqual([`(A;;FA;;;${sddlTrustee(sid)})`]);
   } else expect(statSync(out).mode & 0o777).toBe(0o600);
 }));
 

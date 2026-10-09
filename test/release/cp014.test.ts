@@ -4,6 +4,9 @@ import { afterAll, expect, it } from 'vitest';
 import { artifact, installedCommand, relativePaths, repo, retainArtifactBytes } from './artifact.js';
 
 afterAll(retainArtifactBytes);
+// The first test to call artifact() packs, installs and cleanly rebuilds the package: about 1 to
+// 2.5 minutes on a two-core CI runner. The limit only stops a hang.
+const ARTIFACT_TIMEOUT_MS = 300_000;
 
 type Package = { name: string; version: string; license: string; engines: { node: string };
   dependencies?: Record<string, string>; files: string[]; scripts: Record<string, string>;
@@ -76,7 +79,7 @@ it('CP-014/B1 dry-run and extracted tarball have exactly the offline allow-list'
     || /^schemas\/output\/[a-z-]+\.schema\.json$/.test(path))).toBe(true);
   expect(actual.some(path => /^(test|src|scripts|\.ratchet|\.github|archive|docs)\//.test(path)))
     .toBe(false);
-}, 120_000);
+}, ARTIFACT_TIMEOUT_MS);
 
 it('CP-014/B2 installed tarball runs version inspect scan and dormant inventory', () => {
   const version = installedCommand(['--version']);
@@ -103,7 +106,7 @@ it('CP-014/B2 installed tarball runs version inspect scan and dormant inventory'
   } finally { rmSync(tree, { recursive: true, force: true }); }
 
   expect(installedCommand(['inventory']).status).toBe(2);
-}, 120_000);
+}, ARTIFACT_TIMEOUT_MS);
 
 it('CP-014/B2 installed command detects a broken npm shim and preserves literal arguments', () => {
   const a = artifact();
@@ -122,7 +125,7 @@ it('CP-014/B2 installed command detects a broken npm shim and preserves literal 
     expect(result.stdout.replace(/\r\n/g, '\n')).toBe(`${args.join('\n')}\n`);
     expect(result.stderr.trim()).toBe('broken shim control');
   } finally { writeFileSync(shim, original); }
-}, 120_000);
+}, ARTIFACT_TIMEOUT_MS);
 
 it('CP-014/B3 package metadata fixes version dependencies allow-list and future provenance', () => {
   const pkg = packageJson();
@@ -156,16 +159,25 @@ it('CP-014/B4 dormant release workflow pins trusted publishing and scoped token 
   expect(entries.filter(job => /^\s+id-token:\s*write\s*$/m.test(job))).toHaveLength(1);
 });
 
-it('CP-014/B5 dormant CI retains triggers pins and future three-OS jobs', () => {
+it('CP-014/B5 CI keeps its triggers and pins and tests the supported platforms and Node lines', () => {
   const text = workflow('ci.yml');
-  const push = block(block(text, 'on', 0), 'push', 2);
+  const triggers = block(text, 'on', 0);
+  const push = block(triggers, 'push', 2);
   expect(push).toContain('main');
-  expect(block(text, 'on', 0)).toMatch(/^ {2}pull_request:/m);
+  expect(triggers).toMatch(/^ {2}pull_request:/m);
+  expect(triggers).toMatch(/^ {2}workflow_dispatch:/m);
   checkDefaultPermissions(text);
   checkPinnedUses(text);
   const entries = Object.values(jobs(text));
-  expect(entries.some(job => ['ubuntu-latest', 'macos-latest', 'windows-latest']
-    .every(platform => job.includes(platform)))).toBe(true);
+  // README and CONTRIBUTING: Linux and Windows are tested before each release; macOS is not part
+  // of release validation. Both engine floors and both current Node lines run on Linux.
+  const unit = entries.filter(job => ['ubuntu-latest', 'windows-latest'].every(platform => job.includes(platform)));
+  expect(unit).toHaveLength(1);
+  for (const node of ['22.23.2', '22.x', '24.18.1', '24.x']) expect(unit[0]).toContain(`'${node}'`);
+  const steps = ['npm ci', 'npm run lint', 'npm run build', 'npm test'].map(step => unit[0].indexOf(`run: ${step}`));
+  expect(steps.every(at => at >= 0)).toBe(true);
+  expect([...steps].sort((a, b) => a - b)).toEqual(steps);
+  expect(text).not.toMatch(/macos/i);
   expect(entries.some(job => job.includes('ubuntu-latest') &&
     job.indexOf('npm run fixture:up') >= 0 &&
     job.indexOf('npm run fixture:up') < job.indexOf('npm run test:oracle') &&
@@ -203,7 +215,7 @@ it('CP-014/B6 release documents give runnable offline examples and accurate loca
     const result = installedCommand([verb, ...args]);
     expect(result.status, `${verb} README example must not exit 2`).not.toBe(2);
   }
-}, 120_000);
+}, ARTIFACT_TIMEOUT_MS);
 
 it('CP-014/B16 prepack replaces stale dist with bytes from an independent clean build', () => {
   const a = artifact();
@@ -216,4 +228,4 @@ it('CP-014/B16 prepack replaces stale dist with bytes from an independent clean 
   expect(result.status).toBe(0);
   expect((JSON.parse(result.stdout) as { result: { grade: string } }).result.grade)
     .toBe(addInvoice.expectedGrade);
-}, 120_000);
+}, ARTIFACT_TIMEOUT_MS);
