@@ -9,7 +9,7 @@
 // inside the container with `docker compose exec`, so the fixture cannot reach or be reached from
 // a real node, and it never collides with the LND fixture shards. Every rune it creates is
 // disposable and has authority only on this node.
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -36,6 +36,57 @@ export function cli(method, params = {}) {
   try { parsed = JSON.parse(text); }
   catch { return { error: { message: `${text}\n${run.stderr ?? ''}`.trim(), code: null } }; }
   return run.status === 0 ? parsed : { error: parsed };
+}
+
+/**
+ * A JSON-RPC session on the fixture node's socket (socat inside the container, no port), for
+ * campaigns of thousands of calls: `call(method, params)` resolves to { result } or { error }
+ * exactly as Core Lightning answers. Requests are answered in order; close() ends the session.
+ */
+export function session() {
+  const child = spawn('docker', ['compose', '-f', compose, '-p', PROJECT, 'exec', '-T', 'lightningd', 'socat', '-',
+    'UNIX-CONNECT:/root/.lightning/regtest/lightning-rpc'], { stdio: ['pipe', 'pipe', 'ignore'] });
+  const waiting = new Map();
+  let buffer = '';
+  let next = 0;
+  let failure = null;
+  const failAll = error => {
+    failure = error;
+    for (const { reject } of waiting.values()) reject(error);
+    waiting.clear();
+  };
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', chunk => {
+    buffer += chunk;
+    for (let end = buffer.indexOf('\n\n'); end >= 0; end = buffer.indexOf('\n\n')) {
+      const text = buffer.slice(0, end).trim();
+      buffer = buffer.slice(end + 2);
+      if (!text) continue;
+      const reply = JSON.parse(text);
+      const pending = waiting.get(reply.id);
+      if (!pending) continue;
+      waiting.delete(reply.id);
+      pending.resolve('error' in reply ? { error: reply.error } : { result: reply.result });
+    }
+  });
+  child.on('error', failAll);
+  child.on('exit', () => failAll(new Error('the fixture RPC session ended')));
+  return {
+    call(method, params = {}) {
+      if (failure) return Promise.reject(failure);
+      const id = next++;
+      return new Promise((resolve, reject) => {
+        waiting.set(id, { resolve, reject });
+        // Params given as text are sent verbatim (integers beyond 2^53, exact token text).
+        const body = typeof params === 'string' ? params : JSON.stringify(params);
+        child.stdin.write(`{"jsonrpc":"2.0","id":${id},"method":${JSON.stringify(method)},"params":${body}}`);
+      });
+    },
+    close() {
+      child.stdin.end();
+      return new Promise(resolve => { if (child.exitCode !== null) resolve(); else child.once('exit', () => resolve()); });
+    },
+  };
 }
 
 /** The fixture's identity, or null when it does not answer. */
