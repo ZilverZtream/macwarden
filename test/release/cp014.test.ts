@@ -182,15 +182,18 @@ it('CP-014/B5 CI keeps its triggers and pins and tests the supported platforms a
     job.indexOf('npm run fixture:up') >= 0 &&
     job.indexOf('npm run fixture:up') < job.indexOf('npm run test:oracle') &&
     job.indexOf('npm run test:oracle') < job.indexOf('npm run fixture:down'))).toBe(true);
-  // The Core Lightning rune comparison runs in the oracle job after the LND fixture is down,
-  // against its own fixture, which is brought down whatever the result.
+  // The Core Lightning rune comparison runs in its own job against its own fixture, which is
+  // brought down whatever the result; an LND oracle failure cannot skip it.
   const oracle = entries.filter(job => job.includes('run: npm run test:oracle'));
   expect(oracle).toHaveLength(1);
-  const clnSteps = ['npm run fixture:down', 'npm run fixture:cln:up', 'npm run test:cln-oracle', 'npm run fixture:cln:down']
-    .map(step => oracle[0].indexOf(`run: ${step}`));
+  expect(oracle[0]).not.toContain('test:cln-oracle');
+  const cln = entries.filter(job => job.includes('run: npm run test:cln-oracle'));
+  expect(cln).toHaveLength(1);
+  const clnSteps = ['npm run build', 'npm run fixture:cln:up', 'npm run test:cln-oracle', 'npm run fixture:cln:down']
+    .map(step => cln[0].indexOf(`run: ${step}`));
   expect(clnSteps.every(at => at >= 0)).toBe(true);
   expect([...clnSteps].sort((a, b) => a - b)).toEqual(clnSteps);
-  expect(oracle[0]).toMatch(/^ {6}- if: always\(\)\n {8}run: npm run fixture:cln:down$/m);
+  expect(cln[0]).toMatch(/^ {6}- if: always\(\)\n {8}run: npm run fixture:cln:down$/m);
   expect(entries.some(job => job.includes('ubuntu-latest') &&
     job.includes('npm run test:gitleaks'))).toBe(true);
   expect(entries.every(job => !/^\s+id-token:\s*write\s*$/m.test(job))).toBe(true);
