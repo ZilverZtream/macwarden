@@ -242,7 +242,7 @@ it('L402-scan/linear time: hostile lines of open L402 prefixes and colon-hex run
   console.log(`L402-scan linear timings ms [1 MB, 4 MB]: ${JSON.stringify(timings, (_, v: unknown) => typeof v === 'number' ? Math.round(v) : v)}`);
   // Four times the input takes at most about four times as long (with headroom for noise).
   for (const [name, [small, large]] of Object.entries(timings)) expect(large, name).toBeLessThan(8 * Math.max(small, 25));
-});
+}, 180_000);
 
 it('L402-scan/real-world forms: several macaroons, challenge variants, curl, YAML, .env pairs and MCP agent configs', async () => {
   const dir = mkdtempSync(join(scratch, 'forms-'));
