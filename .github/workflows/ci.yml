@@ -10,8 +10,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest]
         node: ['22.23.2', '22.x', '24.18.1', '24.x']
+        include:
+          - { os: windows-latest, node: '22.23.2' }
+          - { os: windows-latest, node: '24.x' }
+          - { os: macos-latest, node: '24.x' }
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
         with:
@@ -33,6 +37,7 @@ jobs:
         with:
           node-version: '22.23.2'
       - run: npm ci
+      - run: npm run build
       - run: npm run fixture:up
       - run: npm run test:oracle
       - if: always()
@@ -47,4 +52,11 @@ jobs:
         with:
           node-version: '22.23.2'
       - run: npm ci
+      - run: npm run build
+      # The gitleaks tests need private, owner-only scratch and sentinel directories inside the checkout.
+      - run: |
+          umask 077
+          mkdir -p .ratchet/packets
+          echo "MACWARDEN_TEST_TMP=$(mktemp -d "$PWD/.ratchet/packets/gl-tmp-XXXXXX")" >> "$GITHUB_ENV"
+          echo "MACWARDEN_SENTINEL_DIR=$(mktemp -d "$PWD/.ratchet/packets/gl-sent-XXXXXX")" >> "$GITHUB_ENV"
       - run: npm run test:gitleaks

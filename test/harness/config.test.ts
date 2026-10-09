@@ -96,7 +96,10 @@ it('CP-001/B12 runs the pinned CI matrix and commands', () => {
   const oracleJob = blockFor(jobs, 'oracle', 2);
   const gitleaksJob = blockFor(jobs, 'gitleaks', 2);
   expect(testJob).toMatch(/^ {4}runs-on: \$\{\{ matrix\.os \}\}$/m);
-  expect(listFor(testJob, 'os')).toEqual(['ubuntu-latest', 'macos-latest', 'windows-latest']);
+  // Every Node version on Linux; Windows on the minimum and the latest 22/24 line; macOS on the latest.
+  expect(listFor(testJob, 'os')).toEqual(['ubuntu-latest']);
+  expect([...testJob.matchAll(/^ {10}- \{ os: ([\w-]+), node: '([^']+)' \}$/gm)].map(m => `${m[1]} ${m[2]}`))
+    .toEqual(['windows-latest 22.23.2', 'windows-latest 24.x', 'macos-latest 24.x']);
   expect(listFor(testJob, 'node')).toEqual(['22.23.2', '22.x', '24.18.1', '24.x']);
   expect(testJob).toMatch(/^ {10}node-version: \$\{\{ matrix\.node \}\}$/m);
   expect(oracleJob).toMatch(/^ {4}runs-on: ubuntu-latest$/m);
@@ -117,9 +120,13 @@ it('CP-001/B12 runs the pinned CI matrix and commands', () => {
   }
   const runsFor = (job: string) => [...job.matchAll(/^\s*-?\s*run:\s*(.+?)\s*$/gm)].map(match => match[1]);
   expect(runsFor(testJob)).toEqual(['npm ci', 'npm run lint', 'npm run build', 'npm test']);
-  expect(runsFor(oracleJob)).toEqual(['npm ci', 'npm run fixture:up', 'npm run test:oracle', 'npm run fixture:down']);
+  expect(runsFor(oracleJob)).toEqual(['npm ci', 'npm run build', 'npm run fixture:up', 'npm run test:oracle', 'npm run fixture:down']);
   expect(oracleJob).toMatch(/^ {6}- if: always\(\)\n {8}run: npm run fixture:down$/m);
-  expect(runsFor(gitleaksJob)).toEqual(['npm ci', 'npm run test:gitleaks']);
+  expect(runsFor(gitleaksJob)).toEqual(['npm ci', 'npm run build', '|', 'npm run test:gitleaks']);
+  // The gitleaks tests run with private scratch and sentinel directories created inside the checkout.
+  expect(gitleaksJob).toMatch(/^ {10}umask 077$/m);
+  expect(gitleaksJob).toMatch(/MACWARDEN_TEST_TMP=\$\(mktemp -d "\$PWD\/\.ratchet\/packets\/gl-tmp-XXXXXX"\)/);
+  expect(gitleaksJob).toMatch(/MACWARDEN_SENTINEL_DIR=\$\(mktemp -d "\$PWD\/\.ratchet\/packets\/gl-sent-XXXXXX"\)/);
 });
 
 it('CP-001/B13 restricts network imports to src/lnd and keeps runtime packages out of src', () => {

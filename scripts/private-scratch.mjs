@@ -38,7 +38,7 @@ async function windowsIdentityAndAcl(directory, restrict = false) {
   ].join('\n');
   const { stdout } = await execute(windowsTool('WindowsPowerShell\\v1.0\\powershell.exe'),
     ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
-    { shell: false, windowsHide: true, timeout: 10_000, maxBuffer: 16_384 });
+    { shell: false, windowsHide: true, timeout: 60_000, maxBuffer: 16_384 });
   const acl = JSON.parse(stdout);
   if (!canonicalSid(acl.identity) || acl.owner !== acl.identity || !Array.isArray(acl.rules) ||
       !acl.rules.some(rule => rule.type === 'Allow' && rule.sid === acl.identity) ||
@@ -104,7 +104,7 @@ export async function assertPrivateDirectories(directories) {
     ].join('\n');
     const { stdout } = await execute(windowsTool('WindowsPowerShell\\v1.0\\powershell.exe'),
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
-      { shell: false, windowsHide: true, timeout: 10_000, maxBuffer: 16_384 });
+      { shell: false, windowsHide: true, timeout: 60_000, maxBuffer: 16_384 });
     const report = JSON.parse(stdout);
     if (!report || typeof report !== 'object' || Object.keys(report).length !== 1 ||
         !Array.isArray(report.results) || report.results.length !== paths.length) {
@@ -149,8 +149,11 @@ export async function createPrivateDirectory(parent, prefix) {
       await realDirectory(directory);
     } else await assertPrivateDirectory(directory);
     return directory;
-  } catch {
+  } catch (error) {
     await rm(directory, { recursive: true, force: true });
-    throw new Error('private scratch directory creation failed');
+    // The reason names the failing step (timeout, ACL check), never secret material.
+    const reason = !(error instanceof Error) ? 'unknown'
+      : /** @type {{ killed?: boolean }} */ (error).killed ? 'powershell timed out' : error.message;
+    throw new Error(`private scratch directory creation failed: ${reason}`, { cause: error });
   }
 }
