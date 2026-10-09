@@ -10,7 +10,7 @@ const trustedExports = new Map([
   ['decode/index.js', new Set(['DecodeError', 'macaroonPacketRange', 'macaroonSectionRange', 'parseTimeBefore',
     'canonicalMacaroonForm', 'macaroonEosEnd', 'decodeMacaroon', 'encodeMacaroon', 'addFirstPartyCaveat', 'timeBeforeCondition', 'validMacaroonIdentifier', 'isNwcContainer', 'decodeNwc', 'macaroonId',
     'isL402Identifier', 'isL402Container', 'isL402Macaroon', 'l402RedactionSecret', 'decodeL402Macaroon', 'decodeL402Macaroons',
-    'decodeL402', 'l402ChallengeMacaroon', 'L402_MAX_MACAROONS'])],
+    'decodeL402', 'l402ChallengeMacaroon', 'L402_MAX_MACAROONS', 'isRuneContainer', 'decodeRune'])],
   ['lnd/index.js', new Set(['createLndAdapter', 'registerMiddleware'])],
   ['commands/bake/write-out.js', new Set(['reserveOut'])],
 ]);

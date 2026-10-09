@@ -12,7 +12,7 @@ const help = [
   '       macwarden --help | --version',
   '',
   'Commands:',
-  '  inspect    decode a macaroon, NWC URI or L402 token offline and grade what it can do',
+  '  inspect    decode a macaroon, NWC URI, L402 token or Core Lightning rune offline and grade what it can do',
   '  scan       find credentials in files and, with --git-history, in git history (offline)',
   "  inventory  list the node's root key IDs against the registry",
   '  bake       issue a least-privilege macaroon on its own root key ID and record it',

@@ -2,6 +2,7 @@ import { revealSecret } from '../secret-capability.js';
 import { createECDH, createHash, createHmac } from 'node:crypto';
 import { Secret } from '../secret.js';
 import { DecodeError, UsageError, type DecodeStage, type NwcStage } from '../errors.js';
+import { decodeRuneText, RUNE_ALPHABET, RUNE_SHORTEST_TEXT, RUNE_TEXT_LIMIT, type RuneFacts } from './rune.js';
 
 export { DecodeError } from '../errors.js';
 export type { DecodeStage } from '../errors.js';
@@ -883,4 +884,23 @@ export function decodeL402(secret: Secret): L402Decoded {
     return decodedToken;
   }
   return decodeL402Macaroon(secret, null, 'macaroon');
+}
+
+/**
+ * True when the container holds the text of a Core Lightning rune: the whole container is
+ * URL-safe base64 that Core Lightning's rune_from_base64 accepts (inspect's rune rule).
+ */
+export function isRuneContainer(secret: Secret): boolean {
+  const bytes = revealSecret(secret);
+  if (bytes.length < RUNE_SHORTEST_TEXT || bytes.length > RUNE_TEXT_LIMIT) return false;
+  const text = bytes.toString('latin1');
+  return RUNE_ALPHABET.test(text) && decodeRuneText(text).ok;
+}
+
+/** The facts of the rune text held in a container; DecodeError stage rune-syntax when it is not one. */
+export function decodeRune(secret: Secret): RuneFacts {
+  const text = revealSecret(secret).toString('latin1');
+  const result = RUNE_ALPHABET.test(text) ? decodeRuneText(text) : null;
+  if (!result?.ok) throw new DecodeError('rune-syntax', 'invalid rune');
+  return result.facts;
 }

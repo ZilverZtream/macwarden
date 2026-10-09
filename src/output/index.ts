@@ -6,6 +6,7 @@ import { lndconnect } from '../scan/patterns.js';
 import { replaceNwc } from '../scan/nwc-match.js';
 import { redactEncodedCredentials } from '../credential-recognition.js';
 import { collectNwcSecrets, redactKnownSecrets, redactL402Text } from '../scan/redact.js';
+import { redactRuneContexts } from '../scan/rune-context.js';
 import type { RegistryEntry } from '../registry/index.js';
 import { shellQuote } from '../online.js';
 import { dirname, join } from 'node:path';
@@ -17,6 +18,11 @@ export type InspectResult = {
   fingerprint: string; location: string | null; rootKeyId: string; permissions: string[];
   caveats: import('../decode/index.js').Caveat[]; grade: string; reasons: string[];
   warnings: string[]; unassessed: string[]; snapshot: string;
+};
+// Core Lightning rune facts (1.2.0); the authenticator and the decoded string are never part of it.
+export type RuneInspectResult = {
+  kind: 'rune'; fingerprint: string; grade: string; reasons: string[]; unassessed: string[];
+  rune: import('../rune-report.js').RuneReport;
 };
 // NIP-47 connection facts; the connection secret is never part of the result.
 export type NwcInspectResult = {
@@ -89,7 +95,7 @@ type Success<C extends string | null, R> = Envelope & { command: C; ok: true; re
 export type OutputResult =
   | (Envelope & { command: string | null; ok: false; result: null;
       error: { code: number; step: string | null; message: string } })
-  | Success<'inspect', InspectResult | NwcInspectResult | L402InspectResult>
+  | Success<'inspect', InspectResult | NwcInspectResult | L402InspectResult | RuneInspectResult>
   | Success<'scan', import('../scan/index.js').ScanResult>
   | (Success<'inventory', InventoryResult> & { display: { now: number } })
   | Success<'attenuate', AttenuateResult>
@@ -152,7 +158,7 @@ function redact(text: string): string {
 
 function redactUncached(text: string): string {
   lndconnectAll.lastIndex = 0;
-  const withLndconnectRedacted = text.replace(lndconnectAll, match => hasCredentialInLndconnect(match) ? '[redacted]' : match);
+  const withLndconnectRedacted = redactRuneContexts(text).replace(lndconnectAll, match => hasCredentialInLndconnect(match) ? '[redacted]' : match);
   // NWC URIs through the linear matcher: the published regex backtracks quadratically on
   // repeated prefixes. The match consumes one delimiter after the secret, which is kept.
   const withUrisRedacted = replaceNwc(withLndconnectRedacted,
@@ -271,9 +277,32 @@ function* scanTextLines(result: import('../scan/index.js').ScanResult): Generato
     const root = finding.rootKeyId === null ? '' : ` root key ${finding.rootKeyId}`;
     // Like inspect: a time-before caveat already in the past makes the credential unusable.
     const expired = finding.caveats?.some(caveat => caveat.type === 'time-before' && caveat.expired === true) ? ' (expired)' : '';
-    yield `${safeText(location)}  ${safeText(finding.kind)}  ${safeText(finding.fingerprint)}${grade}${root}${expired}${counted}${finding.context === 'mcp-config' ? ' (MCP server config)' : ''}${also}\n`;
+    const rune = finding.rune ? runeLineFacts(finding.rune) : '';
+    yield `${safeText(location)}  ${safeText(finding.kind)}  ${safeText(finding.fingerprint)}${grade}${root}${expired}${counted}${rune}${finding.context === 'mcp-config' ? ' (MCP server config)' : ''}${also}\n`;
   }
   yield* scanSummaryLines(result);
+}
+
+type RuneFacts = NonNullable<import('../scan/index.js').ScanFinding['rune']>;
+const runeInvalidText: Record<string, string> = {
+  'exceeds-bounds': 'longer than macwarden parses', 'not-base64url': 'not URL-safe base64', 'too-short': 'shorter than a rune',
+  'nul-byte': 'NUL byte in its restrictions', 'restriction-syntax': 'restriction syntax error',
+  'unique-id-placement': 'misplaced unique ID',
+};
+
+/** A scan text line's rune facts: unique ID, possible capabilities, method access, expiry; never node acceptance. */
+function runeLineFacts(rune: RuneFacts): string {
+  if (rune.recognition === 'invalid')
+    return ` (in rune context, does not parse as a rune: ${safeText(runeInvalidText[rune.reason] ?? rune.reason)})`;
+  const parts: string[] = [];
+  parts.push(rune.uniqueId === null ? 'no unique ID' : `unique ID ${safeText(rune.uniqueId)}`);
+  if (rune.methods === 'none') parts.push('no method can pass');
+  else parts.push(`may allow ${rune.capabilities.map(safeText).join(', ') || 'unreviewed methods'}`);
+  if (rune.methods === 'broad') parts.push('broad method access');
+  if (rune.warnings.includes('possibly-truncated')) parts.push('value may be cut');
+  if (rune.expiry.status === 'deadline-passed') parts.push('deadline passed according to local clock');
+  parts.push('not checked against the node');
+  return ` (${parts.join('; ')})`;
 }
 
 function* scanSummaryLines(result: import('../scan/index.js').ScanResult): Generator<string> {
@@ -309,6 +338,66 @@ function inspectText(result: InspectResult): string {
     `snapshot     LND ${safeText(snapshot)}`,
   ];
   return `${lines.join('\n')}\n`;
+}
+
+function runeTime(seconds: string): string {
+  const value = BigInt(seconds);
+  return value >= -8_640_000_000_000n && value <= 8_640_000_000_000n
+    ? `${seconds} (${new Date(Number(value) * 1000).toISOString().replace('.000Z', 'Z')})` : seconds;
+}
+
+const runeExpiryText: Record<string, (deadline: string | null) => string> = {
+  none: () => 'no time restriction',
+  'time-conditions': () => 'time restrictions present; they do not close every request',
+  'deadline-ahead': deadline => `every request is refused from ${runeTime(deadline ?? '0')} according to its restrictions`,
+  'deadline-passed': deadline => `deadline passed according to local clock (${runeTime(deadline ?? '0')}); node acceptance is not checked`,
+};
+
+function runeInspectText(result: RuneInspectResult): string {
+  const { rune } = result;
+  const grade = result.grade === 'UNASSESSED' ? 'UNASSESSED (treat as SPEND or worse)' : result.grade;
+  const lines = [
+    'kind         rune (Core Lightning)',
+    `fingerprint  ${safeText(result.fingerprint)}`,
+    `unique ID    ${rune.uniqueId === null ? 'none' : safeText(rune.uniqueId)}${rune.version === null ? '' : `  version ${safeText(rune.version)}`}`,
+    `grade        ${safeText(grade)}` + (result.reasons.length ? `   (${result.reasons.map(safeText).join(', ')})` : ''),
+    `methods      ${rune.methods === 'listed' ? `listed: ${rune.allowedMethods.map(safeText).join(' ')}`
+      : rune.methods === 'broad' ? 'broad: not limited to a list of exact method names' : 'none: no method can pass these restrictions'}`,
+    ...(rune.capabilities.length ? [`may allow    ${rune.capabilities.map(safeText).join(', ')}`] : []),
+    ...rune.restrictions.map((restriction, index) => `${index === 0 ? 'restriction ' : 'and         '} ${restriction
+      .map(alternative => `${safeText(alternative.field)}${safeText(alternative.condition)}${safeText(alternative.value)}`).join(' OR ')}`),
+    ...(rune.omittedAlternatives ? [`omitted      ${rune.omittedAlternatives} further alternatives`] : []),
+    ...(rune.conditions.length ? [`conditions   ${rune.conditions.map(safeText).join(', ')} (described, not assessed)`] : []),
+    `expiry       ${safeText(runeExpiryText[rune.expiry.status]?.(rune.expiry.deadline) ?? rune.expiry.status)}`,
+    ...result.unassessed.map(value => `unassessed   ${safeText(value)}`),
+    ...rune.sensitiveMethods.map(value => `sensitive    ${safeText(value)}`),
+    ...rune.warnings.map(code => `warning      ${safeText(code)}`),
+    'verified     no: authenticity, issuing node, blacklist and rate-limit state are not checked offline',
+    `methods from ${safeText(rune.methodTable)}`,
+  ];
+  return `${lines.join('\n')}\n`;
+}
+
+function stringList(items: unknown): boolean {
+  return Array.isArray(items) && items.every(item => typeof item === 'string');
+}
+
+function isRuneInspectResult(value: unknown): value is RuneInspectResult {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const fields = value as Record<string, unknown>;
+  if (fields.kind !== 'rune' || typeof fields.fingerprint !== 'string' || typeof fields.grade !== 'string'
+    || !stringList(fields.reasons) || !stringList(fields.unassessed)) return false;
+  const rune = fields.rune as Record<string, unknown> | null | undefined;
+  if (!rune || typeof rune !== 'object' || rune.recognition !== 'rune-syntax') return false;
+  const expiry = rune.expiry as Record<string, unknown> | null | undefined;
+  return Array.isArray(rune.restrictions) && rune.restrictions.every(restriction => Array.isArray(restriction)
+      && restriction.every((alternative: unknown) => !!alternative && typeof alternative === 'object'
+        && ['field', 'condition', 'value'].every(key => typeof (alternative as Record<string, unknown>)[key] === 'string')))
+    && [rune.allowedMethods, rune.capabilities, rune.sensitiveMethods, rune.conditions, rune.warnings].every(stringList)
+    && (rune.uniqueId === null || typeof rune.uniqueId === 'string') && (rune.version === null || typeof rune.version === 'string')
+    && typeof rune.methods === 'string' && typeof rune.methodTable === 'string' && typeof rune.omittedAlternatives === 'number'
+    && !!expiry && typeof expiry === 'object' && typeof expiry.status === 'string'
+    && (expiry.deadline === null || (typeof expiry.deadline === 'string' && /^-?[0-9]+$/.test(expiry.deadline)));
 }
 
 function nwcInspectText(result: NwcInspectResult): string {
@@ -867,7 +956,8 @@ export function* renderChunks(result: OutputResult, mode: Mode): Generator<strin
     case 'inspect': rendered = isInspectResult(result.result)
       ? inspectText(result.result) : isNwcInspectResult(result.result)
         ? nwcInspectText(result.result) : isL402InspectResult(result.result)
-          ? l402InspectText(result.result) : genericText(result); break;
+          ? l402InspectText(result.result) : isRuneInspectResult(result.result)
+            ? runeInspectText(result.result) : genericText(result); break;
     case 'inventory': rendered = typeof result.display?.report === 'string' ? result.display.report
       : typeof result.display?.now === 'number' && Number.isFinite(result.display.now)
         ? inventoryText(result.result, result.display.now) + (result.result.report?.path

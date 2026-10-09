@@ -9,7 +9,7 @@ import { internalErrorMessage, withProcessErrorContext, type ProcessErrorContext
 const online = ' [--lnd-rest <host:port>] [--tls-cert <path>] [--macaroon <path>]';
 const synopses: Record<string, string[]> = {
   inspect: ['inspect <file | -> [--json]',
-    'inspect <hex | base64 | lndconnect://... | nostr+walletconnect://... | L402 <macaroon>:<preimage>> --unsafe-arg [--json]'],
+    'inspect <hex | base64 | lndconnect://... | nostr+walletconnect://... | L402 <macaroon>:<preimage> | rune> --unsafe-arg [--json]'],
   scan: ['scan [paths...] [--fail-on ADMIN|SPEND|OPERATE|RECEIVE|READ] [--include-dirs] [--ignore-file <path>]'
     + ' [--git-history [--allow-shallow]] [--agent-configs] [--format text|json|sarif|github] [--json]'],
   inventory: [`inventory [--verify] [--expiring-within <n>(m|h|d)] [--report markdown|csv|json [--out <file>]] [--registry <path>] [--json]${online}`],
@@ -29,7 +29,7 @@ const synopses: Record<string, string[]> = {
     `verify <hex | base64 | lndconnect://...> --unsafe-arg [--registry <path>] [--json]${online}`],
 };
 const summaries: [string, string][] = [
-  ['inspect', 'decode a macaroon, NWC URI or L402 token offline and grade what it can do'],
+  ['inspect', 'decode a macaroon, NWC URI, L402 token or Core Lightning rune offline and grade what it can do'],
   ['scan', 'find credentials in files and, with --git-history, in git history (offline)'],
   ['inventory', "list the node's root key IDs against the registry"],
   ['bake', 'issue a least-privilege macaroon on its own root key ID and record it'],

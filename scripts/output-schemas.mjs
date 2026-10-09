@@ -349,6 +349,14 @@ schemas.macwarden = topLevel;
 
 const check = process.argv.includes('--check');
 let stale = false;
+// The hand-written inspect and scan schemas carry the same Core Lightning rune definitions (1.2.0).
+const scanSchema = read('scan');
+for (const name of ['runeText', 'runeWarning', 'runeReport', 'runeInvalidReport']) {
+  if (JSON.stringify(inspect.$defs[name]) !== JSON.stringify(scanSchema.$defs[name])) {
+    console.error(`differs: $defs.${name} in schemas/output/inspect.schema.json and scan.schema.json`);
+    stale = true;
+  }
+}
 for (const [name, schema] of Object.entries(schemas)) {
   const path = join(dir, `${name}.schema.json`);
   const text = `${JSON.stringify(schema, null, 2)}\n`;

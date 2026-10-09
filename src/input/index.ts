@@ -6,6 +6,8 @@ import { Secret } from '../secret.js';
 import { isProtectedPath } from '../protected-path.js';
 import { parseLndconnect } from './lndconnect.js';
 import { InputError, UsageError } from '../errors.js';
+import { decodeMacaroon, DecodeError, isL402Macaroon } from '../decode/index.js';
+import { decodeRuneText, RUNE_ALPHABET, RUNE_SHORTEST_TEXT, RUNE_TEXT_LIMIT } from '../decode/rune.js';
 
 export { InputError, UsageError } from '../errors.js';
 export type { InputStage } from '../errors.js';
@@ -58,15 +60,41 @@ function isTokenStoreFile(bytes: Buffer): boolean {
   return length >= 1 && length <= 65_536 && bytes.length >= 4 + length + 88 && bytes[4] === 0x02;
 }
 
-/** Credential forms beyond macaroons that a command accepts: NWC URIs, L402 credentials. */
-type Forms = { nwc?: boolean; l402?: boolean };
+/** Credential forms beyond macaroons that a command accepts: NWC URIs, L402 credentials, Core Lightning runes. */
+type Forms = { nwc?: boolean; l402?: boolean; rune?: boolean };
 
+/**
+ * Whether trimmed text is a Core Lightning rune for inspect (1.2.0): URL-safe base64 that Core
+ * Lightning's rune parser accepts, unless the same text is a macaroon that decodes (an LND
+ * macaroon, or a macaroon with an L402 identifier). A rune whose first decoded byte happens to
+ * be 0x02 is still a rune when the macaroon decoders refuse it.
+ */
+function isRuneText(trimmed: string): boolean {
+  if (trimmed.length < RUNE_SHORTEST_TEXT || trimmed.length > RUNE_TEXT_LIMIT || !RUNE_ALPHABET.test(trimmed)) return false;
+  if (!decodeRuneText(trimmed).ok) return false;
+  let macaroon: Buffer;
+  try { macaroon = parseText(trimmed); }
+  catch { return true; }
+  if (macaroon[0] !== 0x02) return true;
+  if (isL402Macaroon(new Secret(macaroon))) return false;
+  try { decodeMacaroon(new Secret(macaroon)); return false; }
+  catch (error) { if (error instanceof DecodeError) return true; throw error; }
+}
+
+// Input precedence (docs/spec.md, inspect input): a binary macaroon (first byte 0x02), then an
+// Aperture token store file (binary, L402 only); text is trimmed and read as an NWC URI, an L402
+// Authorization value, challenge or pair, a Core Lightning rune, an lndconnect URI, and last a
+// hex or base64 macaroon. NWC and L402 text contain ':' or a blank, which no rune can, so those
+// forms never compete with a rune; a rune and a hex or base64 macaroon are told apart by
+// isRuneText (a macaroon that decodes wins).
 function parseText(text: string, forms: Forms = {}): Buffer {
   const trimmed = text.trim();
   // An NWC URI is kept verbatim inside the Secret container; decode/index.ts parses it.
   if (forms.nwc && nwcScheme.test(trimmed)) return /\s/.test(trimmed) ? invalidForm() : Buffer.from(trimmed, 'utf8');
   // An L402 Authorization value, challenge or pair is kept verbatim too, as one line.
   if (forms.l402 && isL402Text(trimmed)) return /[\r\n]/.test(trimmed) ? invalidForm() : Buffer.from(trimmed, 'latin1');
+  // A rune is kept verbatim inside the Secret container; decode/index.ts parses it.
+  if (forms.rune && isRuneText(trimmed)) return Buffer.from(trimmed, 'latin1');
   if (/^lndconnect:\/\//i.test(trimmed)) return parseLndconnect(trimmed) ?? invalidForm();
   const value = text.replace(/\s/g, '');
   if (!value) return invalidForm();
@@ -161,9 +189,9 @@ async function fileBytes(handle: fs.FileHandle): Promise<Buffer> {
 export async function readCredential(
   arg: string,
   io: InputIO,
-  opts: { unsafeArg: boolean; nwc?: boolean; l402?: boolean },
+  opts: { unsafeArg: boolean; nwc?: boolean; l402?: boolean; rune?: boolean },
 ): Promise<{ secret: Secret; literal: boolean }> {
-  const forms: Forms = { nwc: opts.nwc === true, l402: opts.l402 === true };
+  const forms: Forms = { nwc: opts.nwc === true, l402: opts.l402 === true, rune: opts.rune === true };
   if (arg === '-') {
     if (io.stdin.isTTY) throw new UsageError('stdin is a TTY');
     return { secret: new Secret(parseBytes(await stdinBytes(io.stdin), forms)), literal: false };
@@ -213,7 +241,8 @@ export async function readCredential(
 
   // An encoded literal can contain a protected-looking path component. Only
   // an established file path takes precedence over literal classification.
-  let supportedLiteral = /^lndconnect:\/\//i.test(arg) || (forms.nwc && nwcScheme.test(arg)) || (forms.l402 && isL402Text(arg.trim()));
+  let supportedLiteral = /^lndconnect:\/\//i.test(arg) || (forms.nwc && nwcScheme.test(arg)) || (forms.l402 && isL402Text(arg.trim()))
+    || (forms.rune && isRuneText(arg.trim()));
   if (!supportedLiteral) {
     try {
       supportedLiteral = parseText(arg)[0] === 0x02;

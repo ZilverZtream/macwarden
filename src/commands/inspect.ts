@@ -1,12 +1,14 @@
 import * as fs from 'node:fs/promises';
 import type { Readable } from 'node:stream';
-import { decodeL402, decodeMacaroon, decodeNwc, isL402Container, isL402Macaroon, isNwcContainer, DecodeError, parseTimeBefore,
-  type Caveat, type L402Facts, type MacaroonFacts } from '../decode/index.js';
+import { decodeL402, decodeMacaroon, decodeNwc, decodeRune, isL402Container, isL402Macaroon, isNwcContainer, isRuneContainer,
+  DecodeError, parseTimeBefore, type Caveat, type L402Facts, type MacaroonFacts } from '../decode/index.js';
 import { assessL402 } from '../l402.js';
+import { unixSeconds } from '../grade/rune.js';
+import { runeReport } from '../rune-report.js';
 import type { Secret } from '../secret.js';
 import { gradeFacts, describe } from '../grade/index.js';
 import { readCredential, InputError, UsageError, type InputIO } from '../input/index.js';
-import type { InspectResult, L402InspectResult, NwcInspectResult, OutputResult } from '../output/index.js';
+import type { InspectResult, L402InspectResult, NwcInspectResult, OutputResult, RuneInspectResult } from '../output/index.js';
 
 export type Deps = { stdin: Readable & { isTTY?: boolean }; fs: InputIO['fs']; clock: () => Date };
 
@@ -76,7 +78,7 @@ export async function run(args: string[], deps: Deps): Promise<OutputResult> {
 
   const warnings: string[] = [];
   try {
-    const { secret, literal } = await readCredential(inputs[0], deps, { unsafeArg, nwc: true, l402: true });
+    const { secret, literal } = await readCredential(inputs[0], deps, { unsafeArg, nwc: true, l402: true, rune: true });
     if (literal) warnings.push('unsafe-arg');
     if (isNwcContainer(secret)) {
       const nwc = decodeNwc(secret);
@@ -91,6 +93,17 @@ export async function run(args: string[], deps: Deps): Promise<OutputResult> {
         reasons: ['nwc-wallet-side-limits'],
         warnings: nwc.relayDetailsRemoved ? ['relay-details-removed'] : [],
       };
+      return { command: 'inspect', ok: true, warnings, result, error: null };
+    }
+    // The containers readCredential produces are disjoint (docs/spec.md, inspect input
+    // precedence): rune text never holds the ':' or blank of NWC and L402 text, and a binary
+    // macaroon or token store file is never rune text.
+    if (isRuneContainer(secret)) {
+      // Recognition, assessment and verification are separate: nothing here says a node accepts it.
+      const facts = decodeRune(secret);
+      const assessed = runeReport(facts, unixSeconds(deps.clock()));
+      const result: RuneInspectResult = { kind: 'rune', fingerprint: facts.fingerprint, grade: assessed.grade,
+        reasons: assessed.reasons, unassessed: assessed.unassessed, rune: assessed.report };
       return { command: 'inspect', ok: true, warnings, result, error: null };
     }
     const result = macaroonResult(secret, deps.clock());

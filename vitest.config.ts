@@ -17,7 +17,7 @@ const harness = [
   'test/cp037-reveal*.test.ts', 'test/cp037-scan-lint.test.ts',
 ];
 const privateScratch = ['test/.tmp/**', 'test/.sentinels/**'];
-const nonUnit = ['test/oracle/**', 'test/gitleaks/**', ...privateScratch];
+const nonUnit = ['test/oracle/**', 'test/cln-oracle/**', 'test/gitleaks/**', ...privateScratch];
 const platformPolicy = { platform: process.platform, excluded, required: requiredPlatformFiles(process.platform) };
 
 export default defineConfig({

@@ -9,11 +9,12 @@ It is a single command-line tool, `macwarden`, for teams that run LND behind BTC
 
 ## What it adds
 
-Most of what MacWarden does online can also be done by hand with `lncli`. It adds a registry of what was issued to whom, verification after every change, and four capabilities that are not part of LND's own tooling:
+Most of what MacWarden does online can also be done by hand with `lncli`. It adds a registry of what was issued to whom, verification after every change, and five capabilities that are not part of LND's own tooling:
 
 - **Canaries.** Create decoy macaroons that LND rejects, with use alerts while `macwarden watch` runs. Place one where an attacker would look. Without `watch` running there is no alert, and requests that LND rejects before its RPC middleware runs are not seen. Alerts are grouped and rate-limited.
 - **Usage-based narrowing.** Recommend narrower macaroon permissions from observed RPC usage, with observation coverage and warnings about rarely used methods. The recommendation covers the methods observed during the observation period; with less than 7 days of coverage it withholds the narrowing command unless you accept the short observation explicitly.
 - **Lightning-aware scanning.** Detect LND macaroons, `lndconnect://` URIs and NWC connection strings in repositories, git history and supported agent configurations, with CI and SARIF output. No dedicated detector for LND macaroons, lndconnect or NWC was found in gitleaks, TruffleHog or GitHub's catalog (gitleaks has a rule for Fly.io macaroons). Rule packs for gitleaks and TruffleHog are included.
+- **Core Lightning runes, offline.** `lightning-cli decode` already decodes a rune. MacWarden adds finding runes in files, git history and agent configurations without printing them, and a conservative assessment of what their restrictions may allow, graded on the same ladder from a method table pinned to Core Lightning v26.06.8. It never contacts a node about a rune, so whether the node accepts it (authenticity, blacklist, rate limits) is reported as unchecked.
 - **Verified recovery.** After rotation, verify that the old root key is absent and the replacement is accepted, reporting direct credential rejection when it can be checked. The verification covers the selected credential on the node it was issued on, at the time of the check.
 
 ## Why it exists
@@ -80,6 +81,15 @@ macwarden inspect ./lnget/tokens/api.example.com/l402.token
 macwarden scan . --fail-on READ
 ```
 
+### Core Lightning runes (offline)
+
+A Core Lightning rune is URL-safe base64 with no fixed prefix, so `scan` looks for runes only in rune context: a rune key in env files, shell, JSON, YAML, TOML, code and agent configurations (`RUNE=…`, `CLN_RUNE=…`, `"rune": …`), clnrest's `Rune:` header, the base64 of a rune in a Kubernetes Secret, and checkable runes passed to `lightning-cli commando`, `checkrune` or `showrunes`. A value in rune key context that does not parse is reported as `rune-invalid` (`UNASSESSED`) rather than dropped. `inspect` reads a rune from a file or stdin and reports its unique ID, restrictions, the methods they may allow and the resulting grade on the same ladder as macaroons, from a method table pinned to Core Lightning v26.06.8; a capability is excluded only when the restrictions prove it cannot be used. Nothing is sent to a node: whether it would accept the rune is reported as unchecked, and a rune is revoked with `lightning-cli blacklistrune`. The rune, its authenticator and the decoded string never appear in any output.
+
+```sh
+macwarden inspect ./cln.rune
+macwarden scan . --fail-on OPERATE
+```
+
 ### Manage a node (online)
 
 MacWarden runs with a macaroon of its own. Because that macaroon can bake other macaroons, it is admin-equivalent: make it short-lived and keep it out of application configs.
@@ -135,8 +145,8 @@ The [incident playbook](docs/incident-playbook.md) walks through the whole respo
 
 Offline:
 
-- `inspect` decodes a macaroon, `lndconnect://` URI or Nostr Wallet Connect string and grades what it can do: `ADMIN`, `SPEND`, `OPERATE`, `RECEIVE` or `READ`. It also decodes L402 (LSAT) tokens, which it reports as service access.
-- `scan` finds macaroons, `lndconnect://` URIs, NWC strings and L402 tokens in files and directories; `--git-history` also reads every blob ever committed on any branch, and `--agent-configs` checks the files where AI agents and MCP clients keep credentials. `--fail-on <grade>` fails a build; `--format sarif|github` reports for CI.
+- `inspect` decodes a macaroon, `lndconnect://` URI, Nostr Wallet Connect string or Core Lightning rune and grades what it can do: `ADMIN`, `SPEND`, `OPERATE`, `RECEIVE` or `READ`. It also decodes L402 (LSAT) tokens, which it reports as service access.
+- `scan` finds macaroons, `lndconnect://` URIs, NWC strings, L402 tokens and Core Lightning runes (in rune context: `RUNE=…`, `"rune": …`, clnrest's `Rune:` header, `lightning-cli commando …`) in files and directories; `--git-history` also reads every blob ever committed on any branch, and `--agent-configs` checks the files where AI agents and MCP clients keep credentials. `--fail-on <grade>` fails a build; `--format sarif|github` reports for CI.
 - `attenuate` adds an expiry or IP lock to a copy of a macaroon.
 
 Online (against your LND node):
@@ -171,7 +181,7 @@ These rules are enforced in code and covered by tests; [docs/security-model.md](
 | Node.js | 22.23.2+, 24.18.1+ or 26.5.1+ (the July 2026 security releases, which fix HTTP/2 flaws CVE-2026-56846 and CVE-2026-56848 in the module `watch` uses). No runtime dependencies. |
 | Transport | REST over HTTPS; `watch` uses gRPC. For a Tor-only node, tunnel to localhost over SSH. |
 
-LND only: Core Lightning runes, LNbits keys, Eclair and LDK are not supported. Nostr Wallet Connect strings are decoded and found by `scan`, but NWC connections are revoked in the wallet service. L402 tokens are decoded and found by `scan`; they are revoked by the service that issued them.
+The online commands are for LND only. Core Lightning runes are decoded by `inspect` and found by `scan`, offline; creating, listing and blacklisting runes stays with `lightning-cli` (`createrune`, `showrunes`, `blacklistrune`). LNbits keys, Eclair and LDK are not supported. Nostr Wallet Connect strings are decoded and found by `scan`, but NWC connections are revoked in the wallet service. L402 tokens are decoded and found by `scan`; they are revoked by the service that issued them.
 
 ## How it compares
 
@@ -190,6 +200,7 @@ LND only: Core Lightning runes, LNbits keys, Eclair and LDK are not supported. N
 - Revoking a credential blocks new requests. Streams opened before the revoke, such as an invoice subscription, stay open until they disconnect; restart LND if a compromised credential may hold one.
 - While `watch` is registered, LND waits for it on every RPC. Run it as a supervised service and never enable `rpcmiddleware.addmandatory`. Its own work is bounded whatever callers do: canary alerts are rate-limited, at most one alert command runs (stopped after 12 s), and usage data keeps at most 20,000 records.
 - On nodes run with `--no-macaroons`, stateless init or a remote signer, MacWarden sees only part of the picture.
+- A rune is found only in rune context (a rune key, the `Rune` header, or a `lightning-cli commando`/`checkrune` argument); a bare rune in prose is not. Its grade is an upper bound from its encoded restrictions: macwarden does not know whether the node issued it, blacklisted it or would accept it now.
 - Root key 0 (`admin.macaroon` and the other default macaroons) cannot be revoked on its own; only regenerating every root key invalidates it, and MacWarden leaves that step to the operator.
 
 ## Documentation

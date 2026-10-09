@@ -55,7 +55,10 @@
     "test:oracle": "vitest run --config vitest.oracle.config.ts",
     "test:gitleaks": "vitest run --config vitest.gitleaks.config.ts",
     "fixture:up": "node test/fixture/fixture.mjs up",
-    "fixture:down": "node test/fixture/fixture.mjs down"
+    "fixture:down": "node test/fixture/fixture.mjs down",
+    "fixture:cln:up": "node test/fixture/cln-fixture.mjs up",
+    "fixture:cln:down": "node test/fixture/cln-fixture.mjs down",
+    "test:cln-oracle": "vitest run --config vitest.cln.config.ts"
   },
   "devDependencies": {
     "typescript": "6.0.3",
