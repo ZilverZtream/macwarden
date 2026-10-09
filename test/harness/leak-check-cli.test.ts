@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -33,6 +34,23 @@ it('CP-002/B11 standalone leak check excludes a declared output file', () => pro
   expect(leakCheck(root, sentinelList, declaredPath).status).toBe(1);
   put(join(root, 'declared-out.txt'), declaredPath + '\n');
   expect(leakCheck(root, sentinelList, declaredPath).status).toBe(0);
+}), 90_000);
+
+it('LEAK/declared-hash an output declared by the SHA-256 of its path is excluded; a wrong hash is not', () => project(root => {
+  // Tests of path redaction create files whose names hold a credential; they declare them by hash
+  // so the declared-output manifest itself never carries the credential.
+  const source = sentinel();
+  const declaredPath = join(root, 'declared', `cfg-${source.toString('base64url').slice(0, 20)}.env`);
+  const sentinelList = join(root, 'test', 'sentinels.json');
+  put(join(root, 'test', 'private', 'sentinel.bin'), source);
+  put(sentinelList, JSON.stringify(['test/private/*.bin']));
+  put(declaredPath, source.toString('hex'));
+  const hash = (path: string) => createHash('sha256').update(resolve(path), 'utf8').digest('hex');
+  put(join(root, 'declared-out.txt'), `sha256:${hash(join(root, 'declared', 'other.env'))}\n`);
+  expect(leakCheck(root, sentinelList, declaredPath).status).toBe(1);
+  put(join(root, 'declared-out.txt'), `sha256:${hash(declaredPath)}\n`);
+  expect(leakCheck(root, sentinelList, declaredPath).status).toBe(0);
+  expect(readFileSync(join(root, 'declared-out.txt'), 'utf8')).not.toContain(source.toString('base64url').slice(0, 20));
 }), 90_000);
 
 it('CP-036/bootstrap-negative-controls an empty sentinel registration fails the standalone leak check', () => project(root => {

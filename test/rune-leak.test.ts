@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { findLeaks } from '../scripts/leak-check.mjs';
 import { childEnvironment } from './helpers/environment.js';
-import { declare, register, repo, root, scratch, sentinelList } from './support/cp039-audit.js';
+import { declare, declareHashed, register, repo, root, scratch, sentinelList } from './support/cp039-audit.js';
 import { freshRune } from './support/runes.js';
 
 // docs/spec.md, Core Lightning runes > Output: no output (text, JSON, SARIF, GitHub annotations,
@@ -51,7 +51,8 @@ describe('RUNE/leak', () => {
     const inside = registered('=35&method=pay');
     const file = join(dir, `cfg-rune=${named.rune.replace(/=+$/, '')}.env`);
     writeFileSync(file, `RUNE=${inside.rune}\n`);
-    declare(file);
+    // The file name holds a rune: declared by hash, so the declared-output manifest never holds it.
+    declareHashed(file);
     const output = ['text', 'json', 'sarif', 'github'].map(format => cli(['scan', dir, '--format', format])).join('\n');
     expect(output).toContain('[redacted]');
     expect(leaks(output)).toBeNull();
