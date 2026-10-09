@@ -8,6 +8,7 @@
 import { randomUUID } from 'node:crypto';
 import * as nodeFs from 'node:fs/promises';
 import { hostname as nodeHostname } from 'node:os';
+import { resolve as resolvePath } from 'node:path';
 import { cancellationSignal } from '../cancellation.js';
 import { decodeMacaroon, macaroonId } from '../decode/index.js';
 import { unsafeNodeDiagnostics } from '../environment.js';
@@ -244,7 +245,14 @@ async function takeOverStaleLock(path: string, stale: string, pid: number, deps:
   throw Object.assign(new Error('watch lock held'), { code: 'EEXIST' });
 }
 
+/** Locks this process holds now: a second request for one is refused, never taken over as stale. */
+const heldLocks = new Set<string>();
+
 export async function acquireLock(path: string, deps: Deps): Promise<() => Promise<void>> {
+  // A lock recorded with this PID is stale only when this process does not hold it (a restarted
+  // watch whose earlier run died); one this process holds now is held, whatever the record says.
+  const key = resolvePath(path);
+  if (heldLocks.has(key)) throw Object.assign(new Error('watch lock held'), { code: 'EEXIST' });
   const host = (deps.hostname ?? nodeHostname)();
   const pid = deps.pid ?? process.pid;
   // The process domain (boot ID plus PID namespace or silo) tells a reused PID apart: after a
@@ -265,7 +273,9 @@ export async function acquireLock(path: string, deps: Deps): Promise<() => Promi
         throw failure;
       }
       await handle.close();
+      heldLocks.add(key);
       return async () => {
+        heldLocks.delete(key);
         // Remove the lock only while it is still the file this watch created: same device
         // and inode and still our owner record (a file system may reuse a freed inode number
         // at once, so identity alone cannot tell a replaced lock apart).

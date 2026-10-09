@@ -23,7 +23,9 @@ describe('RUNE/semantics upstream PASS and FAIL rows', () => {
   let label = '';
   const rows: { label: string; facts: RuneFacts; fields: string[]; expected: boolean }[] = [];
   for (const { kind, fields } of ccanVectors()) {
-    if (kind === 'VALID') {
+    // A DERIVE row adds restrictions to the previous rune; the PASS and FAIL rows after it test
+    // the derived rune (its base64 is the fourth field, as for VALID).
+    if (kind === 'VALID' || kind === 'DERIVE') {
       const decoded = decodeRuneText(fields[3]);
       current = decoded.ok ? decoded.facts : null;
       label = fields[1];

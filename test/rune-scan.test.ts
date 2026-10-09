@@ -143,6 +143,22 @@ describe('RUNE/scan invalid values in rune context are reported', () => {
   });
 });
 
+describe('RUNE/scan truncation', () => {
+  it('RUNE/scan a following KEY=value line is not a continuation; a bare base64 line is', async () => scratch(async dir => {
+    // A rune at the end of its line is graded as read unless the next line could be the rest of
+    // the value: only base64 characters, with '=' at most as trailing padding.
+    writeFileSync(join(dir, 'app.env'), `PAY_RUNE=${SPEND_RUNE}\nOTHER_KEY=value\nREAD_RUNE=${READ_RUNE}\nAAAABBBBCCCC==\n`);
+    const findings = (await scan([dir], { clock })).findings.filter(finding => finding.kind === 'rune');
+    expect(findings).toHaveLength(2);
+    const [pay, read] = findings;
+    expect(pay).toMatchObject({ grade: 'SPEND' });
+    const warnings = (finding: ScanFinding) => (finding.rune && 'warnings' in finding.rune ? finding.rune.warnings : []) as string[];
+    expect(warnings(pay)).not.toContain('possibly-truncated');
+    expect(read).toMatchObject({ grade: 'UNASSESSED' });
+    expect(warnings(read)).toContain('possibly-truncated');
+  }));
+});
+
 describe('RUNE/scan output', () => {
   it('RUNE/scan JSON output validates, counts grades and fails --fail-on as graded', async () => scratch(async dir => {
     writeFileSync(join(dir, 'app.env'), `READ_RUNE=${READ_RUNE}\nPAY_RUNE=${SPEND_RUNE}\nBAD_RUNE=${'A'.repeat(50)}\n`);

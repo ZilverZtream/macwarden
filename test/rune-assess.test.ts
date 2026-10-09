@@ -181,7 +181,9 @@ describe('RUNE/identity unique ID warnings predict how checkrune treats the rune
     expect(assess('=17&method=getinfo').warnings).toEqual([]);
     expect(assess('method=getinfo').warnings).toContain('no-unique-id');
     expect(assess('=abc&method=getinfo').warnings).toContain('unique-id-not-numeric');
-    expect(assess('=-1&method=getinfo').warnings).toContain('unique-id-not-numeric');
+    // Core Lightning splits the ID restriction at its first '-': "=-1" is an empty ID with version "1".
+    expect(assess('=-1&method=getinfo').warnings).toContain('version-suffix');
+    expect(assess('=-1&method=getinfo').warnings).not.toContain('unique-id-not-numeric');
     expect(assess('=9223372036854775808&method=getinfo').warnings).toContain('unique-id-not-numeric');
     expect(assess('=100000000&method=getinfo').warnings).toContain('unique-id-out-of-range');
     expect(assess('=99999999&method=getinfo').warnings).toEqual([]);

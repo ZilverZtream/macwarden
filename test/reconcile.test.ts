@@ -199,7 +199,9 @@ it('RECONCILE/complete a fully covered window where every payment settled exits 
   expect(result.coverage).toMatchObject({ complete: true, gapCount: 0, coveredSeconds: 99 });
   expect(result.payments[0]).toMatchObject({ observation: { calls: 2, requestedMsat: '1000', routeAttemptsMsat: '1000' },
     settlement: { status: 'succeeded', settledMsat: '1000', feesMsat: '3', attempts: 2 } });
-  expect(output.warnings).toEqual([]);
+  // The session credential here is LND's default readonly macaroon (root key 0), which every
+  // online command reports (SAFE-09); reconcile itself adds no warning for a complete window.
+  expect(output.warnings).toEqual(['own-root-key-0']);
 });
 
 it('RECONCILE/window defaults run from the first record to now; records of another node are ignored and counted', async () => {

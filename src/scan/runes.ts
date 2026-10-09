@@ -33,7 +33,9 @@ function textFingerprint(text: string): string {
 function possiblyTruncated(line: string, candidate: RuneCandidate, next: string | undefined): boolean {
   const after = line[candidate.end];
   if (candidate.quote !== null) return after !== candidate.quote;
-  if (after === undefined) return next !== undefined && /^[A-Za-z0-9+/_=-]+$/.test(next.trim());
+  // A continuation holds only base64 characters, with '=' only as trailing padding: a next line
+  // such as `OTHER_KEY=value` is an assignment, not the rest of this value.
+  if (after === undefined) return next !== undefined && /^[A-Za-z0-9+/_-]+={0,2}$/.test(next.trim());
   // A percent-encoded '=' is padding, which Core Lightning ignores anyway.
   if (after === '%' && /^%3d/i.test(line.slice(candidate.end, candidate.end + 3))) return false;
   return !TERMINATORS.has(after);
