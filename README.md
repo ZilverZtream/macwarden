@@ -71,6 +71,15 @@ To see what a single macaroon can do, offline:
 macwarden inspect ./btcpay.macaroon
 ```
 
+### L402 tokens (offline)
+
+L402 (formerly LSAT) tokens pay for access to an API: a macaroon issued by the service, such as one behind [Aperture](https://github.com/lightninglabs/aperture), plus the preimage of the Lightning invoice that paid for it. `inspect` reads an `Authorization: L402 …` or legacy `LSAT` value, a `WWW-Authenticate` challenge, a `macaroon:preimage` pair, a bare L402 macaroon or a client token store file such as lnget's `~/.lnget/tokens/<domain>/l402.token`. It reports the payment hash and token ID, the services, capabilities and expiry from the caveats, and whether the preimage hashes to the payment hash, without printing the preimage or the macaroon. An L402 token gives access to a service, not control of a node: it is reported as `service-access`, never on the ADMIN to READ ladder. `scan` finds these forms in files, HTTP logs, HAR files and git history; `--fail-on READ` counts a token whose preimage is present, and a challenge or pending token, which grants nothing alone, is reported but not counted. Only the issuing service can revoke a token.
+
+```sh
+macwarden inspect ./lnget/tokens/api.example.com/l402.token
+macwarden scan . --fail-on READ
+```
+
 ### Manage a node (online)
 
 MacWarden runs with a macaroon of its own. Because that macaroon can bake other macaroons, it is admin-equivalent: make it short-lived and keep it out of application configs.
@@ -126,8 +135,8 @@ The [incident playbook](docs/incident-playbook.md) walks through the whole respo
 
 Offline:
 
-- `inspect` decodes a macaroon, `lndconnect://` URI or Nostr Wallet Connect string and grades what it can do: `ADMIN`, `SPEND`, `OPERATE`, `RECEIVE` or `READ`.
-- `scan` finds macaroons, `lndconnect://` URIs and NWC strings in files and directories; `--git-history` also reads every blob ever committed on any branch, and `--agent-configs` checks the files where AI agents and MCP clients keep credentials. `--fail-on <grade>` fails a build; `--format sarif|github` reports for CI.
+- `inspect` decodes a macaroon, `lndconnect://` URI or Nostr Wallet Connect string and grades what it can do: `ADMIN`, `SPEND`, `OPERATE`, `RECEIVE` or `READ`. It also decodes L402 (LSAT) tokens, which it reports as service access.
+- `scan` finds macaroons, `lndconnect://` URIs, NWC strings and L402 tokens in files and directories; `--git-history` also reads every blob ever committed on any branch, and `--agent-configs` checks the files where AI agents and MCP clients keep credentials. `--fail-on <grade>` fails a build; `--format sarif|github` reports for CI.
 - `attenuate` adds an expiry or IP lock to a copy of a macaroon.
 
 Online (against your LND node):
@@ -162,7 +171,7 @@ These rules are enforced in code and covered by tests; [docs/security-model.md](
 | Node.js | 22.23.2+, 24.18.1+ or 26.5.1+ (the July 2026 security releases, which fix HTTP/2 flaws CVE-2026-56846 and CVE-2026-56848 in the module `watch` uses). No runtime dependencies. |
 | Transport | REST over HTTPS; `watch` uses gRPC. For a Tor-only node, tunnel to localhost over SSH. |
 
-LND only: Core Lightning runes, LNbits keys, Eclair and LDK are not supported. Nostr Wallet Connect strings are decoded and found by `scan`, but NWC connections are revoked in the wallet service.
+LND only: Core Lightning runes, LNbits keys, Eclair and LDK are not supported. Nostr Wallet Connect strings are decoded and found by `scan`, but NWC connections are revoked in the wallet service. L402 tokens are decoded and found by `scan`; they are revoked by the service that issued them.
 
 ## How it compares
 

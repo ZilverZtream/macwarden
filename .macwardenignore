@@ -64,3 +64,9 @@ fp:eddba67f0416b0e3
 fp:f76b771b2c41b544
 fp:f7ab6cbca0cd437d
 fp:fab2bae47e567b11
+# Synthetic L402 fixtures (test/scan-fixtures/generate-l402.mjs)
+fp:e0b4c38f680f08ed test/scan-fixtures/l402/access.log
+fp:fed0a4cc51674b57 test/scan-fixtures/l402/auth.env
+fp:f7548f36b0dec9cf test/scan-fixtures/l402/client.json
+fp:e99140e3e83a9af9 test/scan-fixtures/l402/grpc.txt
+fp:fef92ffeeeda4c1c test/scan-fixtures/l402/lnget/tokens/api.example.com/l402.token

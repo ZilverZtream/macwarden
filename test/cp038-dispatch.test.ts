@@ -6,7 +6,7 @@ vi.mock('../src/commands/handlers.js', () => ({ handlers: new Proxy({
   scan: async () => { state.dispatches++;
     return { schema: 1, command: 'scan', ok: true, warnings: [], error: null, exitCode: 1,
       result: { findings: [], skipped: [], summary: { filesScanned: 0, filesSkipped: 0, dropped: 0, ignored: 0, findings: 0,
-        distinct: 0, byGrade: { ADMIN: 0, SPEND: 0, OPERATE: 0, RECEIVE: 0, READ: 0, UNASSESSED: 0, NWC: 0, UNDECODABLE: 0 } },
+        distinct: 0, byGrade: { ADMIN: 0, SPEND: 0, OPERATE: 0, RECEIVE: 0, READ: 0, UNASSESSED: 0, NWC: 0, UNDECODABLE: 0, L402: 0 } },
         failOn: { threshold: 'SPEND', count: 1 } } };
   },
 }, { get(target, key, receiver) { if (key === 'scan') state.lookups++; return Reflect.get(target, key, receiver); } }) }));

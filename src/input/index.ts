@@ -38,11 +38,35 @@ function decodeBase64(value: string): Buffer {
 
 // NIP-47 canonical and legacy schemes; decode/index.ts validates the rest.
 const nwcScheme = /^(?:nostr\+walletconnect|nostrwalletconnect):/i;
+// L402 text forms (inspect only): an Authorization value or WWW-Authenticate challenge, with or
+// without the header name, or a bare "<base64 macaroon>:<hex preimage>" pair. decode/index.ts
+// validates the rest.
+const l402Scheme = /^(?:(?:authorization|www-authenticate)[ \t]*:[ \t]*)?(?:l402|lsat)[ \t]/i;
+const l402Pair = /^[A-Za-z0-9+/_=-]{16,}:[0-9a-f]*$/i;
 
-function parseText(text: string, nwc = false): Buffer {
+function isL402Text(trimmed: string): boolean {
+  return l402Scheme.test(trimmed) || l402Pair.test(trimmed);
+}
+
+/**
+ * Aperture's token store framing (l402/token.go serializeToken): a uint32 macaroon length of 1
+ * to 65,536, the macaroon (first byte 2), then 88 bytes of payment hash, preimage, amounts and time.
+ */
+function isTokenStoreFile(bytes: Buffer): boolean {
+  if (bytes.length < 4 + 1 + 88 || bytes[0] !== 0x00) return false;
+  const length = bytes.readUInt32BE(0);
+  return length >= 1 && length <= 65_536 && bytes.length >= 4 + length + 88 && bytes[4] === 0x02;
+}
+
+/** Credential forms beyond macaroons that a command accepts: NWC URIs, L402 credentials. */
+type Forms = { nwc?: boolean; l402?: boolean };
+
+function parseText(text: string, forms: Forms = {}): Buffer {
   const trimmed = text.trim();
   // An NWC URI is kept verbatim inside the Secret container; decode/index.ts parses it.
-  if (nwc && nwcScheme.test(trimmed)) return /\s/.test(trimmed) ? invalidForm() : Buffer.from(trimmed, 'utf8');
+  if (forms.nwc && nwcScheme.test(trimmed)) return /\s/.test(trimmed) ? invalidForm() : Buffer.from(trimmed, 'utf8');
+  // An L402 Authorization value, challenge or pair is kept verbatim too, as one line.
+  if (forms.l402 && isL402Text(trimmed)) return /[\r\n]/.test(trimmed) ? invalidForm() : Buffer.from(trimmed, 'latin1');
   if (/^lndconnect:\/\//i.test(trimmed)) return parseLndconnect(trimmed) ?? invalidForm();
   const value = text.replace(/\s/g, '');
   if (!value) return invalidForm();
@@ -56,20 +80,23 @@ function parseText(text: string, nwc = false): Buffer {
   return decodeBase64(value);
 }
 
-function parseBytes(bytes: Buffer, nwc = false): Buffer {
+function parseBytes(bytes: Buffer, forms: Forms = {}): Buffer {
   if (bytes[0] === 0x02) return bytes;
+  // An Aperture L402 token store file is binary and starts with its macaroon length, a
+  // big-endian uint32 below 2^24: decode/index.ts checks its framing.
+  if (forms.l402 && isTokenStoreFile(bytes)) return bytes;
   if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
     if ((bytes.length - 2) % 2 !== 0) return invalidForm();
-    return parseText(bytes.subarray(2).toString('utf16le'), nwc);
+    return parseText(bytes.subarray(2).toString('utf16le'), forms);
   }
   if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
     if ((bytes.length - 2) % 2 !== 0) return invalidForm();
     const swapped = Buffer.from(bytes.subarray(2));
     swapped.swap16();
-    return parseText(swapped.toString('utf16le'), nwc);
+    return parseText(swapped.toString('utf16le'), forms);
   }
   const start = bytes.subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf])) ? 3 : 0;
-  return parseText(bytes.subarray(start).toString('utf8'), nwc);
+  return parseText(bytes.subarray(start).toString('utf8'), forms);
 }
 
 async function stdinBytes(stream: Readable): Promise<Buffer> {
@@ -134,12 +161,12 @@ async function fileBytes(handle: fs.FileHandle): Promise<Buffer> {
 export async function readCredential(
   arg: string,
   io: InputIO,
-  opts: { unsafeArg: boolean; nwc?: boolean },
+  opts: { unsafeArg: boolean; nwc?: boolean; l402?: boolean },
 ): Promise<{ secret: Secret; literal: boolean }> {
-  const nwc = opts.nwc === true;
+  const forms: Forms = { nwc: opts.nwc === true, l402: opts.l402 === true };
   if (arg === '-') {
     if (io.stdin.isTTY) throw new UsageError('stdin is a TTY');
-    return { secret: new Secret(parseBytes(await stdinBytes(io.stdin), nwc)), literal: false };
+    return { secret: new Secret(parseBytes(await stdinBytes(io.stdin), forms)), literal: false };
   }
 
   let sourceStat: BigIntStats | undefined;
@@ -181,12 +208,12 @@ export async function readCredential(
       }
     }
     if (readFailed || !bytes) throw new InputError('input-read');
-    return { secret: new Secret(parseBytes(bytes, nwc)), literal: false };
+    return { secret: new Secret(parseBytes(bytes, forms)), literal: false };
   }
 
   // An encoded literal can contain a protected-looking path component. Only
   // an established file path takes precedence over literal classification.
-  let supportedLiteral = /^lndconnect:\/\//i.test(arg) || (nwc && nwcScheme.test(arg));
+  let supportedLiteral = /^lndconnect:\/\//i.test(arg) || (forms.nwc && nwcScheme.test(arg)) || (forms.l402 && isL402Text(arg.trim()));
   if (!supportedLiteral) {
     try {
       supportedLiteral = parseText(arg)[0] === 0x02;
@@ -197,5 +224,5 @@ export async function readCredential(
     if (supportedLiteral) throw new UsageError(literalRefusal);
     throw new InputError('input-read', 'no such file');
   }
-  return { secret: new Secret(parseText(arg, nwc)), literal: true };
+  return { secret: new Secret(parseText(arg, forms)), literal: true };
 }

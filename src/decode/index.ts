@@ -355,10 +355,11 @@ function parsedMacaroon(data: Buffer, onCaveat?: (value: Section) => void):
  * Trailing bytes are never part of it. Generic Secret containers holding anything else get null
  * and keep hashing their own bytes.
  */
-export function canonicalMacaroonForm(data: Buffer): { length: number; reencoded: Buffer | null } | null {
+export function canonicalMacaroonForm(data: Buffer, checkIdentifier: (value: Buffer) => unknown = identifier):
+  { length: number; reencoded: Buffer | null } | null {
   try {
     const { parsed, end, canonicalLength } = parsedMacaroon(data);
-    identifier(parsed.header.identifier);
+    checkIdentifier(parsed.header.identifier);
     if (canonicalLength === end) return { length: end, reencoded: null };
     // Any non-canonical framing only adds bytes, so equal lengths mean equal bytes.
     const marshalled = (value: Section): Buffer[] => encodeSection({ identifier: value.identifier,
@@ -604,4 +605,282 @@ export function decodeNwc(secret: Secret): NwcFacts {
   if (lud16 !== null) refuseSecret([lud16], windows, 'nwc-lud16');
 
   return { fingerprint, walletPubkey: wallet.toLowerCase(), clientPubkey, relays, lud16, relayDetailsRemoved };
+}
+
+// L402 (formerly LSAT) credentials: a macaroon minted by an L402 server such as Aperture plus
+// the preimage of the Lightning invoice it commits to. The macaroon identifier is Aperture's
+// l402.Identifier: a big-endian uint16 version (0), the 32-byte payment hash and a 32-byte
+// token ID (lightninglabs/aperture l402/identifier.go). Caveats are "condition=value" strings
+// (l402/caveat.go, l402/service.go). Only this module reveals the credential; callers get facts
+// without the preimage or macaroon bytes.
+const L402_IDENTIFIER_LENGTH = 66;
+const L402_PREIMAGE_LENGTH = 32;
+// Aperture's token store (l402/token.go serializeToken): uint32 macaroon length, macaroon,
+// payment hash, preimage (zero while pending), amount paid, routing fee and creation time.
+const L402_TOKEN_TAIL = 32 + 32 + 8 + 8 + 8;
+/** Largest macaroon a token file may hold, as for *.macaroon files. */
+const L402_TOKEN_MACAROON_LIMIT = 65_536;
+/** Macaroons one Authorization value may carry; the L402 grammar sets no limit, Aperture accepts one. */
+export const L402_MAX_MACAROONS = 16;
+const l402Preimage = Symbol('l402 preimage');
+
+export type L402Form = 'authorization' | 'challenge' | 'pair' | 'macaroon' | 'token-file';
+export type L402CaveatType = 'services' | 'capabilities' | 'valid-until' | 'preimage' | 'constraint' | 'third-party'
+  | 'unknown' | 'withheld';
+export type L402Caveat = { type: L402CaveatType; condition: string | null; value: string | null; service?: string };
+export type L402Facts = {
+  form: L402Form;
+  scheme: 'L402' | 'LSAT' | null;
+  fingerprint: string;
+  macaroonFingerprint: string;
+  /** How many macaroons the credential carries; the facts describe the primary one. */
+  macaroons: number;
+  location: string | null;
+  identifier: { version: number; paymentHash: string; tokenId: string } | null;
+  caveats: L402Caveat[];
+  preimage: 'absent' | 'matches' | 'mismatch' | 'unverifiable';
+  preimageSource: 'credential' | 'caveat' | null;
+  warnings: string[];
+};
+/** An L402 form that carries an LND macaroon instead: it is inspected as that macaroon. */
+export type L402Decoded = { l402: L402Facts } | { lnd: Secret };
+
+function l402Fail(stage: 'l402-form' | 'l402-preimage', message?: string): never {
+  throw new DecodeError(stage, message ?? `invalid L402 credential ${stage}`);
+}
+
+/** An Aperture version 0 identifier: exactly 66 bytes starting with version 0. */
+export function isL402Identifier(data: Uint8Array): boolean {
+  return data.length === L402_IDENTIFIER_LENGTH && data[0] === 0 && data[1] === 0;
+}
+
+function sha256Hex(...parts: Uint8Array[]): string {
+  const hash = nwcHash('sha256');
+  for (const part of parts) nwcHashUpdate(hash, part);
+  return nwcHashDigest(hash, 'hex');
+}
+
+// Canonical base64 or base64url, padded or not, as readCredential accepts it.
+function strictBase64(value: string): Buffer | null {
+  const standard = /^[A-Za-z0-9+/]+={0,2}$/.test(value);
+  const url = /^[A-Za-z0-9_-]+={0,2}$/.test(value);
+  if ((!standard && !url) || value.length % 4 === 1) return null;
+  const padding = value.length - value.replace(/=+$/, '').length;
+  if (padding > 0 && value.length % 4 !== 0) return null;
+  const bytes = Buffer.from(value, standard ? 'base64' : 'base64url');
+  if (!bytes.length || bytes.toString(standard ? 'base64' : 'base64url').replace(/=+$/, '') !== value.replace(/=+$/, '')) return null;
+  return bytes;
+}
+
+// The text forms an inspect input may hold: an Authorization value or a WWW-Authenticate
+// challenge (each optionally with its header name), or a bare "<base64 macaroon>:<hex
+// preimage>" pair.
+const L402_SCHEME = /^(?:(?:authorization|www-authenticate)[ \t]*:[ \t]*)?(?:l402|lsat)[ \t]/i;
+const L402_AUTHORIZATION = /^(?:authorization[ \t]*:[ \t]*)?(l402|lsat)[ \t]+(\S*)$/i;
+// A challenge's parameters (L402 section 5.1): macaroon="<base64>" and invoice="<bolt11>";
+// some servers name the macaroon "token" (getAlby/js-lightning-tools parseL402).
+const L402_CHALLENGE = /^(?:(?:www-authenticate|authorization)[ \t]*:[ \t]*)?(l402|lsat)[ \t]+(.*)$/i;
+const L402_CHALLENGE_PARAMETER = /(?:^|,)[ \t]*(?:macaroon|token|invoice)[ \t]*=/i;
+const L402_CHALLENGE_MACAROON = /(?:^|,)[ \t]*(?:macaroon|token)[ \t]*=[ \t]*("?)([A-Za-z0-9+/_=-]*)\1[ \t]*(?=,|$)/i;
+const L402_PAIR = /^([A-Za-z0-9+/_=-]{16,}):([0-9a-f]*)$/i;
+
+function l402Text(bytes: Buffer): string | null {
+  if (bytes.length === 0 || bytes[0] === 0 || bytes[0] === 2) return null;
+  const text = bytes.toString('latin1');
+  return L402_SCHEME.test(text) || L402_PAIR.test(text) ? text : null;
+}
+
+function tokenFileLayout(data: Buffer): { macaroonEnd: number; end: number } | null {
+  if (data.length < 4 || data[0] !== 0) return null;
+  const length = data.readUInt32BE(0);
+  if (length === 0 || length > L402_TOKEN_MACAROON_LIMIT || data.length < 4 + length + L402_TOKEN_TAIL || data[4] !== 2) return null;
+  return { macaroonEnd: 4 + length, end: 4 + length + L402_TOKEN_TAIL };
+}
+
+/** True when the container holds an L402 header value, a challenge, a pair or a token store file. */
+export function isL402Container(secret: Secret): boolean {
+  const bytes = revealSecret(secret);
+  return l402Text(bytes) !== null || tokenFileLayout(bytes) !== null;
+}
+
+/** True when the container holds a bare macaroon whose identifier is an L402 identifier. */
+export function isL402Macaroon(secret: Secret): boolean {
+  try {
+    return isL402Identifier(parsedMacaroon(revealSecret(secret)).parsed.header.identifier);
+  } catch { return false; }
+}
+
+/** Hex of the preimage these facts were decoded with, for redaction only; never rendered. */
+export function l402RedactionSecret(facts: L402Facts): string | null {
+  return (facts as L402Facts & { [l402Preimage]?: string })[l402Preimage] ?? null;
+}
+
+function containsSecret(text: string, preimage: Buffer): boolean {
+  if (text.toLowerCase().includes(preimage.toString('hex'))) return true;
+  return [preimage.toString('base64'), preimage.toString('base64url')]
+    .some(encoded => text.includes(encoded.replace(/=+$/, '')));
+}
+
+function l402Caveat(value: Section): L402Caveat {
+  if (value.vid !== null && value.vid.length > 0) {
+    return { type: 'third-party', condition: null, value: value.location?.toString('utf8') ?? '' };
+  }
+  // Aperture's DecodeCaveat splits at the first "=" and ignores caveats without one.
+  const text = value.identifier.toString('utf8');
+  const at = text.indexOf('=');
+  if (at < 0) return { type: 'unknown', condition: null, value: text };
+  const condition = text.slice(0, at);
+  const conditionValue = text.slice(at + 1);
+  if (condition === 'services') return { type: 'services', condition, value: conditionValue };
+  if (condition === 'preimage') return { type: 'preimage', condition, value: null };
+  if (condition.endsWith('_capabilities'))
+    return { type: 'capabilities', condition, value: conditionValue, service: condition.slice(0, -'_capabilities'.length) };
+  if (condition.endsWith('_valid_until'))
+    return { type: 'valid-until', condition, value: conditionValue, service: condition.slice(0, -'_valid_until'.length) };
+  return { type: 'constraint', condition, value: conditionValue };
+}
+
+type ParsedL402Macaroon = { data: Buffer; header: Section; caveats: Section[]; end: number; omitted: number; canonical: Buffer };
+
+function parsedL402(mac: Secret): ParsedL402Macaroon {
+  const data = revealSecret(mac);
+  const caveats: Section[] = [];
+  const { parsed: { header }, end, omittedCaveats } = parsedMacaroon(data, value => {
+    if (caveats.length < MAX_CAVEATS) caveats.push(value);
+  });
+  const canonical = canonicalMacaroonForm(data, () => undefined);
+  return { data, header, caveats, end, omitted: omittedCaveats, canonical: canonical?.reencoded ?? data.subarray(0, end) };
+}
+
+/**
+ * The facts of an L402 credential: one or more macaroons (in order) and the preimage presented
+ * with them. Throws DecodeError for a macaroon that does not parse. `presented` is the
+ * separately presented preimage (Authorization value, pair or token file), null when there is
+ * none. With several macaroons, the primary one is the first with an L402 identifier (else the
+ * first); its facts are reported and the preimage is checked against its payment hash.
+ */
+export function decodeL402Macaroons(macs: Secret[], presented: Secret | null, form: L402Form,
+  scheme: 'L402' | 'LSAT' | null = null): L402Decoded {
+  if (macs.length === 0 || macs.length > L402_MAX_MACAROONS) return l402Fail('l402-form');
+  const parsed = macs.map(parsedL402);
+  // A credential that carries exactly one LND macaroon carries that LND macaroon.
+  if (parsed.length === 1 && validMacaroonIdentifier(parsed[0].header.identifier)) return { lnd: new Secret(parsed[0].data) };
+  const primary = parsed.find(item => isL402Identifier(item.header.identifier)) ?? parsed[0];
+  const warnings: string[] = [];
+  if (parsed.length > 1) warnings.push('l402-several-macaroons');
+  if (primary.omitted > 0) warnings.push('caveats-exceed-bounds');
+  if (parsed.some(item => item.end < item.data.length)) warnings.push('trailing-bytes');
+  const id = primary.header.identifier;
+  const identifierFacts = isL402Identifier(id)
+    ? { version: 0, paymentHash: id.subarray(2, 34).toString('hex'), tokenId: id.subarray(34, 66).toString('hex') } : null;
+  if (identifierFacts === null) warnings.push('l402-identifier-unrecognized');
+  let caveats = primary.caveats.map(l402Caveat);
+
+  // Aperture reads the Authorization preimage; without one, the last preimage caveat (l402/header.go).
+  const presentedBytes = presented === null ? null : revealSecret(presented);
+  let preimage: Buffer | null = presentedBytes;
+  let preimageSource: L402Facts['preimageSource'] = presentedBytes === null ? null : 'credential';
+  if (preimage === null) {
+    let last: string | undefined;
+    for (const value of primary.caveats) {
+      if (value.vid !== null && value.vid.length > 0) continue;
+      const text = value.identifier.toString('utf8');
+      if (text.startsWith('preimage=')) last = text.slice('preimage='.length);
+    }
+    if (last !== undefined) {
+      if (/^[0-9a-f]{64}$/i.test(last)) { preimage = Buffer.from(last, 'hex'); preimageSource = 'caveat'; }
+      else warnings.push('l402-bad-preimage-caveat');
+    }
+  }
+  let location = primary.header.location?.toString('utf8') ?? null;
+  if (preimage !== null) {
+    // Nothing reported may carry the preimage: such a caveat or location is withheld.
+    const secret = preimage;
+    let withheld = false;
+    caveats = caveats.map(caveat => {
+      if (caveat.type === 'preimage') return caveat;
+      if (![caveat.condition, caveat.value].some(text => text !== null && containsSecret(text, secret))) return caveat;
+      withheld = true;
+      return { type: 'withheld', condition: null, value: null };
+    });
+    if (location !== null && containsSecret(location, secret)) { location = null; withheld = true; }
+    if (withheld) warnings.push('l402-caveat-withheld');
+  }
+  const macaroonFingerprint = `fp:${sha256Hex(primary.canonical).slice(0, 16)}`;
+  const fingerprint = presentedBytes === null && parsed.length === 1 ? macaroonFingerprint
+    : `fp:${sha256Hex(...parsed.map(item => item.canonical), ...(presentedBytes === null ? [] : [presentedBytes])).slice(0, 16)}`;
+  const status: L402Facts['preimage'] = preimage === null ? 'absent' : identifierFacts === null ? 'unverifiable'
+    : sha256Hex(preimage) === identifierFacts.paymentHash ? 'matches' : 'mismatch';
+  const facts: L402Facts = { form, scheme, fingerprint, macaroonFingerprint, macaroons: parsed.length, location,
+    identifier: identifierFacts, caveats, preimage: status, preimageSource, warnings: [...new Set(warnings)] };
+  if (preimage !== null) Object.defineProperty(facts, l402Preimage, { value: preimage.toString('hex'), enumerable: false });
+  return { l402: facts };
+}
+
+/** One macaroon and its presented preimage; see decodeL402Macaroons. */
+export function decodeL402Macaroon(mac: Secret, presented: Secret | null, form: L402Form,
+  scheme: 'L402' | 'LSAT' | null = null): L402Decoded {
+  return decodeL402Macaroons([mac], presented, form, scheme);
+}
+
+/** The macaroon a WWW-Authenticate challenge carries, from its first macaroon (or token) parameter. */
+export function l402ChallengeMacaroon(text: string): string | null {
+  const challenge = L402_CHALLENGE.exec(text);
+  if (!challenge || !L402_CHALLENGE_PARAMETER.test(challenge[2])) return null;
+  const match = L402_CHALLENGE_MACAROON.exec(challenge[2]);
+  return match ? match[2] : null;
+}
+
+function decodeL402Text(text: string): L402Decoded {
+  const challenge = L402_CHALLENGE.exec(text);
+  if (challenge && L402_CHALLENGE_PARAMETER.test(challenge[2])) {
+    const value = l402ChallengeMacaroon(text);
+    const macaroon = value === null ? null : strictBase64(value);
+    if (macaroon === null) return l402Fail('l402-form');
+    return decodeL402Macaroon(new Secret(macaroon), null, 'challenge', challenge[1].toUpperCase() as 'L402' | 'LSAT');
+  }
+  const authorization = L402_AUTHORIZATION.exec(text);
+  if (authorization === null && L402_SCHEME.test(text)) return l402Fail('l402-form');
+  const scheme = authorization ? (authorization[1].toUpperCase() as 'L402' | 'LSAT') : null;
+  const body = authorization ? authorization[2] : text;
+  const colon = body.lastIndexOf(':');
+  if (colon < 0) return l402Fail('l402-form');
+  const parts = body.slice(0, colon).split(',');
+  if (parts.length > L402_MAX_MACAROONS) return l402Fail('l402-form', `an L402 credential with more than ${L402_MAX_MACAROONS} macaroons is not read`);
+  const preimage = body.slice(colon + 1);
+  const macaroons = parts.map(strictBase64);
+  if (macaroons.some(macaroon => macaroon === null)) return l402Fail('l402-form');
+  // Aperture requires exactly 64 hex digits (l402/header.go authRegex).
+  if (!/^[0-9a-f]{64}$/i.test(preimage)) return l402Fail('l402-preimage');
+  return decodeL402Macaroons(macaroons.map(macaroon => new Secret(macaroon!)), new Secret(Buffer.from(preimage, 'hex')),
+    authorization ? 'authorization' : 'pair', scheme);
+}
+
+/**
+ * Decodes an L402 container: an Authorization value, challenge or macaroon:preimage pair
+ * (text), an Aperture token store file, or a bare macaroon with an L402 identifier.
+ */
+export function decodeL402(secret: Secret): L402Decoded {
+  const bytes = revealSecret(secret);
+  const text = l402Text(bytes);
+  if (text !== null) return decodeL402Text(text);
+  if (bytes.length > 0 && bytes[0] === 0) {
+    const layout = tokenFileLayout(bytes);
+    // Neither a macaroon (first byte 2) nor a token store file.
+    if (layout === null) return fail('v2-header');
+    const macaroon = bytes.subarray(4, layout.macaroonEnd);
+    const tokenHash = bytes.subarray(layout.macaroonEnd, layout.macaroonEnd + 32);
+    const preimage = bytes.subarray(layout.macaroonEnd + 32, layout.macaroonEnd + 32 + L402_PREIMAGE_LENGTH);
+    // A pending token holds the zero preimage until its invoice is paid (l402/token.go).
+    const paid = preimage.some(byte => byte !== 0);
+    const decodedToken = decodeL402Macaroon(new Secret(macaroon), paid ? new Secret(preimage) : null, 'token-file');
+    if ('lnd' in decodedToken) return decodedToken;
+    const facts = decodedToken.l402;
+    const extra: string[] = [];
+    if (facts.identifier !== null && facts.identifier.paymentHash !== tokenHash.toString('hex')) extra.push('l402-token-hash-differs');
+    if (layout.end < bytes.length) extra.push('trailing-bytes');
+    facts.warnings = [...new Set([...facts.warnings, ...extra])];
+    return decodedToken;
+  }
+  return decodeL402Macaroon(secret, null, 'macaroon');
 }
