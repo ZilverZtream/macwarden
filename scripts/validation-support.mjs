@@ -39,11 +39,16 @@ export function collectedCaseName(test) {
     : test.fullName || test.title;
 }
 
+// The npm that ships with the running Node: beside node.exe on Windows, and in
+// <prefix>/lib/node_modules under <prefix>/bin/node on Linux (the official archives,
+// nvm and actions/setup-node). Distribution packages keep npm in a system directory.
 function npmCli() {
   const candidates = [join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    join(dirname(process.execPath), '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
     '/usr/share/nodejs/npm/bin/npm-cli.js', '/usr/lib/node_modules/npm/bin/npm-cli.js'];
   return candidates.find(path => path && existsSync(path));
 }
+const npmMissing = () => ({ exitCode: 1, output: `npm CLI not found for ${process.execPath}\n`, timedOut: false });
 
 // MACWARDEN_VALIDATION_TIMEOUT_MS bounds every general command (1 to 600000 ms).
 export function commandTimeout() {
@@ -65,7 +70,7 @@ export function oracleCommandTimeout(generalTimeout) {
 
 export function run(program, args, root, env, input, timeout = 180_000) {
   const cli = program === 'npm' ? npmCli() : null;
-  if (program === 'npm' && !cli) return { exitCode: 1, output: '', timedOut: false };
+  if (program === 'npm' && !cli) return npmMissing();
   const result = spawnSync(program === 'npm' ? process.execPath : program,
     program === 'npm' ? [cli, ...args] : args,
     { cwd: root, env, input, encoding: 'utf8', timeout, maxBuffer: 32_000_000 });
@@ -76,7 +81,7 @@ export function run(program, args, root, env, input, timeout = 180_000) {
 
 export function runNpm(args, root, env, timeout) {
   const cli = npmCli();
-  if (!cli) return Promise.resolve({ exitCode: 1, output: '', timedOut: false });
+  if (!cli) return Promise.resolve(npmMissing());
   return new Promise(resolveResult => {
     const output = [];
     let outputSize = 0;

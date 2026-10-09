@@ -53,6 +53,8 @@ async function validate(args) {
   const runtime = await createPrivateDirectory(runtimeParent, 'full-runtime-');
   result.lifecycle = { runtime, retention: 'private originals retained', owners: [] };
   const contexts = [];
+  // Failed commands' own output, for a redacted tail in the failure message.
+  const failedOutputs = [];
   const context = async owner => {
     const scratch = await createPrivateDirectory(runtime, `macwarden-full-${owner}-`);
     const sentinels = await createPrivateDirectory(runtime, `macwarden-sentinels-${owner}-`);
@@ -71,7 +73,11 @@ async function validate(args) {
     result.commands.push({ owner: ctx.owner, argv, exitCode: invocation.exitCode, timedOut: invocation.timedOut,
       ...(directVitest ? { program: process.execPath, cli: vitestCli } : {}) });
     ctx.output += invocation.output;
-    if (invocation.exitCode !== 0) result.checks.push({ name: `command:${ctx.owner}:${argv.join(' ')}`, status: 'FAIL' });
+    if (invocation.exitCode !== 0) {
+      const name = `command:${ctx.owner}:${argv.join(' ')}`;
+      result.checks.push({ name, status: 'FAIL' });
+      failedOutputs.push({ ctx, name, exitCode: invocation.exitCode, timedOut: invocation.timedOut, output: invocation.output });
+    }
     return invocation.exitCode === 0;
   };
   const inventory = async (ctx, config, label) => {
@@ -229,8 +235,26 @@ async function validate(args) {
     // Check names only: the evidence file holds the details.
     const failed = result.checks.filter(check => check.status !== 'PASS').map(check => check.name);
     process.stderr.write(`full validation FAIL: ${failed.join(', ') || 'see evidence'}; evidence in ${attempt}\n`);
+    for (const failure of failedOutputs) process.stderr.write(commandTail(root, failure));
   }
   return result.status === 'PASS' ? 0 : 1;
+}
+
+/**
+ * The end of a failed command's output, redacted with its owner's sentinels, so that a
+ * failure can be diagnosed from the message alone. A tail that still holds a registered
+ * credential after redaction is withheld; the evidence logs keep the whole redacted output.
+ */
+function commandTail(root, { ctx, name, exitCode, timedOut, output }) {
+  const heading = `--- ${name}: ${timedOut ? 'timed out' : `exit ${exitCode}`}`;
+  try {
+    const options = { root, sentinels: join(root, 'test/sentinels.json'), sentinelDir: ctx.sentinels };
+    const tail = sentinelRedactor(options)(output).slice(-2_000).trimEnd();
+    if (findLeaks({ ...options, commandOutput: tail })) return `${heading}; output withheld (possible credential)\n`;
+    return tail ? `${heading}; output tail:\n${tail}\n` : `${heading}; no output\n`;
+  } catch {
+    return `${heading}; output withheld (leak check unavailable)\n`;
+  }
 }
 
 /** One line naming why validation did not start. */

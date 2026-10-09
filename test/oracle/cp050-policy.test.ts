@@ -8,14 +8,14 @@ import { fixtureTopology } from '../fixture/topology.mjs';
 import { FixtureInvalidError } from '../helpers/fixture-invalid.mjs';
 import { childEnvironment } from '../helpers/environment.js';
 import { findLeaks } from '../helpers/leak-check.js';
-import { fullControl } from '../harness/cp050-full.js';
+import { FULL_CONTROL_TIMEOUT_MS, fullControl } from '../harness/cp050-full.js';
 
 it('CP-050/selection-and-evidence-ground-truth actual full validation retains complete evidence and rejects incomplete or changed inputs', () => {
   fullControl('complete');
   fullControl('changed-candidate');
   fullControl('selective-as-full');
   fullControl('metadata-leak');
-});
+}, 4 * FULL_CONTROL_TIMEOUT_MS + 60_000);
 
 it('CP-050/fixture-shard-isolation two fresh pinned owners isolate mutations and teardown', async () => {
   const scratch = process.env.MACWARDEN_TEST_TMP;
