@@ -16,7 +16,11 @@ function scratch(): string {
   return dir;
 }
 
-/** fs reporting owner-only POSIX files of uid 1000 (any host), recording directory syncs. */
+// The owner-only creation compares the file's uid with the process's own (process.getuid), so the fake
+// reports whatever this host's uid is (1000 on a workstation, 1001 on a GitHub runner).
+const UID = process.getuid?.() ?? 1000;
+
+/** fs reporting owner-only POSIX files of this uid (any host), recording directory syncs. */
 function posixFs(journalDir: string, synced: string[]) {
   return { ...fs, open: async (...args: Parameters<typeof fs.open>) => {
     if (resolve(String(args[0])) === resolve(journalDir) && args[1] === 'r')
@@ -25,7 +29,7 @@ function posixFs(journalDir: string, synced: string[]) {
     return new Proxy(handle, { get(target, key) {
       if (key === 'stat') return async () => {
         const real = await target.stat();
-        return { isFile: () => true, dev: real.dev, ino: real.ino, size: real.size, mode: 0o100600, uid: 1000 };
+        return { isFile: () => true, dev: real.dev, ino: real.ino, size: real.size, mode: 0o100600, uid: UID };
       };
       const value = Reflect.get(target, key, target);
       return typeof value === 'function' ? value.bind(target) : value;
@@ -35,9 +39,9 @@ function posixFs(journalDir: string, synced: string[]) {
 
 it('PAYJ/durability a new journal syncs its directory on POSIX, not for an existing journal or on Windows', async () => {
   const dir = scratch(), path = join(dir, 'payments.journal'), synced: string[] = [];
-  await (await openJournal(path, { fs: posixFs(dir, synced), platform: 'linux', uid: 1000 })).close();
+  await (await openJournal(path, { fs: posixFs(dir, synced), platform: 'linux', uid: UID })).close();
   expect(synced.map(item => resolve(item))).toEqual([resolve(dirname(path))]);
-  await (await openJournal(path, { fs: posixFs(dir, synced), platform: 'linux', uid: 1000 })).close();
+  await (await openJournal(path, { fs: posixFs(dir, synced), platform: 'linux', uid: UID })).close();
   expect(synced).toHaveLength(1);
   const windows = join(scratch(), 'payments.journal'), none: string[] = [];
   await (await openJournal(windows, { fs: posixFs(dirname(windows), none), platform: 'win32' })).close();
