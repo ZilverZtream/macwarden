@@ -15,6 +15,8 @@ import { macwardenVersion } from '../version.js';
 import { namesRegistryFile, registryPath, REGISTRY_OUT_REFUSAL } from './bake/out-registry.js';
 import { reserveOut } from './bake/write-out.js';
 import { reserveFailure } from './bake/out-errors.js';
+import { interruptibleChecks, interruptibleReserve, OUT_CREATION_INTERRUPTED, rethrowCancelled } from './bake/out-interrupt.js';
+import { Cancelled } from '../cancellation.js';
 
 type ReadLnd = LndAdapter;
 export type Deps = {
@@ -110,10 +112,12 @@ async function runSteps(args: string[], deps: Deps): Promise<InventoryOutput> {
   const reportName = reportOut === undefined ? null : outputNameProblem(reportOut);
   if (reportName) return fail(3, 'N7', `report path refused: ${reportName}`);
   if (reportOut !== undefined) {
+    // Each check is abandoned on an interrupt (a stalled mount): exit 6, step cancelled.
+    const checks = interruptibleChecks(deps.fs);
     let reportPath: string;
-    try { reportPath = await resolveUnprotectedPath(reportOut, deps.fs); }
-    catch { return fail(3, 'N7', 'cannot check report path'); }
-    const registryFile = await registryPath(supplied['--registry'], deps.fs, deps.env);
+    try { reportPath = await resolveUnprotectedPath(reportOut, checks); }
+    catch (error) { rethrowCancelled(error); return fail(3, 'N7', 'cannot check report path'); }
+    const registryFile = await registryPath(supplied['--registry'], checks, deps.env);
     if (registryFile !== null && namesRegistryFile(reportPath, registryFile))
       return fail(3, 'N7', REGISTRY_OUT_REFUSAL.replace('output path', 'report path'));
   }
@@ -281,14 +285,17 @@ async function runSteps(args: string[], deps: Deps): Promise<InventoryOutput> {
   const text = formatAccessReview(review, reportFormat);
   let path: string | null = null;
   if (reportOut !== undefined) {
-    try { await deps.fs.lstat(reportOut); return fail(3, 'N7', 'report file already exists', warnings); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return fail(3, 'N7', 'cannot check report path', warnings); }
+    try { await interruptibleChecks(deps.fs).lstat(reportOut); return fail(3, 'N7', 'report file already exists', warnings); }
+    catch (error) { rethrowCancelled(error); if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return fail(3, 'N7', 'cannot check report path', warnings); }
     try {
-      const reserved = await reserveOut(reportOut, deps.fs as typeof nodeFs);
+      const reserved = await interruptibleReserve(() => reserveOut(reportOut, deps.fs as typeof nodeFs));
       if (reserved.aclWarning) warnings.push('acl-best-effort');
       try { await reserved.reservation.write(new Secret(Buffer.from(text, 'utf8'))); }
       catch (error) { await reserved.reservation.discard().catch(() => undefined); throw error; }
-    } catch (error) { return fail(3, 'N7', reserveFailure(error, 'cannot write report file'), warnings); }
+    } catch (error) {
+      if (error instanceof Cancelled) return fail(6, 'cancelled', OUT_CREATION_INTERRUPTED.replace('output file', 'report file'), warnings);
+      return fail(3, 'N7', reserveFailure(error, 'cannot write report file'), warnings);
+    }
     path = resolve(reportOut);
   }
   if (output.ok && output.command === 'inventory') {

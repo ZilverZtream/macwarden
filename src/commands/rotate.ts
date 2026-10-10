@@ -20,6 +20,7 @@ import { rotateConfirmation, rotatePlanResult, writeRotateFinishPlan, writeRotat
   type OutputResult, type RotatePlan, type RotateStagedResult, type RotateFinishedResult } from '../output/index.js';
 import { namesRegistryFile, REGISTRY_OUT_REFUSAL } from './bake/out-registry.js';
 import { reserveOut, type ReservedOut } from './bake/write-out.js';
+import { interruptibleChecks, interruptibleReserve, OUT_CREATION_INTERRUPTED, rethrowCancelled } from './bake/out-interrupt.js';
 import { reserveFailure } from './bake/out-errors.js';
 import { allocateRootKeyId } from './bake/allocate.js';
 
@@ -426,12 +427,14 @@ async function runSteps(args: string[], deps: Deps, state: RunState): Promise<Ro
   if (isProtectedPath(request.out)) return fail(3, 'S5', 'protected output path');
   const outName = outputNameProblem(request.out);
   if (outName) return fail(3, 'S5', `output path refused: ${outName}`);
+  // Each check is abandoned on an interrupt (a stalled mount): exit 6, step cancelled.
+  const checks = interruptibleChecks(deps.fs);
   let outPath: string;
-  try { outPath = await resolveUnprotectedPath(request.out, deps.fs); }
-  catch { return fail(3, 'S5', 'cannot check output path'); }
+  try { outPath = await resolveUnprotectedPath(request.out, checks); }
+  catch (error) { rethrowCancelled(error); return fail(3, 'S5', 'cannot check output path'); }
   if (namesRegistryFile(outPath, registry.location)) return fail(3, 'S5', REGISTRY_OUT_REFUSAL);
-  try { await deps.fs.lstat(request.out); return fail(3, 'S5', 'output file already exists'); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
+  try { await checks.lstat(request.out); return fail(3, 'S5', 'output file already exists'); }
+  catch (error) { rethrowCancelled(error); if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
     return fail(3, 'S5', 'cannot check output path'); }
   request.out = outPath;
 
@@ -470,10 +473,13 @@ async function runSteps(args: string[], deps: Deps, state: RunState): Promise<Ro
         registry.reload(current.entries);
       } catch { return fail(3, 'S7', 'unreadable or invalid registry on reread; nothing sent to LND', warnings); }
       try {
-        const reserved = await reserveOut(request.out, deps.fs);
+        const reserved = await interruptibleReserve(() => reserveOut(request.out, deps.fs));
         reservation = reserved.reservation;
         if (reserved.aclWarning) warnings.push('acl-best-effort');
-      } catch (error) { return fail(3, 'S7', reserveFailure(error), warnings); }
+      } catch (error) {
+        if (error instanceof Cancelled) return fail(6, 'cancelled', OUT_CREATION_INTERRUPTED, warnings);
+        return fail(3, 'S7', reserveFailure(error), warnings);
+      }
     }
     const adapter = deps.lnd ?? deps.createAdapter?.({ restUrl: request.host, tlsCert: cert, macaroon: own });
     if (!adapter) throw new Error('missing LND adapter');

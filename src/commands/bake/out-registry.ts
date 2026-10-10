@@ -1,5 +1,6 @@
 import * as nodeFs from 'node:fs/promises';
 import { normalize } from 'node:path';
+import { checkCancellation } from '../../cancellation.js';
 import { openRegistry } from '../../registry/index.js';
 
 // Where an --out may not go: the registry file and the files named after it. Kept apart from
@@ -11,7 +12,8 @@ export const REGISTRY_OUT_REFUSAL = 'output path refused: it names the registry 
 /**
  * The registry file the command will use, resolved as openRegistry resolves it (realpath of the
  * existing part of the path), without reading it; null when it cannot be resolved, in which case
- * the command's registry step refuses it before anything is written.
+ * the command's registry step refuses it before anything is written. An interrupt during the
+ * resolution (with interruptible `fs` calls) rejects with Cancelled instead.
  */
 export async function registryPath(path: string | undefined, fs: Pick<typeof nodeFs, 'realpath' | 'lstat'>,
   env: Record<string, string | undefined>): Promise<string | null> {
@@ -19,7 +21,7 @@ export async function registryPath(path: string | undefined, fs: Pick<typeof nod
   // its resolved location without opening the file.
   const stat = async (): Promise<never> => { throw Object.assign(new Error('location only'), { code: 'ENOENT' }); };
   try { return (await openRegistry(path, { fs: { ...fs, stat } as unknown as typeof nodeFs, env })).location; }
-  catch { return null; }
+  catch { checkCancellation(); return null; }
 }
 
 /**

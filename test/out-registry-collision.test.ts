@@ -4,7 +4,9 @@
 // yet and the registry save then renamed its temp file over it: bake reported success and the
 // credential was lost.
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import * as fsPromises from 'node:fs/promises';
+import { Readable } from 'node:stream';
 import { expect, it } from 'vitest';
 import { run as bake } from '../src/commands/bake/index.js';
 import { Secret } from '../src/secret.js';
@@ -12,6 +14,8 @@ import { directory, fixture } from './helpers/cp025-bake-support.mjs';
 import { invoke as rotate, failure as rotateFailure, scratch as rotateScratch, unchanged } from './helpers/cp028-rotate-support.js';
 import { scratch as finishScratch } from './helpers/cp029-rotate-support.js';
 import { run as inventory } from '../src/commands/inventory.js';
+import { run as attenuate } from '../src/commands/attenuate.js';
+import { REGISTRY_OUT_REFUSAL } from '../src/commands/bake/out-registry.js';
 
 const uuid = '0123abcd-0123-4abc-8def-0123456789ab';
 const sidecars = (registry: string) => ({ registry, lock: `${registry}.lock`, claim: `${registry}.lock.claim`,
@@ -86,3 +90,29 @@ for (const kind of ['registry', 'lock', 'claim', 'temp', 'canary', 'usage'] as c
     expect(readFileSync(f.registry).equals(before)).toBe(true);
   }));
 }
+
+// 1.2.1: attenuate --out (A3) gets the same refusal, against the default registry location
+// (attenuate has no --registry). Before, `attenuate x --out <registry>.lock` exited 0 and left a
+// fake lock that blocked every later registry writer.
+for (const kind of ['registry', 'lock', 'claim', 'temp', 'canary', 'usage'] as const) {
+  it.skipIf(process.platform === 'darwin')(`attenuate refuses --out naming the default registry ${kind} file at A3`, async () => {
+    const dir = mkdtempSync(join(directory('MACWARDEN_TEST_TMP'), 'out-registry-'));
+    mkdirSync(join(dir, 'macwarden'));
+    const env = process.platform === 'win32' ? { APPDATA: dir } : { XDG_CONFIG_HOME: dir };
+    const out = sidecars(join(dir, 'macwarden', 'registry.json'))[kind];
+    const result = await attenuate([join(resolve(), 'test/vectors/default-admin.macaroon'), '--out', out, '--expires', '1d'],
+      { stdin: Object.assign(Readable.from([]), { isTTY: true }), fs: fsPromises, env, clock: () => new Date('2026-10-05T09:00:00Z') });
+    expect(result.error).toEqual({ code: 3, step: 'A3', message: REGISTRY_OUT_REFUSAL });
+    expect(readdirSync(join(dir, 'macwarden'))).toEqual([]);
+  });
+}
+
+it('attenuate --out next to the default registry under another name is still written', async () => {
+  const dir = mkdtempSync(join(directory('MACWARDEN_TEST_TMP'), 'out-registry-'));
+  mkdirSync(join(dir, 'macwarden'));
+  const env = process.platform === 'win32' ? { APPDATA: dir } : { XDG_CONFIG_HOME: dir };
+  const out = join(dir, 'macwarden', 'registry.jsonx.lock');
+  const result = await attenuate([join(resolve(), 'test/vectors/default-admin.macaroon'), '--out', out, '--expires', '1d'],
+    { stdin: Object.assign(Readable.from([]), { isTTY: true }), fs: fsPromises, env, clock: () => new Date('2026-10-05T09:00:00Z') });
+  expect(result.ok).toBe(true); expect(existsSync(out)).toBe(true);
+});

@@ -88,9 +88,17 @@ async function reservePosix(path: string, fs: PrivateFs): Promise<OwnerOnlyFile>
 async function reserveWindows(path: string, fs: PrivateFs): Promise<OwnerOnlyFile> {
   const systemRoot = process.env.SystemRoot ?? 'C:\\Windows';
   if (!win32.isAbsolute(systemRoot)) throw new PrivateFileError('invalid Windows system directory');
+  const absentBefore = await absent(path);
   const creation = await createPrivateFile(path, systemRoot);
   if (creation === 'exists') throw new PrivateFileError('the file already exists', 'reserve', 'EEXIST');
-  if (!creation) throw new PrivateFileError('could not create the file with owner-only permissions');
+  if (!creation) {
+    // The helper may have created the file and then given an unusable reply (malformed CREATED,
+    // invalid SID) or none (killed by its timeout). Left behind, the empty file would make the next
+    // run fail "already exists" (1.2.1). Removed only when the helper evidently made it: absent
+    // before this call, a regular empty file now. A file that existed before is never touched.
+    if (absentBefore) await removeEmptyLeftover(path, fs);
+    throw new PrivateFileError('could not create the file with owner-only permissions');
+  }
   let handle: nodeFs.FileHandle;
   try { handle = await fs.open(path, constants.O_RDWR | UV_FS_O_EXLOCK); }
   catch {
@@ -112,6 +120,20 @@ async function reserveWindows(path: string, fs: PrivateFs): Promise<OwnerOnlyFil
     throw new PrivateFileError('the file did not keep owner-only permissions (another account has access); nothing was written');
   }
   return { handle, aclWarning: false };
+}
+
+/** True only when nothing exists at `path` (lstat reports ENOENT). */
+async function absent(path: string): Promise<boolean> {
+  try { await nodeFs.lstat(path); return false; }
+  catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT'; }
+}
+
+/** Best effort: removes `path` when it is a regular, empty file; anything else is left alone. */
+async function removeEmptyLeftover(path: string, fs: PrivateFs): Promise<void> {
+  try {
+    const found = await nodeFs.lstat(path);
+    if (found.isFile() && found.size === 0) await fs.unlink(path);
+  } catch { /* gone already, or cannot be removed: the failure is reported either way */ }
 }
 
 // --- Windows owner-only creation helper -------------------------------------------
