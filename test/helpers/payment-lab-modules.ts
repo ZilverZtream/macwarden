@@ -84,6 +84,7 @@ export interface PayerStore {
   operation(operationId: string): { state: string; budgetId: string | undefined } | undefined;
   setBudget(budgetId: string, limitMsat: bigint): void;
   budgetStatus(budgetId: string): BudgetStatus | undefined;
+  refusals(budgetId: string): { operationId: string; requestedMsat: bigint; availableMsat: bigint }[];
   events(paymentHash: string): { kind: string; detail: string }[];
   recordIntent(input: { operationId: string; kind: string; paymentRequest: string; invoice: DecodedPayReq; feeLimitMsat: bigint;
     maxParts: number; budgetId?: string }): IntentResult;
@@ -104,7 +105,8 @@ export interface PayerDeps { api: FakePayerApi; store: PayerStore; emit: (event:
 
 export interface ReceiverStore {
   close(): void;
-  invoice(paymentHash: string): { state: string; orderId: string; lateLndState: string | undefined } | undefined;
+  invoice(paymentHash: string): { state: string; orderId: string; lateLndState: string | undefined; settleIndex: bigint | undefined;
+    amtPaidMsat: bigint | undefined } | undefined;
   order(orderId: string): { state: string } | undefined;
   isSuperseded(paymentHash: string): boolean;
   fulfillmentCount(orderId: string): number;
@@ -135,6 +137,10 @@ export interface Lab {
   ReceiverStore: new (path: string) => ReceiverStore;
   LndError: new (message: string, grpcCode: number | undefined, httpStatus: number | undefined) => Error & { readonly notFound: boolean };
   TransportError: new (message: string, phase: 'connect' | 'request' | 'response') => Error;
+  ProtocolError: new (message: string) => Error;
+  definiteRefusal(error: unknown): boolean;
+  /** lnd/types.ts: LND's REST JSON for a payment, as the payer reads it. */
+  parsePayment(value: unknown): Payment;
   submit(deps: PayerDeps, paymentHash: string, options: { timeoutSeconds: number; fault: 'none'; signal?: AbortSignal }): Promise<PayOutcome>;
   reconcile(deps: PayerDeps, paymentHash: string, signal?: AbortSignal): Promise<PayOutcome>;
   settleHoldInvoice(deps: ReceiverDeps, orderId: string): Promise<{ kind: string; reason?: string; outcome?: string }>;
@@ -148,7 +154,8 @@ export interface Lab {
 
 export async function loadLab(): Promise<Lab> {
   // One after another: concurrent first loads of modules that share imports are not needed here.
-  const errors = await load<Pick<Lab, 'LndError' | 'TransportError'>>('lnd/errors.ts');
+  const errors = await load<Pick<Lab, 'LndError' | 'TransportError' | 'ProtocolError' | 'definiteRefusal'>>('lnd/errors.ts');
+  const types = await load<Pick<Lab, 'parsePayment'>>('lnd/types.ts');
   const payerStore = await load<Pick<Lab, 'PayerStore'>>('payer/store.ts');
   const receiverStore = await load<Pick<Lab, 'ReceiverStore'>>('receiver/store.ts');
   const payer = await load<Pick<Lab, 'submit' | 'reconcile'>>('payer/payer.ts');
@@ -160,7 +167,8 @@ export async function loadLab(): Promise<Lab> {
     throw new Error('examples/payment-lab/src/lnd/errors.ts was loaded twice; the regression tests would test the wrong classes');
   }
   return { PayerStore: payerStore.PayerStore, ReceiverStore: receiverStore.ReceiverStore, LndError: errors.LndError,
-    TransportError: errors.TransportError, submit: payer.submit, reconcile: payer.reconcile,
+    TransportError: errors.TransportError, ProtocolError: errors.ProtocolError, definiteRefusal: errors.definiteRefusal,
+    parsePayment: types.parsePayment, submit: payer.submit, reconcile: payer.reconcile,
     settleHoldInvoice: receiver.settleHoldInvoice, listen: receiver.listen, createInvoice: receiver.createInvoice,
     reconcileInvoices: receiver.reconcileInvoices, main: cli.main };
 }

@@ -361,7 +361,8 @@ describe('payment lab payer', () => {
 
   it('V5: a bodiless HTTP 404 is not LND\'s NotFound: after a definite send error the payment stays uncertain', async () => {
     expect(new lab.LndError('payment isn\'t initiated', 5, 404).notFound).toBe(true);
-    expect(new lab.LndError('payment isn\'t initiated', undefined, 404).notFound).toBe(true);
+    // Without gRPC code 5 a 404 is not LND's, whatever its body says (N1).
+    expect(new lab.LndError('payment isn\'t initiated', undefined, 404).notFound).toBe(false);
     expect(new lab.LndError('HTTP 404', undefined, 404).notFound).toBe(false);
     const store = payerStore('v5.db');
     const hash = budgeted(store, 'v5', 'OP-V5');
@@ -729,5 +730,249 @@ describe('payment lab receiver', () => {
     };
     expect(await lab.reconcileInvoices({ api, store, emit: quiet })).toEqual({ resolved: 1, open: 0, unknown: 0 });
     expect(store.invoice(identity.paymentHash)?.state).toBe('canceled');
+  });
+});
+
+/**
+ * Round 4 (the verifier's probes of d70fe42): NotFound needs LND's gRPC code (N1), every
+ * stored amount and index fits SQLite's 64 bits (N2), and reconciliation counts each
+ * invoice exactly once (N3, N4); a canceled invoice LND later reports settled reads settled (N5).
+ */
+describe('payment lab round 4', () => {
+  beforeEach(() => {
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  const noInvoiceCalls: FakeInvoiceApi = {
+    lookupInvoice: async () => { throw new Error('not scripted'); },
+    settleInvoice: async () => undefined,
+    cancelInvoice: async () => undefined,
+    subscribeInvoices: (_from, _onInvoice, signal) => heldUntilAborted(signal),
+  };
+
+  /** main with fresh stores on `payerFile` / `receiverFile` per call (main closes them). */
+  function services(payerFile: string, api: ScriptedPayerApi, receiverFile = dir.path('n2-unused-receiver.db'), invoiceApi = noInvoiceCalls) {
+    return {
+      payer: () => ({ api, store: payerStore(payerFile), emit: quiet }),
+      receiver: (): ReceiverDeps => ({ api: invoiceApi, store: new lab.ReceiverStore(receiverFile), emit: quiet }),
+    };
+  }
+
+  // A proxy's 404 bodies: an API gateway's, and Kong's for a path it has no route for.
+  const proxy404 = (): Error[] => [new lab.LndError('Not Found', undefined, 404), new lab.LndError('no Route matched with those values', undefined, 404)];
+
+  it('N1: a 404 without gRPC code 5 is neither LND\'s NotFound nor a definite refusal; code 5 is NotFound at any status', () => {
+    for (const error of proxy404()) {
+      expect((error as Error & { notFound: boolean }).notFound).toBe(false);
+      expect(lab.definiteRefusal(error)).toBe(false);
+    }
+    expect(new lab.LndError('payment isn\'t initiated', 5, 404).notFound).toBe(true);
+    expect(new lab.LndError('payment isn\'t initiated', 5, 200).notFound).toBe(true);
+    expect(lab.definiteRefusal(new lab.LndError('payment isn\'t initiated', 5, 404))).toBe(true);
+    // Other 400-class answers with a body are still definite refusals.
+    expect(lab.definiteRefusal(new lab.LndError('amount must be positive', undefined, 400))).toBe(true);
+  });
+
+  it('N1: a proxy\'s JSON 404 on TrackPaymentV2 after a definite send error leaves the payment uncertain, reservation held', async () => {
+    for (const [index, proxied] of proxy404().entries()) {
+      const store = payerStore(`n1-pay-${index}.db`);
+      const hash = budgeted(store, `n1-pay-${index}`, `OP-N1-${index}`);
+      const deps = payer(store);
+      deps.api.send.push(async () => { throw new lab.LndError('invoice expired', 2, 500); });
+      deps.api.track.push(async () => { throw proxied; });
+      expect(await lab.submit(deps, hash, { timeoutSeconds: 30, fault: 'none' })).toMatchObject({ kind: 'unresolved', state: 'uncertain' });
+      expect(store.payment(hash)?.state).toBe('uncertain');
+      expect(store.budgetStatus('B')).toMatchObject({ heldMsat: 1100n, availableMsat: 0n });
+      // Reconciling through the same proxy does not send it back to intent either (stopped after one try).
+      const stop = new AbortController();
+      deps.api.track.push(async () => { stop.abort(); throw proxied; });
+      expect(await lab.reconcile(deps, hash, stop.signal)).toMatchObject({ kind: 'unresolved', state: 'uncertain' });
+      expect(store.payment(hash)?.state).toBe('uncertain');
+    }
+  });
+
+  it('N1: a proxy\'s JSON 404 on AddInvoice and on the lookup does not decide a creating invoice', async () => {
+    const store = receiverStore('n1-create.db');
+    const [gateway, kong] = proxy404();
+    const api: FakeInvoiceApi = {
+      ...noInvoiceCalls,
+      addInvoice: async () => { throw gateway; },
+      lookupInvoice: async () => { throw kong; },
+    };
+    const outcome = await lab.createInvoice({ api, store, emit: quiet }, { orderId: 'ORD-N1', amountMsat: 1000n, hold: false, memo: 'n1',
+      expirySeconds: 3600 });
+    expect(outcome.kind).toBe('unresolved');
+    expect(store.invoice(outcome.paymentHash ?? '')?.state).toBe('creating');
+  });
+
+  const TOO_LARGE = '9223372036854775808'; // 2^63
+  const MAX = '9223372036854775807'; // 2^63 - 1
+
+  it('N2: an amount or index of 2^63 or more on the command line is a usage error (exit 2) that changes nothing', async () => {
+    const file = dir.path('n2-usage.db');
+    const setup = payerStore(file);
+    setup.setBudget('B', 1100n);
+    setup.close();
+    const api = new ScriptedPayerApi();
+    api.invoice = decoded(preimageFor('n2-usage').paymentHash, 1000n);
+    const receiverFile = dir.path('n2-usage-receiver.db');
+    let created = 0;
+    const invoiceApi: FakeInvoiceApi = { ...noInvoiceCalls, addInvoice: async () => { created += 1; throw new Error('not expected'); } };
+    const run = services(file, api, receiverFile, invoiceApi);
+    for (const budget of [[], ['--budget', 'B']]) {
+      expect(await lab.main(['payer', 'pay', '--as', 'customer-payer', '--operation', 'OP-N2', '--kind', 'payout', '--invoice', 'lnbcrt1n2',
+        '--fee-limit-msat', TOO_LARGE, ...budget], run)).toBe(2);
+    }
+    expect(await lab.main(['payer', 'budget-set', '--as', 'customer-payer', '--budget', 'B', '--limit-msat', TOO_LARGE], run)).toBe(2);
+    expect(await lab.main(['receiver', 'cursor-set', '--as', 'merchant', '--settle-index', TOO_LARGE], run)).toBe(2);
+    expect(await lab.main(['receiver', 'create-invoice', '--as', 'merchant', '--order', 'ORD-N2', '--amount-msat', TOO_LARGE], run)).toBe(2);
+    expect(await lab.main(['receiver', 'create-invoice', '--as', 'merchant', '--order', 'ORD-N2', '--amount-msat', '9999999999999999999'], run))
+      .toBe(2);
+    expect(created).toBe(0);
+    const after = payerStore(file);
+    expect(after.operation('OP-N2')).toBeUndefined();
+    expect(after.budgetStatus('B')).toMatchObject({ heldMsat: 0n, availableMsat: 1100n });
+    expect(after.refusals('B')).toEqual([]);
+    const receiver = receiverStore('n2-usage-receiver.db');
+    expect(receiver.order('ORD-N2')).toBeUndefined();
+  });
+
+  it('N2: a fee limit of 2^63 - 1 with a budget is refused (exit 3) with a reason; the refusal row is saturated, not a crash', async () => {
+    const file = dir.path('n2-sum.db');
+    const setup = payerStore(file);
+    setup.setBudget('B', 1100n);
+    setup.close();
+    const api = new ScriptedPayerApi();
+    api.invoice = decoded(preimageFor('n2-sum').paymentHash, 1000n);
+    const events: Record<string, unknown>[] = [];
+    const run = { ...services(file, api), payer: () => ({ api, store: payerStore(file), emit: (event: Record<string, unknown>) => { events.push(event); } }) };
+    expect(await lab.main(['payer', 'pay', '--as', 'customer-payer', '--operation', 'OP-N2S', '--kind', 'payout', '--invoice', 'lnbcrt1n2s',
+      '--fee-limit-msat', MAX, '--budget', 'B'], run)).toBe(3);
+    expect(events.filter(event => event.event === 'intent-refused')).toEqual([expect.objectContaining({ requestedMsat: '9223372036854776807',
+      availableMsat: '1100', reason: expect.stringMatching(/1100 msat available, 9223372036854776807 msat requested/) as unknown })]);
+    const after = payerStore(file);
+    expect(after.refusals('B')).toEqual([expect.objectContaining({ operationId: 'OP-N2S', requestedMsat: BigInt(MAX), availableMsat: 1100n })]);
+    expect(after.budgetStatus('B')).toMatchObject({ heldMsat: 0n, availableMsat: 1100n });
+    expect(after.operation('OP-N2S')).toBeUndefined();
+  });
+
+  it('N2: budget sums past 2^63 are added up exactly, so admission still works', () => {
+    const store = payerStore('n2-budget-sum.db');
+    store.setBudget('B', BigInt(MAX));
+    const half = 2n ** 62n;
+    const { paymentHash } = preimageFor('n2-budget-sum');
+    expect(store.recordIntent({ operationId: 'OP-N2B', kind: 'payout', paymentRequest: 'lnbcrt-n2b', invoice: decoded(paymentHash, half),
+      feeLimitMsat: 1n, maxParts: 1, budgetId: 'B' }).outcome).toBe('recorded');
+    expect(store.claimForSubmission(paymentHash)).toBe(true);
+    // LND reports a fee far above the allowance: the consumed figure passes 2^63.
+    store.applyUpdate({ ...payment('n2-budget-sum', 'SUCCEEDED', half), feeMsat: half }, 'SendPaymentV2', 1);
+    expect(store.budgetStatus('B')).toMatchObject({ consumedMsat: 2n ** 63n, availableMsat: -1n });
+    const next = preimageFor('n2-budget-sum-next');
+    expect(store.recordIntent({ operationId: 'OP-N2B2', kind: 'payout', paymentRequest: 'lnbcrt-n2b2', invoice: decoded(next.paymentHash, 1000n),
+      feeLimitMsat: 1n, maxParts: 1, budgetId: 'B' }).outcome).toBe('refused');
+  });
+
+  it('N2: an LND amount or index past 2^63 is an unreadable answer; a channel ID up to 2^64 - 1 still reads', () => {
+    const json = { payment_hash: preimageFor('n2-json').paymentHash, status: 'IN_FLIGHT', value_msat: '1000', fee_msat: '0',
+      payment_index: '18446744073709551615',
+      htlcs: [{ attempt_id: '1', status: 'IN_FLIGHT', route: { total_amt_msat: '1000', total_fees_msat: '0', hops: [{ chan_id: '17592186044416000001' }] } }] };
+    const parsed = lab.parsePayment(json);
+    expect(parsed.htlcs[0]?.route.hops[0]?.chanId).toBe('17592186044416000001');
+    expect(parsed.paymentIndex).toBe('18446744073709551615');
+    expect(() => lab.parsePayment({ ...json, fee_msat: TOO_LARGE })).toThrow(lab.ProtocolError);
+    expect(() => lab.parsePayment({ ...json, value_msat: '-9223372036854775809' })).toThrow(lab.ProtocolError);
+  });
+
+  /** An invoice intent for `orderId`, created in LND unless `created` is false. */
+  function intent(store: ReceiverStore, orderId: string, label: string, created = true): string {
+    const identity = preimageFor(label);
+    expect(store.recordInvoiceIntent({ orderId, amountMsat: 1000n, kind: 'standard', ...identity }).outcome).toBe('recorded');
+    if (created) expect(store.markCreated(identity.paymentHash, `lnbcrt-${label}`, 1n)).toBe('open');
+    return identity.paymentHash;
+  }
+
+  /** LND's invoices by hash: a state, 'not-found' (NotFound) or 'error' (a dropped connection). CancelInvoice always fails. */
+  function scriptedInvoices(states: Map<string, string>): FakeInvoiceApi {
+    return {
+      ...noInvoiceCalls,
+      lookupInvoice: async paymentHash => {
+        const state = states.get(paymentHash) ?? 'not-found';
+        if (state === 'not-found') throw new lab.LndError('unable to locate invoice', 5, 404);
+        if (state === 'error') throw new lab.TransportError('socket hang up', 'response');
+        return invoice(paymentHash, state, state === 'SETTLED' ? 1000n : 0n, state === 'SETTLED' ? 1n : 0n);
+      },
+      cancelInvoice: async () => { throw new lab.TransportError('socket hang up', 'response'); },
+    };
+  }
+
+  it('N3: resolved, open and unknown partition the targets; each invoice lands in its own bucket', async () => {
+    const store = receiverStore('n3-mixed.db');
+    const lnd = new Map<string, string>();
+    lnd.set(intent(store, 'ORD-OPEN', 'n3-open'), 'OPEN');
+    lnd.set(intent(store, 'ORD-ACC', 'n3-acc'), 'ACCEPTED');
+    lnd.set(intent(store, 'ORD-SET', 'n3-set'), 'SETTLED');
+    lnd.set(intent(store, 'ORD-CAN', 'n3-can'), 'CANCELED');
+    lnd.set(intent(store, 'ORD-CRE', 'n3-cre', false), 'not-found'); // creating, within its creation window
+    lnd.set(intent(store, 'ORD-ERR', 'n3-err'), 'error');
+    const notCreated = intent(store, 'ORD-NC', 'n3-nc', false);
+    expect(store.markNotCreated(notCreated)).toBe(true);
+    lnd.set(notCreated, 'not-found');
+    // ORD-X: the original was recorded not-created and its replacement is live. The original turns up late
+    // and paid, which fulfills the order after the replacement was counted open; the replacement's cancel fails.
+    const lateOriginal = intent(store, 'ORD-X', 'n3-x-late', false);
+    expect(store.markNotCreated(lateOriginal)).toBe(true);
+    const replacementR = intent(store, 'ORD-X', 'n3-x-replacement');
+    lnd.set(lateOriginal, 'SETTLED');
+    lnd.set(replacementR, 'OPEN');
+    const result = await lab.reconcileInvoices({ api: scriptedInvoices(lnd), store, emit: quiet });
+    expect(result.resolved + result.open + result.unknown).toBe(lnd.size);
+    // resolved: settled, canceled, not-created, the late original; open: open, accepted; unknown: creating, dropped, the replacement.
+    expect(result).toEqual({ resolved: 4, open: 2, unknown: 3 });
+    expect(store.invoice(notCreated)?.state).toBe('not-created');
+    expect(store.order('ORD-X')?.state).toBe('fulfilled');
+    expect(store.isSuperseded(replacementR)).toBe(true);
+  });
+
+  it('N3: an invoice counted open and then superseded with a failing cancel in the same pass counts once, as unknown', async () => {
+    const store = receiverStore('n3-superseded.db');
+    const lateOriginal = intent(store, 'ORD-S', 'n3s-late', false);
+    expect(store.markNotCreated(lateOriginal)).toBe(true);
+    const replacementR = intent(store, 'ORD-S', 'n3s-replacement');
+    const lnd = new Map([[lateOriginal, 'SETTLED'], [replacementR, 'OPEN']]);
+    expect(await lab.reconcileInvoices({ api: scriptedInvoices(lnd), store, emit: quiet })).toEqual({ resolved: 1, open: 0, unknown: 1 });
+  });
+
+  it('N3: a not-created invoice LND does not hold is counted resolved', async () => {
+    const store = receiverStore('n3-notcreated.db');
+    expect(store.markNotCreated(intent(store, 'ORD-NC1', 'n3-nc1', false))).toBe(true);
+    expect(await lab.reconcileInvoices({ api: scriptedInvoices(new Map()), store, emit: quiet })).toEqual({ resolved: 1, open: 0, unknown: 0 });
+  });
+
+  it('N4: a pass stopped before its first lookup counts settled and canceled invoices resolved, and looks nothing up', async () => {
+    const store = receiverStore('n4.db');
+    expect(store.applyInvoice(invoice(intent(store, 'ORD-N4', 'n4-settled'), 'SETTLED', 1000n, 1n), 'subscription')).toBe('fulfilled');
+    expect(store.applyInvoice(invoice(intent(store, 'ORD-N4C', 'n4-canceled'), 'CANCELED'), 'lookup')).toBe('state-updated');
+    const stop = new AbortController();
+    stop.abort();
+    const deps = { api: noInvoiceCalls, store, emit: quiet };
+    expect(await lab.reconcileInvoices(deps, 'ORD-N4', stop.signal)).toEqual({ resolved: 1, open: 0, unknown: 0 });
+    expect(await lab.reconcileInvoices(deps, 'ORD-N4C', stop.signal)).toEqual({ resolved: 1, open: 0, unknown: 0 });
+    // Not stopped: a settled invoice is final too and is not looked up again (noInvoiceCalls has no lookup).
+    expect(await lab.reconcileInvoices(deps, 'ORD-N4')).toEqual({ resolved: 1, open: 0, unknown: 0 });
+  });
+
+  it('N5: a canceled invoice LND later reports settled reads settled; canceled stays final for a replayed OPEN', () => {
+    const store = receiverStore('n5.db');
+    const hash = intent(store, 'ORD-N5', 'n5');
+    expect(store.applyInvoice(invoice(hash, 'CANCELED'), 'lookup')).toBe('state-updated');
+    expect(store.applyInvoice(invoice(hash, 'OPEN'), 'subscription')).toBe('unchanged');
+    expect(store.invoice(hash)?.state).toBe('canceled');
+    expect(store.applyInvoice(invoice(hash, 'SETTLED', 1000n, 7n), 'subscription')).toBe('fulfilled');
+    expect(store.invoice(hash)).toMatchObject({ state: 'settled', amtPaidMsat: 1000n, settleIndex: 7n });
+    expect(store.ledger('ORD-N5')).toHaveLength(1);
+    expect(store.applyInvoice(invoice(hash, 'CANCELED'), 'lookup')).toBe('unchanged');
+    expect(store.invoice(hash)?.state).toBe('settled');
   });
 });

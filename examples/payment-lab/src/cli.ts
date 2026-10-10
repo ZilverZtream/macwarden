@@ -48,7 +48,10 @@ function required(values: Record<string, unknown>, name: string): string {
   return value;
 }
 
-/** An amount or index given on the command line: a malformed one is a usage error (exit 2), not an internal one. */
+/**
+ * An amount or index given on the command line: a malformed one, or one above 2^63 - 1 (more than SQLite
+ * stores), is a usage error (exit 2), not an internal one.
+ */
 function amountArg(text: string, what: string): bigint {
   try { return parseAmount(text, what); } catch (error) { throw new UsageError(error instanceof Error ? error.message : String(error)); }
 }

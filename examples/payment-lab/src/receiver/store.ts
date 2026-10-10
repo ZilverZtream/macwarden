@@ -132,12 +132,16 @@ const LND_TO_RECORD: Record<string, InvoiceRecordState | undefined> = {
   OPEN: 'open', ACCEPTED: 'accepted', SETTLED: 'settled', CANCELED: 'canceled',
 };
 
-/** States only move forward; a stale delivery never moves a record back. */
-const RANK: Record<InvoiceRecordState, number> = { 'not-created': 0, creating: 0, open: 1, accepted: 2, settled: 3, canceled: 3 };
+/**
+ * States only move forward; a stale delivery never moves a record back. Canceled is final for
+ * a replayed OPEN or ACCEPTED, but settled outranks it: an invoice LND reports SETTLED after a
+ * CANCELED was recorded (a stale or wrong cancel) was paid, and the record says so.
+ */
+const RANK: Record<InvoiceRecordState, number> = { 'not-created': 0, creating: 0, open: 1, accepted: 2, canceled: 3, settled: 4 };
 /** The same order for LND's state of a late invoice (late_lnd_state), so a stale delivery never moves it back either. */
 const LATE_RANK = (expression: string): string =>
-  `CASE ${expression} WHEN 'OPEN' THEN 1 WHEN 'ACCEPTED' THEN 2 WHEN 'SETTLED' THEN 3 WHEN 'CANCELED' THEN 3 ELSE 0 END`;
-const LND_RANK: Record<string, number> = { OPEN: 1, ACCEPTED: 2, SETTLED: 3, CANCELED: 3 };
+  `CASE ${expression} WHEN 'OPEN' THEN 1 WHEN 'ACCEPTED' THEN 2 WHEN 'CANCELED' THEN 3 WHEN 'SETTLED' THEN 4 ELSE 0 END`;
+const LND_RANK: Record<string, number> = { OPEN: 1, ACCEPTED: 2, CANCELED: 3, SETTLED: 4 };
 
 export class ReceiverStore {
   readonly db: DatabaseSync;

@@ -1,6 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { DecodedPayReq, Payment } from '../lnd/types.ts';
 import { sha256Hex } from '../util/encoding.ts';
+import { saturateInt64 } from '../util/money.ts';
 import { changes, immediate, int, nowIso, openDatabase, optionalInt, optionalText, text, type Row } from '../store/sqlite.ts';
 
 /**
@@ -367,13 +368,16 @@ export class PayerStore {
   #budgetStatus(budgetId: string): BudgetStatus | undefined {
     const budget = this.db.prepare('SELECT limit_msat FROM budgets WHERE budget_id = ?').get(budgetId);
     if (budget === undefined) return undefined;
-    const sums = this.db.prepare(`SELECT
-        COALESCE(SUM(CASE WHEN state = 'held' THEN principal_msat + fee_allowance_msat END), 0) AS held,
-        COALESCE(SUM(CASE WHEN state = 'consumed' THEN principal_msat + actual_fee_msat END), 0) AS consumed
-      FROM reservations WHERE budget_id = ?`).get(budgetId) ?? {};
+    // Summed here, not by SQLite: its SUM fails and its + turns to floating point past 2^63, which every
+    // stored amount is below but a sum of them need not be.
+    let heldMsat = 0n;
+    let consumedMsat = 0n;
+    for (const row of this.db.prepare(`SELECT state, principal_msat, fee_allowance_msat, actual_fee_msat FROM reservations
+        WHERE budget_id = ? AND state IN ('held', 'consumed')`).all(budgetId)) {
+      if (text(row, 'state') === 'held') heldMsat += int(row, 'principal_msat') + int(row, 'fee_allowance_msat');
+      else consumedMsat += int(row, 'principal_msat') + int(row, 'actual_fee_msat');
+    }
     const limitMsat = int(budget, 'limit_msat');
-    const heldMsat = int(sums, 'held');
-    const consumedMsat = int(sums, 'consumed');
     return { budgetId, limitMsat, heldMsat, consumedMsat, availableMsat: limitMsat - heldMsat - consumedMsat };
   }
 
@@ -420,10 +424,12 @@ export class PayerStore {
       if (input.budgetId !== undefined) {
         const status = this.#budgetStatus(input.budgetId);
         if (status === undefined) return { outcome: 'refused', reason: `budget ${input.budgetId} does not exist` };
+        // Each term fits 64 bits; the sum need not. A budget never exceeds 2^63 - 1, so such a sum is always refused,
+        // and the refusal row keeps the figures saturated to what SQLite can store (the reason carries them exactly).
         const requested = input.invoice.amountMsat + input.feeLimitMsat;
         if (requested > status.availableMsat) {
           this.db.prepare(`INSERT INTO budget_refusals (budget_id, operation_id, payment_hash, requested_msat, available_msat, at)
-            VALUES (?, ?, ?, ?, ?, ?)`).run(input.budgetId, input.operationId, hash, requested, status.availableMsat, now);
+            VALUES (?, ?, ?, ?, ?, ?)`).run(input.budgetId, input.operationId, hash, saturateInt64(requested), saturateInt64(status.availableMsat), now);
           return { outcome: 'refused', reason: `budget ${input.budgetId} has ${status.availableMsat} msat available, ${requested} msat requested`,
             requestedMsat: requested, availableMsat: status.availableMsat };
         }
@@ -728,7 +734,7 @@ export class PayerStore {
         if (status === undefined || requested > status.availableMsat) {
           const available = status?.availableMsat ?? 0n;
           this.db.prepare(`INSERT INTO budget_refusals (budget_id, operation_id, payment_hash, requested_msat, available_msat, at)
-            VALUES (?, ?, ?, ?, ?, ?)`).run(budgetId, operationId, payment.paymentHash, requested, available, now);
+            VALUES (?, ?, ?, ?, ?, ?)`).run(budgetId, operationId, payment.paymentHash, saturateInt64(requested), saturateInt64(available), now);
           return { outcome: 'refused', reason: `budget ${budgetId} has ${available} msat available, ${requested} msat requested`,
             requestedMsat: requested, availableMsat: available };
         }
