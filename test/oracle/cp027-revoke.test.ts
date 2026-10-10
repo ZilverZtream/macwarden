@@ -183,7 +183,8 @@ it('CP-027/revoke-repair-live lncli deletion allows dry-run and decline before c
   expect(f.calls).toEqual(['getInfo', 'listPermissions', 'listMacaroonIds']); f.calls.length = 0;
   const repaired = await invoke(f, []); verify(f, repaired, 'by-id-only', true);
   expect(render(repaired, 'text')).toMatch(/already absent/i);
-  expect(f.calls).toEqual(['getInfo', 'listPermissions', 'listMacaroonIds']); expect(ids()).toEqual(before);
+  // 1.3.0: the repair lists the IDs again after the confirmation (a restored key would be deleted instead).
+  expect(f.calls).toEqual(['getInfo', 'listPermissions', 'listMacaroonIds', 'listMacaroonIds']); expect(ids()).toEqual(before);
 }), 120_000);
 it('CP-027/revoke-live-state unregistered lncli-issued ID gains null-label record and preserves foreign-node entry', async () => scenario(async f => {
   const foreign = { ...f.otherRow, nodePubkey: otherPubkey, label: 'Foreign' };
@@ -218,7 +219,7 @@ it('CP-027/revoke-live-state real container pause after deletion makes proof unc
     expect(f.calls).toEqual(['getInfo', 'listPermissions', 'listMacaroonIds', 'checkMacaroon', 'deleteMacaroonId', 'listMacaroonIds']);
     expect(ids()).not.toContain(targetId); probe(f.remote, 'rejected'); probe(f.otherRemote, 'accepted');
     f.calls.length = 0; verify(f, await invoke(f), 'by-id-only', true);
-    expect(f.calls).toEqual(['getInfo', 'listPermissions', 'listMacaroonIds']);
+    expect(f.calls).toEqual(['getInfo', 'listPermissions', 'listMacaroonIds', 'listMacaroonIds']); // re-listed after confirmation (1.3.0)
   }), 120_000);
 function unpause() {
   if (docker(['unpause', 'lnd']).status !== 0) throw new FixtureInvalidError('Fixture unpause failed');

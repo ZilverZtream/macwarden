@@ -36,13 +36,15 @@ async function injected(f: Context, fault: Fault, finish = false) {
     if (typeof value !== 'function') return value;
     return async (...args: unknown[]) => {
       calls.push(String(key));
+      // Finish checks N before the prompt (1), N again after it (2, 1.3.0), O's baseline (3), then after the
+      // delete O's proof (4) and N's proof (5).
       if (key === 'checkMacaroon') checks++;
       const failRead = (key === 'listPermissions' && fault.includes('permissions unavailable')) ||
         (key === 'listMacaroonIds' && fault.includes('list unavailable')) ||
         (key === 'checkMacaroon' && ((fault === 'new baseline unavailable' && checks === 1) ||
-          (fault === 'old baseline unavailable' && checks === 2) ||
-          (fault === 'old proof unavailable' && deleted && checks === 3) ||
-          (fault === 'new proof unavailable' && deleted && checks === 4)));
+          (fault === 'old baseline unavailable' && checks === 3) ||
+          (fault === 'old proof unavailable' && deleted && checks === 4) ||
+          (fault === 'new proof unavailable' && deleted && checks === 5)));
       const failMutation = (key === 'bakeMacaroon' && fault === 'bake absent') ||
         (key === 'deleteMacaroonId' && fault === 'delete fails');
       if (failRead || failMutation || (key === 'checkMacaroon' && fault === 'verify timeout' && issued.length > 0)) {
