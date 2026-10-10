@@ -842,7 +842,9 @@ it('PAYJ/full-drop a drop record of calls dropped at capture that is itself lost
   // The next call flushes the intake drop (count 3, 10..12 s) into the queue ahead of it; neither fits.
   j.setNow(20);
   j.journal.capture(paymentCall(SEND, bytes(3, hash('lost-20')), app, 9_020n));
-  await settle();
+  // The records are stamped when the writer reaches them: wait for the full stop itself, not for
+  // a number of turns (a loaded CI runner needs more, and the clock below must not move first).
+  for (let turn = 0; turn < 400 && !j.stops.includes('full'); turn++) await settle();
   j.setNow(30);
   const stats = await j.journal.close();
   expect(stats).toMatchObject({ payments: JOURNAL_INTAKE_ITEMS, dropped: 4, stopped: 'full' });
