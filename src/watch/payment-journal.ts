@@ -314,7 +314,9 @@ export function journalCoverage(records: JournalRecord[], node: string, from: nu
   const merged: Span[] = [];
   for (const span of spans.filter(span => span.to >= span.from).sort((a, b) => a.from - b.from)) {
     const previous = merged.at(-1);
-    if (previous && span.from <= previous.to) { if (span.to > previous.to) { previous.to = span.to; previous.end = span.end; } }
+    // A later span ending at or after the previous one gives the merged span its end reason: a
+    // registration with no recorded end makes what follows unconfirmed, however short it was.
+    if (previous && span.from <= previous.to) { if (span.to >= previous.to) { previous.to = span.to; previous.end = span.end; } }
     else merged.push({ ...span });
   }
   // Merge the drop windows the same way (counts add up), so they are disjoint and sorted.
@@ -340,8 +342,17 @@ export function journalCoverage(records: JournalRecord[], node: string, from: nu
     if (!touched) covered.push({ ...span });
     else if (cursor < span.to) covered.push({ from: cursor, to: span.to, end: span.end });
   }
-  const clipped = covered.map(span => ({ ...span, from: Math.max(span.from, from), to: Math.min(span.to, to) }))
+  const pieces = covered.map(span => ({ ...span, from: Math.max(span.from, from), to: Math.min(span.to, to) }))
     .filter(span => span.from < span.to);
+  // Touching pieces merge back: a drop that lasted no measurable time split a span in two.
+  const clipped: Span[] = [];
+  for (const span of pieces) {
+    const previous = clipped.at(-1);
+    // A later span ending at or after the previous one gives the merged span its end reason: a
+    // registration with no recorded end makes what follows unconfirmed, however short it was.
+    if (previous && span.from <= previous.to) { if (span.to >= previous.to) { previous.to = span.to; previous.end = span.end; } }
+    else clipped.push({ ...span });
+  }
   const gaps: Gap[] = [];
   let cursor = from;
   let reason: GapReason = firstRun === null || from < firstRun ? 'before-journal' : 'not-registered';
@@ -355,11 +366,13 @@ export function journalCoverage(records: JournalRecord[], node: string, from: nu
     reason = span.end;
   }
   if (cursor < to) gaps.push({ from: cursor, to, reason, dropped: 0 });
-  // Drop windows inside the window are listed with their counts, merged with the gap they form.
-  // Both lists are sorted and the drop windows are disjoint, so one pointer over the gaps serves.
+  // Drop records inside the window are listed with their counts, merged with the gap they form:
+  // each record's count is listed only when that record touches the window (a merged window
+  // would carry counts from outside it). The records are sorted by start, the sweep's gaps are
+  // sorted, and a record can only extend the last gap this listing added, so one pointer serves.
   let gapIndex = 0;
   const listed: Gap[] = [];
-  for (const drop of dropWindows) {
+  for (const drop of drops) {
     if (drop.to < from || drop.from > to) continue;
     const window = { from: Math.max(drop.from, from), to: Math.min(drop.to, to) };
     while (gapIndex < gaps.length && gaps[gapIndex].to < window.from) gapIndex += 1;
@@ -367,6 +380,8 @@ export function journalCoverage(records: JournalRecord[], node: string, from: nu
     for (let index = gapIndex; index < gaps.length && gaps[index].from <= window.to; index += 1) {
       if (gaps[index].reason === 'dropped') { existing = gaps[index]; break; }
     }
+    const last = listed.at(-1);
+    if (!existing && last && last.from <= window.to && window.from <= last.to) existing = last;
     if (existing) { existing.dropped += drop.dropped; existing.from = Math.min(existing.from, window.from); existing.to = Math.max(existing.to, window.to); }
     else listed.push({ ...window, reason: 'dropped', dropped: drop.dropped });
   }
