@@ -118,6 +118,12 @@ Security and robustness release from an external audit of 1.2.0 and a second aud
 
 ### Added
 
+- `npm run fuzz:payments` (`scripts/payment-fuzz.mjs`): seeded fuzzing of the payment facts decoder, the journal (crash-and-repair, fills to the limit) and `reconcile` against their specifications, with a vitest wrapper (`test/payment-fuzz.test.ts`). The 1.2.1 campaign ran 200,000 decoder cases, 2,000 journal cases (3.27 million calls) and 20,000 reconcile cases and found the two decoder and window defects listed above.
+
+## 1.2.0 (2026-10-09)
+
+### Added
+
 - L402 (formerly LSAT) tokens. `inspect` reads an `Authorization: L402 …` or `LSAT …` value (one or several macaroons), a `WWW-Authenticate` challenge, a `macaroon:preimage` pair, a bare L402 macaroon in any encoding, or an Aperture token store file (`l402.token`, `l402.token.pending`, legacy `lsat.token`, as written by lnget, Loop and Pool). It reports the identifier (version, payment hash, token ID), location, services and tiers, capabilities, `_valid_until` expiry against the current time, constraints and unknown caveats, and whether the preimage hashes to the payment hash, checked offline. The preimage and the macaroon bytes never appear in any output; a caveat that carries the preimage is withheld.
 - An L402 token is reported as `access: "service-access"`, never with an ADMIN to READ grade: it pays for access to a service and gives no control of a node. `countedAs` is `READ` when a preimage is present that matches the payment hash (or cannot be checked because the identifier is not Aperture's), and `null` for a challenge, a pending token or a wrong preimage, which grant nothing alone.
 - `scan` finds L402 Authorization values, challenges, `macaroon:preimage` pairs (also as `KEY=<pair>`), L402 macaroons in hex and base64 (including Aperture's gRPC `Macaroon` header form with a preimage caveat) and token store files, in code, configuration, `.env`, HTTP logs, HAR files, MCP agent configurations, base64-encoded Kubernetes data and git history. New finding kinds `l402` and `l402-file` carry the `inspect` facts in `l402`; `summary.byGrade` has an `L402` count. `--fail-on READ` counts an L402 finding with a usable preimage; higher thresholds and unpaid tokens do not. SARIF rules `macwarden/l402/paid|unpaid` and `macwarden/l402-file/paid|unpaid` (level note).
