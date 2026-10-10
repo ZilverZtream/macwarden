@@ -114,7 +114,7 @@ macwarden's own credential is baked with `lncli bakemacaroon --root_key_id 7001`
 
 [agent.mjs](agent.mjs) uses only Node.js built-ins and only its own macaroon, read from `AGENT_MACAROON`. It is written to be read and adapted:
 
-- **TLS** to LND is verified against LND's certificate (`AGENT_TLS_CERT`); there is no option to skip verification.
+- **TLS** to LND is verified against LND's certificate (`AGENT_TLS_CERT`), and the paid API's certificate is verified against the system trust store; both requests set `rejectUnauthorized` explicitly, so there is no option to skip verification, not even `NODE_TLS_REJECT_UNAUTHORIZED=0` in the environment (1.2.1).
 - **Invoice checks before paying.** It decodes the invoice with DecodePayReq and refuses one without an amount, one above `AGENT_MAX_PRICE_SAT` (default 500 sat) or one that has expired. The routing fee is capped with `AGENT_MAX_FEE_SAT` (default 10 sat). These are the agent's own rules: see [Limits](#limits).
 - **Payments are sent once.** SendPaymentV2 is never retried. If its stream ends without a final state (a timeout or a dropped connection), the agent asks TrackPaymentV2 for the payment's state by payment hash instead of paying again; LND also refuses a second payment of the same hash.
 - **Timeouts and bounded retries.** Every request has a deadline (15 s; the payment 45 s). Idempotent requests (the API request, DecodePayReq, TrackPaymentV2) are retried at most three times, with backoff, on transport errors and HTTP 502, 503 or 504 only. A refusal from LND is never retried.

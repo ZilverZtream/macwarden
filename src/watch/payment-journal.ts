@@ -458,6 +458,13 @@ type Line = { text: string; type: JournalRecord['type']; at: number; calls: numb
  * write at a time, so a slow disk never delays an intercept answer: when it falls behind,
  * payment records are dropped and counted, and a `drop` record says how many and when.
  */
+/** The clock's reading when it is one the reader accepts (finite, not past the year 9999), else null. */
+function readClock(clock: () => Date): number | null {
+  let value: number;
+  try { value = clock().getTime(); } catch { return null; }
+  return Number.isFinite(value) && value <= MAX_RECORD_TIME ? value : null;
+}
+
 export class PaymentJournal {
   readonly run = randomUUID();
   /** True when the journal lies on a Windows volume that stores no permissions (FAT, exFAT). */
@@ -500,6 +507,9 @@ export class PaymentJournal {
    * left incomplete or invalid by a crash is ended with a newline and the run-start says `repairedTail`.
    */
   static async open(path: string, node: string, version: string, deps: WriterDeps): Promise<PaymentJournal> {
+    // Before any file is created or locked: the run-start has no earlier record to fall back on, so a
+    // clock the reader cannot take is refused here, leaving nothing behind.
+    if (readClock(deps.clock) === null) throw new JournalError('cannot open payment journal: the system clock is invalid');
     const fs = deps.fs;
     const platform = deps.platform ?? process.platform;
     if (isProtectedPath(path)) throw new JournalError('protected payment journal path');
@@ -592,11 +602,7 @@ export class PaymentJournal {
    * NaN threw out of the decoding turn and crashed watch; past the year 9999 every later record
    * was one the reader refuses).
    */
-  private clockTime(): number | null {
-    let value: number;
-    try { value = this.clock().getTime(); } catch { return null; }
-    return Number.isFinite(value) && value <= MAX_RECORD_TIME ? value : null;
-  }
+  private clockTime(): number | null { return readClock(this.clock); }
 
   /** The record time: the clock, never earlier than this run's previous record; the previous time when the clock is invalid. */
   private now(): string {
