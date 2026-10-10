@@ -686,15 +686,15 @@ verifyLedger(store: { db: DatabaseSync; book: 'payer' | 'receiver' }, api?: LndL
 
 ## The service
 
-`node src/cli.ts <component> <command>` (or `npm run service -- …`). Every command prints one JSON object per line. Run it without arguments for the full usage.
+`node src/cli.ts <component> <command>` (or `npm run service -- …`). Every command prints one JSON object per line. Run it without arguments for the full usage. Every command accepts `--lab <dir>`, and payer and receiver commands `--as <profile>`; beyond those a command takes only the options listed for it, and any other (one another command takes included) is a usage error.
 
 | Command | Purpose |
 | --- | --- |
 | `payer pay --as <profile> --operation <id> --kind <kind> --invoice <bolt11> --fee-limit-msat <n>` | record intent, submit, follow to a terminal state |
 | `payer reconcile --as <profile> [--payment-hash <hex>]` | resolve unresolved payments with TrackPaymentV2 |
 | `payer retry --as <profile> --operation <id>` | submit a payment LND reported failed again, same invoice |
-| `payer show`, `payer budget-set`, `payer budget-show` | records and budgets |
-| `payer ledger-verify --as <profile> [--json]` | check the payer's books against themselves, its records and ListPayments |
+| `payer show --as <profile> --operation <id>`, `payer budget-set --as <profile> --budget <id> --limit-msat <n>`, `payer budget-show --as <profile> --budget <id>` | records and budgets |
+| `payer ledger-verify --as <profile> [--json]` | check the payer's books against themselves, its records and ListPayments; the `ledger-verify` summary (or the `--json` object) lists unbalanced and malformed entries with their entry ID and reason |
 | `receiver create-invoice --as <profile> --order <id> --amount-msat <n> [--hold]` | record the invoice identity, then create it |
 | `receiver settle` / `cancel --order <id>` | release or cancel a hold invoice |
 | `receiver listen` | settlement consumer with periodic reconciliation |
@@ -707,7 +707,7 @@ verifyLedger(store: { db: DatabaseSync; book: 'payer' | 'receiver' }, api?: LndL
 | `analysis payments --node <node> --payment-hash <hex>` | every payment LND holds for a hash |
 | `analysis diagnose --node <node> --payer <profile> --operation <id>` | liquidity diagnosis for a payment |
 
-Exit codes: 0 done; 1 payment failed according to LND; 2 usage error (also a malformed amount or payment hash, or an amount or index above 2^63 - 1, the most SQLite stores); 3 refused (budget, conflicting operation, wrong state); 4 configuration or node error; 75 unresolved: the outcome is not known yet and the record stays open for reconciliation. `payer reconcile` maps a payment's outcome the same way as `pay` and `retry`; for several payments, the first of 75, 3 and 1 that applies to any of them, else 0. `ledger-verify` exits 0 balanced, 1 unbalanced, 75 when LND could not be compared. `outbox-status` exits 75 when a row is not done past its deadline; `outbox-run --once` exits 75 when a row is not done after its pass (in backoff, or held by another worker), and a missing lab directory for the effects is a configuration error (4). Arguments are checked before anything is recorded, so a usage error leaves no change behind.
+Exit codes: 0 done; 1 payment failed according to LND; 2 usage error (also a malformed amount or payment hash, or an amount or index above 2^63 - 1, the most SQLite stores); 3 refused (budget, conflicting operation, wrong state); 4 configuration or node error; 75 unresolved: the outcome is not known yet and the record stays open for reconciliation. `payer reconcile` maps a payment's outcome the same way as `pay` and `retry`; for several payments, the first of 75, 3 and 1 that applies to any of them, else 0. Its outbox pass does not change the exit code, and it does not run once the reconcile was stopped (SIGINT, SIGTERM or `--timeout-s`): an `outbox-pass-skipped` event says so, as `receiver listen` runs no pass after it is stopped. `ledger-verify` exits 0 balanced, 1 unbalanced, 75 when LND could not be compared. `outbox-status` exits 75 when a row is not done past its deadline; `outbox-run --once` exits 75 when a row is not done after its pass (in backoff, or held by another worker), and a missing lab directory for the effects is a configuration error (4). Arguments are checked before anything is recorded, so a usage error leaves no change behind; an option the command does not take is exit 2 (`unknown option --x for payer show`) before any record or node is opened.
 
 ## Limits
 

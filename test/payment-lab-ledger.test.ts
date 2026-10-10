@@ -94,7 +94,7 @@ function balances(result: LedgerVerification): Record<string, bigint> {
 /** The theorem: every entry balances, the accounts sum to zero, and stored balances and records agree with the entries. */
 function expectBalanced(result: LedgerVerification): void {
   expect(result.unbalancedEntries).toEqual([]);
-  expect((result as LedgerVerification & { invalidEntries?: unknown[] }).invalidEntries ?? []).toEqual([]);
+  expect(result.invalidEntries).toEqual([]);
   expect(result.firstDifference).toBeUndefined();
   expect(result.balanced).toBe(true);
   expect(result.accounts.reduce((sum, item) => sum + item.computed, 0n)).toBe(0n);
@@ -644,8 +644,6 @@ process.kill(process.pid, 'SIGKILL');
   });
 });
 
-/** The fields of the verification the helper's structural type does not declare yet. */
-type Verified = LedgerVerification & { invalidEntries?: { entryId: number; event: string; reference: string; reason: string }[] };
 const MAX = 2n ** 63n - 1n;
 const UNCHECKED = 'PRAGMA ignore_check_constraints = ON';
 
@@ -660,9 +658,9 @@ describe('payment lab ledger: record-level differences unbalance the result', ()
     store.db.exec(`UPDATE journal_entries SET payment_hash = 'x', reference = 'x', operation_id = 'x' WHERE payment_hash = '${a}';
       UPDATE journal_entries SET payment_hash = '${a}', reference = '${a}', operation_id = 'OP-SA' WHERE payment_hash = '${b}';
       UPDATE journal_entries SET payment_hash = '${b}', reference = '${b}', operation_id = 'OP-SB' WHERE payment_hash = 'x';`);
-    const result = await lab.verifyLedger(store) as Verified;
+    const result = await lab.verifyLedger(store);
     expect(result.accounts.every(item => item.difference === 0n && (item.recordsDifference ?? 0n) === 0n)).toBe(true);
-    expect(result.invalidEntries ?? []).toEqual([]);
+    expect(result.invalidEntries).toEqual([]);
     expect(result.balanced).toBe(false);
     expect(result.firstDifference).toMatchObject({ event: 'payment-succeeded' });
     expect(result.accounts.find(item => item.account === 'routing-fees')?.firstEntry?.reason).toMatch(/fee (10|20) msat in the record; its entries post (20|10) msat to routing-fees/);
@@ -771,10 +769,10 @@ describe('payment lab ledger: an entry\'s shape is checked against its posting r
     it(`${name}: unbalanced, the entry named`, async () => {
       const store = await shaped(`shape-${index}.db`);
       store.db.exec(sql);
-      const result = await lab.verifyLedger(store) as Verified;
+      const result = await lab.verifyLedger(store);
       expect(result.balanced).toBe(false);
       expect(result.firstDifference?.entryId).toBe(target);
-      expect((result.invalidEntries ?? []).map(entry => entry.entryId)).toContain(target);
+      expect(result.invalidEntries.map(entry => entry.entryId)).toContain(target);
     });
   });
 

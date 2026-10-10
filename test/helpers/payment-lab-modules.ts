@@ -105,6 +105,8 @@ export interface LedgerVerification {
   balanced: boolean;
   entries: number;
   unbalancedEntries: { entryId: number; event: string; reference: string; debitsMsat: bigint; creditsMsat: bigint; reason: string }[];
+  /** Entries whose amounts may balance but whose shape does not match their posting rule or the records. */
+  invalidEntries: { entryId: number; event: string; reference: string; reason: string }[];
   accounts: AccountReport[];
   lnd: 'compared' | 'pending' | 'not-requested' | 'unavailable' | 'incomplete';
   lndDetail?: string;
