@@ -752,7 +752,9 @@ it('PAYJ/full-drop payments discarded when the journal fills leave a drop record
   journal.capture(paymentCall(SEND, bytes(3, hash('lost-10')), app, id++));
   now = Date.parse(at(20));
   journal.capture(paymentCall(SEND, bytes(3, hash('lost-20')), app, id));
-  await settle();
+  // The drop and full records are stamped when the writer reaches them: wait for the full stop
+  // itself, not for a number of turns (a loaded runner needs more, and the clock must not move first).
+  for (let turn = 0; turn < 400 && !stops.includes('full'); turn++) await settle();
   now = Date.parse(at(30));
   const stats = await journal.close();
   expect(stats.stopped).toBe('full');
