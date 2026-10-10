@@ -540,3 +540,152 @@ describe('explain: rules and the replay corpus', () => {
     }
   }, 120_000);
 });
+
+describe('explain: redaction, subject IDs and bounds', () => {
+  /** render.ts, loaded the way the helpers load the lab's modules. */
+  interface Render { renderText(explanation: unknown): string }
+  const loadRender = async (): Promise<Render> =>
+    await import(/* @vite-ignore */ `../examples/payment-lab/src/explain/${'render.ts'}`) as Render;
+  type Truncated = NonNullable<ExplainDocument['result']> & { truncated?: Record<string, number> };
+
+  function openPayment(label: string, operationId: string, file: string, budgetId?: string): { store: PayerStore; paymentHash: string } {
+    const store = payerStore(file);
+    if (budgetId !== undefined) store.setBudget(budgetId, 10n ** 15n);
+    const { paymentHash } = preimageFor(label);
+    expect(store.recordIntent({ operationId, kind: 'payout', paymentRequest: requestFor(label), invoice: decoded(paymentHash, 1000n),
+      feeLimitMsat: 100n, maxParts: 1, ...(budgetId === undefined ? {} : { budgetId }) }).outcome).toBe('recorded');
+    expect(store.claimForSubmission(paymentHash)).toBe(true);
+    return { store, paymentHash };
+  }
+
+  it('scrubs a hash-named fallback, a secret inside a longer hex run, a payment request inside a word and a value split by a format character', async () => {
+    const file = dir.path('scrub-round2-payer.db');
+    const { store, paymentHash } = openPayment('scrub-r2', 'OP-SCRUB2', file);
+    const named = 'cd'.repeat(32);
+    const inner = 'ef'.repeat(32);
+    const split = '12'.repeat(32);
+    const upper = 'LNBC2500U1PVJLUEZPP5QQQSYQCYQ5RQWZQFQQQSYQCYQ5RQWZQFQYPQDQ5XYSXXATSYP3K7ENXV4JS';
+    store.markUncertain(paymentHash, `file =sha256-${named}.json; plain sha256-${named}; 00${inner}; pay_${requestFor('scrub-r2')}; 9${upper}; `
+      + `zw ${split.slice(0, 32)}\u200b${split.slice(32)}; lone \u200b mark`);
+    store.close();
+    const result = await run(['payer', 'explain', '--as', 'customer-payer', '--operation', 'OP-SCRUB2'], services({ payer: file }));
+    expect(result.code).toBe(0);
+    const json = JSON.stringify(result.doc);
+    expect(json).toContain(`=sha256-${explain.fingerprint(named)}.json`);
+    expect(json).toContain('plain sha256-[redacted];');
+    expect(json).toContain('; [redacted hex 66 chars];');
+    expect(json).toContain('pay_[payment request];');
+    expect(json).toContain('; 9[payment request];');
+    expect(json).toContain('zw [redacted];');
+    const both = `${json}\n${result.text}`;
+    for (const secret of [named, inner, split.slice(0, 32), upper.slice(0, 24)]) expect(both.toLowerCase()).not.toContain(secret.toLowerCase());
+    expect(both).not.toMatch(/ln(?:bc|tb|bcrt|sb)[0-9a-z]{20,}/i);
+    // A format character outside a secret stays, and text output escapes it.
+    expect(result.text).toContain('lone \\u200b mark');
+    expect(result.text).not.toContain('\u200b');
+    assertClean(result, payerSecrets('scrub-r2'));
+  });
+
+  it('a subject ID that is 64 hex is shown as a fingerprint, found all the same, and fingerprinted in the unknown-subject error', async () => {
+    const file = dir.path('hexid-payer.db');
+    const operationId = '9f'.repeat(32);
+    openPayment('hexid', operationId, file).store.close();
+    const result = await run(['payer', 'explain', '--as', 'customer-payer', '--operation', operationId], services({ payer: file }));
+    expect(result.code).toBe(0);
+    const fp = explain.fingerprint(operationId);
+    expect(result.doc.result?.subject.operationId).toBe(fp);
+    expect((result.doc.result?.outcome.operation as { operationId: string }).operationId).toBe(fp);
+    expect(result.text.split('\n')[0]).toContain(`operation ${fp}`);
+    expect(result.doc.result?.timeline.find(item => item.kind === 'operation')?.detail).toContain(`operation ${fp}`);
+    expect(`${JSON.stringify(result.doc)}${result.text}`).not.toContain(operationId);
+    const missing = 'ab'.repeat(32);
+    const unknown = await run(['payer', 'explain', '--as', 'customer-payer', '--operation', missing], services({ payer: file }));
+    expect(unknown.code).toBe(3);
+    expect(unknown.doc.error?.message).toContain(`operation ${explain.fingerprint(missing)}`);
+    expect(`${JSON.stringify(unknown.doc)}${unknown.stderr}`).not.toContain(missing);
+  });
+
+  it('renders 60,000 timeline items without exhausting the stack', async () => {
+    const { renderText } = await loadRender();
+    const timeline = Array.from({ length: 60_000 }, (_item, index) => ({ at: '2026-10-10T00:00:00.000Z', kind: 'event',
+      detail: `item ${index} ${'word '.repeat(60)}`,
+      rule: 'A timeout is not a failure' }));
+    const text = renderText({ subject: { component: 'payer', operationId: 'OP-BIG', payments: [] }, timeline, outcome: { summary: 'open' },
+      reservation: null, journal: [], outbox: [], reconciliation: [] });
+    expect(text.split('\n').length).toBeGreaterThan(120_000);
+  });
+
+  it('50,000 journal entries explain in under 3 s and under 100 MB, with the timeline, journal and reservations cut and the cut noted', async () => {
+    const file = dir.path('volume-journal-payer.db');
+    const { store, paymentHash } = openPayment('vol-j', 'OP-VOLJ', file, 'VB');
+    const now = new Date().toISOString();
+    store.db.exec('BEGIN');
+    const reservation = store.db.prepare(`INSERT INTO reservations (budget_id, operation_id, payment_hash, principal_msat, fee_allowance_msat, state,
+      created_at, updated_at) VALUES ('VB', 'OP-VOLJ', ?, 1000, 10, 'released', ?, ?)`);
+    const entry = store.db.prepare(`INSERT INTO journal_entries (event, reference, operation_id, payment_hash, origin, posted_at)
+      VALUES (?, ?, 'OP-VOLJ', ?, 'live', ?)`);
+    const line = store.db.prepare(`INSERT INTO journal_lines (entry_id, line_no, account, direction, amount_msat, leg, balance_after)
+      VALUES (?, ?, ?, ?, 1010, NULL, '0')`);
+    const rowid = (value: unknown): bigint => BigInt((value as { lastInsertRowid: number | bigint }).lastInsertRowid);
+    for (let index = 0; index < 25_000; index += 1) {
+      const id = rowid(reservation.run(paymentHash, now, now));
+      for (const event of ['budget-held', 'budget-released']) {
+        // A reference no reservation matches: every lookup misses, the worst case for a scan.
+        const entryId = rowid(entry.run(event, `reservation:${id}x`, paymentHash, now));
+        line.run(entryId, 1, 'budget:VB:held', 'debit');
+        line.run(entryId, 2, 'budget:VB:available', 'credit');
+      }
+    }
+    store.db.exec('COMMIT');
+    store.close();
+    for (const json of [true, false]) {
+      stdout.length = 0;
+      const started = performance.now();
+      const code = await lab.main(['payer', 'explain', '--as', 'customer-payer', '--operation', 'OP-VOLJ', ...(json ? ['--json'] : [])],
+        services({ payer: file }));
+      const elapsed = performance.now() - started;
+      expect(code).toBe(0);
+      expect(elapsed, `${json ? 'json' : 'text'} took ${Math.round(elapsed)} ms`).toBeLessThan(3000);
+      const output = stdout.join('');
+      expect(Buffer.byteLength(output)).toBeLessThan(100 * 1024 * 1024);
+      if (json) {
+        const result = (JSON.parse(output) as ExplainDocument).result as Truncated;
+        expect(result.timeline).toHaveLength(2000);
+        expect(result.timeline.at(-1)?.kind).toBe('outcome');
+        expect(result.truncated?.timeline).toBeGreaterThan(95_000);
+        expect(result.journal).toHaveLength(200);
+        // 50,000 entries and the budget-held entry of the intent's own reservation.
+        expect(result.truncated?.journal).toBe(50_001 - 200);
+        expect((result.reservation as { reservations: unknown[] }).reservations).toHaveLength(200);
+        expect(result.truncated?.reservations).toBe(25_001 - 200);
+      } else {
+        expect(output).toMatch(/^ {2}… \d+ items omitted …$/m);
+        expect(output).toMatch(/^ {2}… 49801 entries omitted …$/m);
+      }
+    }
+  }, 60_000);
+
+  it('caps HTLC attempts per submission at 200 with a count, and any one string at 1,024 characters', async () => {
+    const file = dir.path('volume-htlc-payer.db');
+    const { store, paymentHash } = openPayment('vol-h', 'OP-VOLH', file);
+    store.db.exec('BEGIN');
+    const insert = store.db.prepare(`INSERT INTO htlc_attempts (payment_hash, attempt_id, status, principal_msat, fee_msat, hops, route, failure_code,
+      failure_source_index, attempt_time_ns, resolve_time_ns, submission) VALUES (?, ?, 'FAILED', 1000, 10, 3, '1>2>3', 'TEMPORARY_CHANNEL_FAILURE', 1, ?, ?, 1)`);
+    for (let index = 0; index < 5000; index += 1) insert.run(paymentHash, String(index + 1), BigInt(index + 1), BigInt(index + 2));
+    store.db.exec('COMMIT');
+    store.markUncertain(paymentHash, `long ${'reason '.repeat(3000)}end`);
+    store.close();
+    const result = await run(['payer', 'explain', '--as', 'customer-payer', '--operation', 'OP-VOLH'], services({ payer: file }));
+    expect(result.code).toBe(0);
+    const doc = result.doc.result as Truncated;
+    const attemptItems = doc.timeline.filter(item => item.kind === 'htlc-attempt');
+    expect(attemptItems).toHaveLength(201);
+    expect(attemptItems.some(item => item.detail.includes('4800 more HTLC attempt(s) of submission 1 not shown'))).toBe(true);
+    expect(attemptItems.some(item => item.detail.includes('HTLC attempt 5000 '))).toBe(true);
+    expect(doc.truncated?.htlcAttempts).toBe(4800);
+    const uncertain = doc.timeline.find(item => item.kind === 'uncertain');
+    expect(uncertain?.detail).toMatch(/…\(\d+ more\)$/);
+    expect(uncertain?.detail.length).toBeLessThanOrEqual(1024 + '…(99999 more)'.length);
+    expect(result.text).not.toContain('reason '.repeat(200));
+  });
+});

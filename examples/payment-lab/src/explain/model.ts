@@ -8,7 +8,19 @@ import { fingerprint, scrub } from './format.ts';
  * The explanation of one payer operation or one receiver order, built from the records only (the
  * `--json` result of `payer explain` and `receiver explain`). Amounts are msat as decimal strings;
  * payment hashes are fingerprints; nothing holds a preimage or a payment request.
+ *
+ * Bounds, so that no record set makes the output unbounded: the timeline keeps at most LIMITS.timeline
+ * items (its first and last halves), as does the reconciliation; the journal, the outbox and the
+ * reservation's reservations and refusals keep at most LIMITS.list (first and last halves); a
+ * submission shows at most LIMITS.attemptsPerSubmission HTLC attempts (first and last halves, with
+ * one item counting the rest); any one string is cut at 1,024 characters (format.ts, capString).
+ * `truncated` counts what was left out, per list; it is absent when nothing was.
  */
+
+export const LIMITS = { timeline: 2000, list: 200, attemptsPerSubmission: 200 } as const;
+
+export type TruncatedKey = 'timeline' | 'htlcAttempts' | 'journal' | 'outbox' | 'reservations' | 'refusals' | 'reconciliation';
+export type Truncated = Partial<Record<TruncatedKey, number>>;
 
 export interface TimelineItem {
   /** When the record says it happened (an ISO time); a refreshed fact carries the time it was read. */
@@ -52,12 +64,44 @@ export interface Explanation {
   journal: JournalView[];
   outbox: OutboxView[];
   reconciliation: Decision[];
+  /** What the bounds (above) left out, per list; absent when nothing was. */
+  truncated?: Truncated;
+}
+
+/** A list of more than `max` items keeps its first and last `max / 2`; `omitted` is how many it dropped. */
+export function keepEnds<T>(items: readonly T[], max: number): { kept: T[]; omitted: number } {
+  if (items.length <= max) return { kept: [...items], omitted: 0 };
+  const half = Math.floor(max / 2);
+  return { kept: [...items.slice(0, half), ...items.slice(items.length - (max - half))], omitted: items.length - max };
+}
+
+/** The explanation with every list within its bound and `truncated` saying what was left out. */
+export function bound(explanation: Explanation): Explanation {
+  const truncated: Truncated = { ...explanation.truncated };
+  const cut = <T>(key: TruncatedKey, items: readonly T[], max: number): T[] => {
+    const { kept, omitted } = keepEnds(items, max);
+    if (omitted > 0) truncated[key] = (truncated[key] ?? 0) + omitted;
+    return kept;
+  };
+  const timeline = cut('timeline', explanation.timeline, LIMITS.timeline);
+  const reservation = explanation.reservation === null ? null : {
+    ...explanation.reservation,
+    reservations: cut('reservations', (explanation.reservation.reservations ?? []) as unknown[], LIMITS.list),
+    refusals: cut('refusals', (explanation.reservation.refusals ?? []) as unknown[], LIMITS.list),
+  };
+  const journal = cut('journal', explanation.journal, LIMITS.list);
+  const outbox = cut('outbox', explanation.outbox, LIMITS.list);
+  const reconciliation = cut('reconciliation', explanation.reconciliation, LIMITS.timeline);
+  return { subject: explanation.subject, timeline, outcome: explanation.outcome, reservation, journal, outbox, reconciliation,
+    ...(Object.keys(truncated).length === 0 ? {} : { truncated }) };
 }
 
 /** Collects timeline items in the order they are added; `sorted` orders them by time, keeping that order for equal times. */
 export class Timeline {
   readonly #items: TimelineItem[] = [];
   readonly #known: ReadonlySet<string>;
+  /** What the builder left out (HTLC attempts beyond the per-submission bound). */
+  readonly truncated: Truncated = {};
 
   constructor(known: ReadonlySet<string>) {
     this.#known = known;
@@ -65,6 +109,10 @@ export class Timeline {
 
   add(at: string, kind: string, detail: string, rule?: RuleId): void {
     this.#items.push({ at, kind, detail: scrub(detail, this.#known), ...(rule === undefined ? {} : { rule: RULES[rule].name }) });
+  }
+
+  omit(key: TruncatedKey, count: number): void {
+    this.truncated[key] = (this.truncated[key] ?? 0) + count;
   }
 
   sorted(): TimelineItem[] {

@@ -4,8 +4,14 @@
  * - A payment hash appears only as a fingerprint: its first 8 and last 4 hex characters.
  * - A preimage and a payment request are never read from the records, and `scrub` replaces anything
  *   that looks like one in a string that came from elsewhere (an LND error message, an event's
- *   detail): a 64-hex run that is a payment hash of the subject becomes its fingerprint, any other
- *   becomes `[redacted]`, and a BOLT 11 string becomes `[payment request]`.
+ *   detail). Invisible characters (the format characters and the others listed below) are skipped
+ *   while matching, so none can split a secret in two; a match takes those inside it along. A BOLT 11
+ *   string (`lnbc`, `lntb`, `lnbcrt` or `lnsb` and at least 20 more letters or digits, any case,
+ *   anywhere in a word) becomes `[payment request]`. A run of exactly 64 hex characters that is a
+ *   payment hash of the subject or the subject's own ID, or follows `=sha256-` (an outbox effect's
+ *   hashed file name), becomes its fingerprint, any other `[redacted]`; a longer run, which may hold
+ *   a secret at any offset, becomes `[redacted hex N chars]` whole.
+ * - `capString` cuts any one string to 1,024 characters and says how many more there were.
  * - Text output escapes what a terminal or a CI runner would act on, as macwarden's text output does
  *   (docs/spec.md, Output): control characters (C0, DEL, C1) as `\xNN`; Unicode whitespace other than
  *   the space, the bidirectional controls and invisible characters as `\uNNNN` (`\u{N}` beyond
@@ -16,13 +22,50 @@ export function fingerprint(paymentHash: string): string {
   return /^[0-9a-f]{64}$/i.test(paymentHash) ? `${paymentHash.slice(0, 8).toLowerCase()}…${paymentHash.slice(-4).toLowerCase()}` : '[not a hash]';
 }
 
-const HEX64 = /(?<![0-9a-f])(?<!sha256-)[0-9a-f]{64}(?![0-9a-f])/gi;
-const BOLT11 = /\bln(?:bcrt|bc|tbs|tb|sb)[0-9a-z]*1[0-9a-z]{20,}/gi;
+// eslint-disable-next-line no-misleading-character-class
+const INVISIBLE = /[\p{Cf}\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u3164\ufe00-\ufe0f\uffa0\u{e0000}-\u{e0fff}]/u;
+const SECRET_SHAPED = /(ln(?:bcrt|bc|tb|sb)[0-9a-z]{20,})|[0-9a-f]{64,}/gi;
+const HASHED_NAME = '=sha256-';
 
 /** A string with every payment hash fingerprinted and anything else secret-shaped removed (see the header). */
 export function scrub(value: string, known: ReadonlySet<string>): string {
-  return value.replace(BOLT11, '[payment request]')
-    .replace(HEX64, hex => known.has(hex.toLowerCase()) ? fingerprint(hex) : '[redacted]');
+  const replace = (text: string, invoice: string | undefined, start: number, visible: string): string => (invoice !== undefined ? '[payment request]'
+    : text.length > 64 ? `[redacted hex ${text.length} chars]`
+      : known.has(text.toLowerCase()) || visible.slice(Math.max(0, start - HASHED_NAME.length), start) === HASHED_NAME ? fingerprint(text)
+        : '[redacted]');
+  if (!INVISIBLE.test(value)) {
+    return value.replace(SECRET_SHAPED, (text: string, invoice: string | undefined, start: number) => replace(text, invoice, start, value));
+  }
+  // The string without its invisible characters, and the offset in `value` of each of its UTF-16 units.
+  let visible = '';
+  const origin: number[] = [];
+  let offset = 0;
+  for (const character of value) {
+    if (!INVISIBLE.test(character)) {
+      visible += character;
+      for (let unit = 0; unit < character.length; unit += 1) origin.push(offset + unit);
+    }
+    offset += character.length;
+  }
+  let result = '';
+  let copied = 0;
+  for (const match of visible.matchAll(SECRET_SHAPED)) {
+    const text = match[0];
+    const start = match.index;
+    // Matched characters are ASCII, one unit each; the invisible characters between them go with the match.
+    result += value.slice(copied, origin[start]) + replace(text, match[1], start, visible);
+    copied = (origin[start + text.length - 1] as number) + 1;
+  }
+  return result + value.slice(copied);
+}
+
+export const MAX_STRING = 1024;
+
+/** At most MAX_STRING characters (UTF-16 units, a surrogate pair never split), then `…(N more)`. */
+export function capString(value: string): string {
+  if (value.length <= MAX_STRING) return value;
+  const cut = /[\ud800-\udbff]/.test(value.charAt(MAX_STRING - 1)) ? MAX_STRING - 1 : MAX_STRING;
+  return `${value.slice(0, cut)}…(${value.length - cut} more)`;
 }
 
 // eslint-disable-next-line no-control-regex, no-misleading-character-class

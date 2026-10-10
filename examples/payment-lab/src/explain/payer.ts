@@ -1,7 +1,7 @@
 import type { PayerStore, PaymentRecord } from '../payer/store.ts';
 import { int, optionalInt, optionalText, text, type Row } from '../store/sqlite.ts';
 import { fingerprint } from './format.ts';
-import { decisions, journalLine, journalView, outboxItems, outboxView, Timeline, type Explanation } from './model.ts';
+import { decisions, journalLine, journalView, LIMITS, outboxItems, outboxView, Timeline, type Explanation } from './model.ts';
 import type { RuleId } from './rules.ts';
 
 /**
@@ -49,11 +49,33 @@ const ENDS_SUBMISSION = new Set(['submit', 'retry-prepared', 'succeeded', 'faile
 function paymentItems(timeline: Timeline, store: PayerStore, payment: PaymentRecord): void {
   const fp = fingerprint(payment.paymentHash);
   const pending = attempts(store, payment.paymentHash);
+  const perSubmission = new Map<number, number>();
+  for (const item of pending) perSubmission.set(item.submission, (perSubmission.get(item.submission) ?? 0) + 1);
+  let next = 0;
+  let current = 0;
+  let index = 0;
   let submission = 0;
   let lastAt = payment.createdAt;
+  // A submission's attempts, at most LIMITS.attemptsPerSubmission: the first and last halves, and one item counting the rest.
   const flush = (upTo: number): void => {
-    while (pending.length > 0 && (pending[0] as AttemptRow).submission <= upTo) {
-      timeline.add(lastAt, 'htlc-attempt', `${fp} ${attemptDetail(pending.shift() as AttemptRow)}`);
+    const half = LIMITS.attemptsPerSubmission / 2;
+    while (next < pending.length && (pending[next] as AttemptRow).submission <= upTo) {
+      const item = pending[next] as AttemptRow;
+      next += 1;
+      if (item.submission !== current) {
+        current = item.submission;
+        index = 0;
+      }
+      const total = perSubmission.get(current) ?? 0;
+      if (total <= LIMITS.attemptsPerSubmission || index < half || index >= total - half) {
+        timeline.add(lastAt, 'htlc-attempt', `${fp} ${attemptDetail(item)}`);
+      } else if (index === half) {
+        const omitted = total - LIMITS.attemptsPerSubmission;
+        timeline.omit('htlcAttempts', omitted);
+        timeline.add(lastAt, 'htlc-attempt', `${fp} ${omitted} more HTLC attempt(s) of submission ${current} not shown (the first ${half} and `
+          + `the last ${half} are)`);
+      }
+      index += 1;
     }
   };
   for (const event of store.events(payment.paymentHash)) {
@@ -172,7 +194,8 @@ export function explainPayer(store: PayerStore, operationId: string): Explanatio
   const operation = { operationId, kind: text(row, 'kind'), amountMsat: int(row, 'amount_msat').toString(), state: text(row, 'state'),
     budgetId: optionalText(row, 'budget_id') ?? null, createdAt: text(row, 'created_at'), completedAt: optionalText(row, 'completed_at') ?? null };
   const payments = store.paymentsForOperation(operationId);
-  const known = new Set(payments.map(item => item.paymentHash.toLowerCase()));
+  // The subject's own ID is fingerprinted like its payment hashes when it is 64 hex.
+  const known = new Set([...payments.map(item => item.paymentHash.toLowerCase()), operationId.toLowerCase()]);
   const timeline = new Timeline(known);
   timeline.add(operation.createdAt, 'operation', `operation ${operationId} (${operation.kind}) for ${operation.amountMsat} msat recorded`
     + `${operation.budgetId === null ? '' : `, budget ${operation.budgetId}`}`);
@@ -180,8 +203,13 @@ export function explainPayer(store: PayerStore, operationId: string): Explanatio
 
   const held = reservations(store, operationId);
   const journal = journalView(store.journal(operationId), known);
-  const postedAt = (event: string, reference: string): string | undefined =>
-    journal.find(entry => entry.event === event && entry.reference === reference)?.postedAt;
+  // The first entry per (event, reference), indexed once: a lookup per reservation stays constant time.
+  const firstPosted = new Map<string, string>();
+  for (const entry of journal) {
+    const key = JSON.stringify([entry.event, entry.reference]);
+    if (!firstPosted.has(key)) firstPosted.set(key, entry.postedAt);
+  }
+  const postedAt = (event: string, reference: string): string | undefined => firstPosted.get(JSON.stringify([event, reference]));
   for (const item of held) {
     const fp = fingerprint(item.paymentHash);
     const reference = `reservation:${item.reservationId}`;
@@ -249,5 +277,6 @@ export function explainPayer(store: PayerStore, operationId: string): Explanatio
     journal,
     outbox,
     reconciliation: decisions(sorted),
+    ...(Object.keys(timeline.truncated).length === 0 ? {} : { truncated: timeline.truncated }),
   };
 }

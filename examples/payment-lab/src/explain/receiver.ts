@@ -77,7 +77,8 @@ export function explainReceiver(store: ReceiverStore, orderId: string): Explanat
   const order = { orderId, amountMsat: int(row, 'amount_msat').toString(), state: text(row, 'state'), createdAt: text(row, 'created_at'),
     fulfilledAt: optionalText(row, 'fulfilled_at') ?? null };
   const list = invoices(store, orderId);
-  const known = new Set(list.map(item => item.paymentHash.toLowerCase()));
+  // The subject's own ID is fingerprinted like its payment hashes when it is 64 hex.
+  const known = new Set([...list.map(item => item.paymentHash.toLowerCase()), orderId.toLowerCase()]);
   const timeline = new Timeline(known);
   timeline.add(order.createdAt, 'order', `order ${orderId} for ${order.amountMsat} msat recorded`);
   const superseded = new Set(list.filter(item => store.isSuperseded(item.paymentHash)).map(item => item.paymentHash));

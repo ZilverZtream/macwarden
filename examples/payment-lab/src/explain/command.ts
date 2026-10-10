@@ -3,8 +3,8 @@ import type { ReceiverStore } from '../receiver/store.ts';
 import { explainPayer, resolvePayerSubject } from './payer.ts';
 import { explainReceiver, resolveReceiverSubject } from './receiver.ts';
 import { refreshPayer, refreshReceiver, type LookupSource, type TrackSource } from './refresh.ts';
-import { scrub } from './format.ts';
-import type { Explanation } from './model.ts';
+import { capString, fingerprint, scrub } from './format.ts';
+import { bound, type Explanation } from './model.ts';
 import { document, renderError, renderText, renderWarning, type ExplainError, type Warning } from './render.ts';
 
 /**
@@ -28,9 +28,12 @@ const EXIT = { ok: 0, unknown: 3, nodeError: 4 } as const;
 
 const asText = (_key: string, value: unknown): unknown => (typeof value === 'bigint' ? value.toString() : value);
 
-/** Every string of the explanation scrubbed (format.ts), whatever record field it came from: the last guard before output. */
+/**
+ * Every string of the explanation scrubbed and then cut to its bound (format.ts), whatever record field it came
+ * from: the last guard before output. Scrubbing first, so a cut never leaves part of a secret behind.
+ */
 function scrubAll<T>(value: T, known: ReadonlySet<string>): T {
-  if (typeof value === 'string') return scrub(value, known) as T;
+  if (typeof value === 'string') return capString(scrub(value, known)) as T;
   if (Array.isArray(value)) return value.map(item => scrubAll(item as unknown, known)) as T;
   if (typeof value === 'object' && value !== null) {
     return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, scrubAll(item as unknown, known)])) as T;
@@ -54,24 +57,29 @@ export async function explainCommand(input: ExplainInput, options: ExplainOption
   const target = input.component === 'payer' ? resolvePayerSubject(input.store, input.subject)
     : resolveReceiverSubject(input.store, input.subject);
   if (target === undefined) {
-    const named = input.subject.paymentHash !== undefined ? `payment hash ${input.subject.paymentHash.slice(0, 8)}…${input.subject.paymentHash.slice(-4)}`
-      : input.component === 'payer' ? `operation ${input.subject.operationId ?? ''}` : `order ${input.subject.orderId ?? ''}`;
+    // The ID as given, a 64-hex one as its fingerprint (scrub, with the ID as the subject's own).
+    const id = (input.component === 'payer' ? input.subject.operationId : input.subject.orderId) ?? '';
+    const named = input.subject.paymentHash !== undefined ? `payment hash ${fingerprint(input.subject.paymentHash)}`
+      : `${input.component === 'payer' ? 'operation' : 'order'} ${capString(scrub(id, new Set([id.toLowerCase()])))}`;
     return finish(document(null, [], { code: EXIT.unknown, step: 'subject', message: `the ${input.component}'s records have no ${named}` }));
   }
   const explained = input.component === 'payer' ? explainPayer(input.store, target) : explainReceiver(input.store, target);
   const hashes = input.component === 'payer' ? input.store.paymentsForOperation(target).map(item => item.paymentHash)
     : input.store.db.prepare('SELECT payment_hash FROM invoices WHERE order_id = ? ORDER BY created_at, rowid').all(target)
       .map(row => String(row.payment_hash));
-  const explanation: Explanation = scrubAll(explained, new Set(hashes.map(hash => hash.toLowerCase())));
+  // The lists are bounded first (model.ts, bound), so scrubbing walks at most what is printed.
+  const known = new Set([...hashes.map(hash => hash.toLowerCase()), target.toLowerCase()]);
+  const explanation: Explanation = scrubAll(bound(explained), known);
   const warnings: Warning[] = [];
   let error: ExplainError | null = null;
   if (options.refresh) {
     const refreshed = input.component === 'payer' ? await refreshPayer(explanation, hashes, input.api)
       : await refreshReceiver(explanation, hashes, input.api);
-    explanation.timeline.push(...refreshed.facts);
+    for (const fact of refreshed.facts) explanation.timeline.push(scrubAll(fact, known));
     if (refreshed.error !== undefined) {
-      warnings.push({ code: 'refresh-failed', message: `${refreshed.error}; the explanation is from the records only` });
-      error = { code: EXIT.nodeError, step: 'refresh', message: refreshed.error };
+      const message = scrubAll(refreshed.error, known);
+      warnings.push({ code: 'refresh-failed', message: `${message}; the explanation is from the records only` });
+      error = { code: EXIT.nodeError, step: 'refresh', message };
     }
   }
   return finish(document(explanation, warnings, error));
