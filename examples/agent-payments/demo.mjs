@@ -153,9 +153,12 @@ function nodeVersionSupported() {
   return major > 26;
 }
 
+/** Removes containers, volumes and runtime/. Resolves true only when docker compose down succeeded; never rejects. */
 async function teardown() {
   out('\n $ docker compose down -v --remove-orphans\n');
-  const result = await docker(['down', '-v', '--remove-orphans'], { timeoutMs: 180_000 });
+  // run() rejects when docker cannot be started or does not finish in time: that is a failed teardown too.
+  const result = await docker(['down', '-v', '--remove-orphans'], { timeoutMs: 180_000 })
+    .catch(error => ({ code: null, stdout: '', stderr: error.message }));
   if (result.code !== 0) out(indent(result.stderr || result.stdout));
   rmSync(runtime, { recursive: true, force: true });
   out(`   ${result.code === 0 ? 'removed containers, volumes and runtime/' : 'docker compose down failed; runtime/ removed'}\n`);
@@ -195,8 +198,15 @@ async function stopWatch() {
   // Node cannot send a console Ctrl+C to a child on Windows: kill() terminates it at once,
   // so watch prints no summary there. It saves its usage file periodically while it runs.
   current.child.kill(isWindows ? undefined : 'SIGINT');
-  const deadline = sleep(30_000).then(() => 'timeout');
-  const code = await Promise.race([current.exited, deadline]);
+  // The deadline timer is cleared once the race settles: a pending 30 s timer would keep the process alive.
+  let timer;
+  const deadline = new Promise(done => { timer = setTimeout(() => done('timeout'), 30_000); });
+  let code;
+  try {
+    code = await Promise.race([current.exited, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
   if (code !== 'timeout') return code;
   current.child.kill('SIGKILL');
   return null;
@@ -393,12 +403,15 @@ async function main() {
     await stopWatch();
   }
   step(STEPS, 'Teardown');
-  if (teardownAfter) await teardown();
-  else out(`   The stack is still running${failure ? ' for inspection (docker compose logs)' : ''}. Remove containers, volumes and runtime/ with ./teardown.sh (or .\\teardown.ps1).\n`);
+  // With --teardown, a failed docker compose down fails the run whatever the story's outcome: containers or
+  // volumes the caller asked to remove may be left behind.
+  const tornDown = teardownAfter ? await teardown() : true;
+  if (!teardownAfter) out(`   The stack is still running${failure ? ' for inspection (docker compose logs)' : ''}. Remove containers, volumes and runtime/ with ./teardown.sh (or .\\teardown.ps1).\n`);
   const failed = checks.filter(item => !item.ok);
   out(`\n${checks.length - failed.length}/${checks.length} checks passed${failure ? '; the run stopped early' : ''}\n`);
   for (const item of failed) out(`  FAILED: ${item.name}\n`);
-  process.exitCode = failure || failed.length ? 1 : 0;
+  if (!tornDown) out('  FAILED: teardown (docker compose down); containers or volumes may be left: run ./teardown.sh (or .\\teardown.ps1)\n');
+  process.exitCode = failure || failed.length || !tornDown ? 1 : 0;
 }
 
 await main();
