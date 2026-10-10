@@ -18,6 +18,14 @@ import { EVENTS, isAccount, type LedgerEvent } from './accounts.ts';
  * computed here, in JavaScript bigints. `post` must run inside the caller's BEGIN IMMEDIATE
  * transaction, the one that makes the state change, so the change and its entry commit together
  * or not at all.
+ *
+ * Every column CHECKs its storage type (typeof), so a value of the wrong type (an entry_id that is
+ * text, a leg that is a blob) is refused at the write; `ledger verify` still reports one that got
+ * past it (with ignore_check_constraints, or written by another tool) as a finding.
+ *
+ * A live entry's posted_at never goes back: `post` takes the later of the clock and the last live
+ * entry's posted_at (as the usage file does), so a wall clock stepped back (NTP) posts at the
+ * previous time rather than before it, and an entry earlier than its predecessor is corruption.
  */
 
 const EVENT_LIST = EVENTS.map(event => `'${event}'`).join(', ');
@@ -26,7 +34,7 @@ const EVENT_LIST = EVENTS.map(event => `'${event}'`).join(', ');
  * A canonical signed decimal, what parseBalance reads: '0', or an optional minus and a digit 1-9
  * followed by digits, at most 39 digits. '00', '-0', '0-' and '' are refused by the column.
  */
-const canonicalDecimal = (column: string): string => `length(${column}) BETWEEN 1 AND 40 AND length(ltrim(${column}, '-')) <= 39 AND (${column} = '0'
+const canonicalDecimal = (column: string): string => `typeof(${column}) = 'text' AND length(${column}) BETWEEN 1 AND 40 AND length(ltrim(${column}, '-')) <= 39 AND (${column} = '0'
     OR (${column} GLOB '[1-9]*' AND ${column} NOT GLOB '*[^0-9]*')
     OR (${column} GLOB '-[1-9]*' AND substr(${column}, 2) NOT GLOB '*[^0-9]*'))`;
 
@@ -34,32 +42,32 @@ const canonicalDecimal = (column: string): string => `length(${column}) BETWEEN 
 export const JOURNAL_SCHEMA = `
 CREATE TABLE IF NOT EXISTS journal_entries (
   entry_id INTEGER PRIMARY KEY AUTOINCREMENT,
-  event TEXT NOT NULL CHECK (event IN (${EVENT_LIST})),
-  reference TEXT NOT NULL CHECK (length(reference) BETWEEN 1 AND 256),
-  operation_id TEXT,
-  payment_hash TEXT,
-  origin TEXT NOT NULL CHECK (origin IN ('live', 'migrated')),
-  posted_at TEXT NOT NULL,
+  event TEXT NOT NULL CHECK (typeof(event) = 'text' AND event IN (${EVENT_LIST})),
+  reference TEXT NOT NULL CHECK (typeof(reference) = 'text' AND length(reference) BETWEEN 1 AND 256),
+  operation_id TEXT CHECK (operation_id IS NULL OR typeof(operation_id) = 'text'),
+  payment_hash TEXT CHECK (payment_hash IS NULL OR typeof(payment_hash) = 'text'),
+  origin TEXT NOT NULL CHECK (typeof(origin) = 'text' AND origin IN ('live', 'migrated')),
+  posted_at TEXT NOT NULL CHECK (typeof(posted_at) = 'text'),
   UNIQUE (event, reference)
 );
 CREATE INDEX IF NOT EXISTS journal_entries_by_operation ON journal_entries (operation_id);
 CREATE INDEX IF NOT EXISTS journal_entries_by_payment ON journal_entries (payment_hash);
 CREATE TABLE IF NOT EXISTS journal_lines (
-  entry_id INTEGER NOT NULL REFERENCES journal_entries (entry_id),
-  line_no INTEGER NOT NULL CHECK (line_no >= 1),
-  account TEXT NOT NULL CHECK (length(account) BETWEEN 1 AND 160),
-  direction TEXT NOT NULL CHECK (direction IN ('debit', 'credit')),
-  amount_msat INTEGER NOT NULL CHECK (amount_msat >= 0),
-  leg TEXT CHECK (leg IN ('principal', 'routing-fee', 'sale')),
+  entry_id INTEGER NOT NULL CHECK (typeof(entry_id) = 'integer') REFERENCES journal_entries (entry_id),
+  line_no INTEGER NOT NULL CHECK (typeof(line_no) = 'integer' AND line_no >= 1),
+  account TEXT NOT NULL CHECK (typeof(account) = 'text' AND length(account) BETWEEN 1 AND 160),
+  direction TEXT NOT NULL CHECK (typeof(direction) = 'text' AND direction IN ('debit', 'credit')),
+  amount_msat INTEGER NOT NULL CHECK (typeof(amount_msat) = 'integer' AND amount_msat >= 0),
+  leg TEXT CHECK (leg IS NULL OR (typeof(leg) = 'text' AND leg IN ('principal', 'routing-fee', 'sale'))),
   balance_after TEXT NOT NULL CHECK (${canonicalDecimal('balance_after')}),
   PRIMARY KEY (entry_id, line_no)
 );
 CREATE INDEX IF NOT EXISTS journal_lines_by_account ON journal_lines (account);
 CREATE TABLE IF NOT EXISTS balances (
-  account TEXT PRIMARY KEY,
+  account TEXT PRIMARY KEY CHECK (typeof(account) = 'text'),
   balance_msat TEXT NOT NULL CHECK (${canonicalDecimal('balance_msat')}),
-  last_entry_id INTEGER NOT NULL,
-  updated_at TEXT NOT NULL
+  last_entry_id INTEGER NOT NULL CHECK (typeof(last_entry_id) = 'integer'),
+  updated_at TEXT NOT NULL CHECK (typeof(updated_at) = 'text')
 );
 `;
 
@@ -85,6 +93,20 @@ export interface Posting {
   postedAt?: string;
 }
 
+/** An ISO 8601 UTC time as nowIso writes it (what verify reads as a readable posted_at). */
+export const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$/;
+
+/**
+ * A live entry's time: the later of `at` and the last live entry's posted_at (when that one is
+ * readable), so live times never decrease whatever the wall clock does.
+ */
+function liveTime(db: DatabaseSync, at: string): string {
+  const last = db.prepare(`SELECT posted_at FROM journal_entries WHERE origin = 'live' ORDER BY entry_id DESC LIMIT 1`).get();
+  const previous = last?.posted_at;
+  if (typeof previous !== 'string' || !ISO_TIME.test(previous) || !ISO_TIME.test(at)) return at;
+  return Date.parse(previous) > Date.parse(at) ? previous : at;
+}
+
 /** A signed decimal balance as stored; anything else is a damaged row. */
 export function parseBalance(value: string): bigint {
   if (!/^-?(0|[1-9][0-9]{0,38})$/.test(value) || value === '-0') throw new Error(`balance ${JSON.stringify(value)} is not a decimal integer`);
@@ -100,7 +122,8 @@ export function signed(direction: Direction, amountMsat: bigint): bigint {
  * Returns the entry ID, or undefined when (event, reference) was already posted (nothing changes).
  * Throws, rolling the caller's transaction back with the state change, for an entry that is not
  * balanced, has no debit or no credit line, names an account outside the chart, or carries an
- * amount outside 0 to 2^63 - 1.
+ * amount outside 0 to 2^63 - 1. A live entry is posted at the later of its time (the clock, or
+ * posting.postedAt) and the last live entry's; a migrated one keeps its time.
  */
 export function post(db: DatabaseSync, posting: Posting): number | undefined {
   if (!db.isTransaction) throw new Error('a journal entry is posted only inside the transaction of the state change that causes it');
@@ -115,10 +138,11 @@ export function post(db: DatabaseSync, posting: Posting): number | undefined {
     throw new Error(`${posting.event} ${posting.reference}: an entry needs a debit and a credit line`);
   }
   if (debits !== credits) throw new Error(`${posting.event} ${posting.reference}: debits ${debits} msat differ from credits ${credits} msat`);
-  const now = posting.postedAt ?? nowIso();
+  const origin = posting.origin ?? 'live';
+  const now = origin === 'live' ? liveTime(db, posting.postedAt ?? nowIso()) : posting.postedAt ?? nowIso();
   const inserted = db.prepare(`INSERT INTO journal_entries (event, reference, operation_id, payment_hash, origin, posted_at)
     VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (event, reference) DO NOTHING`)
-    .run(posting.event, posting.reference, posting.operationId ?? null, posting.paymentHash ?? null, posting.origin ?? 'live', now);
+    .run(posting.event, posting.reference, posting.operationId ?? null, posting.paymentHash ?? null, origin, now);
   if (Number(inserted.changes) !== 1) return undefined;
   const entryId = Number(inserted.lastInsertRowid);
   const running = new Map<string, bigint>();

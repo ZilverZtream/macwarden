@@ -266,7 +266,7 @@ describe('payment lab ledger: migration of a 1.2 database', () => {
     store.close();
     const upgraded = payerStore(file);
     expect(upgraded.db.prepare(`SELECT name FROM sqlite_master WHERE name = 'ledger_entries'`).all()).toHaveLength(0);
-    expect(upgraded.db.prepare('PRAGMA user_version').all()[0]?.user_version).toBe(7n); // 6 is the ledger migration; 7, the outbox, runs after it
+    expect(upgraded.db.prepare('PRAGMA user_version').all()[0]?.user_version).toBe(8n); // 6 is the ledger migration; 7 (the outbox) and 8 (lookup indexes) run after it
     const result = await lab.verifyLedger(upgraded);
     expectBalanced(result);
     expect(balances(result)).toEqual({ 'customer-receivable': VALUE, 'refunds-payable': VALUE, 'lnd-wallet-outgoing': -2n * (VALUE + FEE),
@@ -866,4 +866,325 @@ describe('payment lab ledger: principal plus fee above 2^63 - 1', () => {
     expectBalanced(result);
     expect(balances(result)).toMatchObject({ 'budget:B': MAX + 1n, 'budget-commitments': -(MAX + 1n), 'lnd-wallet-outgoing': -(MAX + 1n) });
   });
+});
+
+/** ledger-verify's capped lists: the first 100 entries per category, and the totals. */
+type CountedVerification = LedgerVerification & { unbalancedEntryCount: number; invalidEntryCount: number };
+
+/** Recomputes every line's balance_after and the balances table, as post() would have: tampering only the records can catch. */
+function rebuildBalances(db: PayerStore['db']): void {
+  const running = new Map<string, bigint>();
+  const last = new Map<string, [bigint, string]>();
+  const update = db.prepare('UPDATE journal_lines SET balance_after = ? WHERE rowid = ?');
+  for (const row of db.prepare(`SELECT l.rowid AS rid, l.entry_id, l.account, l.direction, l.amount_msat, e.posted_at FROM journal_lines l
+      JOIN journal_entries e ON e.entry_id = l.entry_id ORDER BY l.entry_id, l.line_no`).all()) {
+    const account = String(row.account);
+    const amount = BigInt(row.amount_msat as bigint);
+    const after = (running.get(account) ?? 0n) + (row.direction === 'debit' ? amount : -amount);
+    running.set(account, after);
+    last.set(account, [BigInt(row.entry_id as bigint), String(row.posted_at)]);
+    update.run(after.toString(), row.rid as bigint);
+  }
+  db.exec('DELETE FROM balances');
+  const insert = db.prepare('INSERT INTO balances (account, balance_msat, last_entry_id, updated_at) VALUES (?, ?, ?, ?)');
+  for (const [account, value] of running) {
+    const [entryId, at] = last.get(account) as [bigint, string];
+    insert.run(account, value.toString(), entryId, at);
+  }
+}
+
+/** The entry IDs a result names: listed entries and the accounts' first entries. */
+function namedEntries(result: LedgerVerification): number[] {
+  const ids = new Set([...result.unbalancedEntries, ...result.invalidEntries].map(item => item.entryId));
+  for (const report of result.accounts) if (report.firstEntry?.entryId !== undefined) ids.add(report.firstEntry.entryId);
+  return [...ids].sort((a, b) => a - b);
+}
+
+function payouts(file: string, count: number): PayerStore {
+  const store = payerStore(file);
+  for (let index = 0; index < count; index += 1) {
+    submitted(store, `${file}-${index}`, `OP-${file}-${index}`, 'payout');
+    store.applyUpdate(lndPayment(`${file}-${index}`, 'SUCCEEDED'), 'SendPaymentV2', 1);
+  }
+  return store;
+}
+
+describe('payment lab ledger: a wall clock set back', () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('an NTP step backwards never flags a healthy book: a live entry is posted at the later of now and the last live entry', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.parse('2026-10-10T12:00:00.000Z');
+    vi.setSystemTime(start);
+    const store = payerStore('clock-back.db');
+    store.setBudget('B', 10_000_000n);
+    const pay = (label: string): void => {
+      submitted(store, label, `OP-${label}`, 'payout', 'B');
+      store.applyUpdate(lndPayment(label, 'SUCCEEDED'), 'SendPaymentV2', 1);
+    };
+    pay('clock-1');
+    vi.setSystemTime(start - 1000);
+    pay('clock-2');
+    vi.setSystemTime(start - 3_600_000);
+    pay('clock-3');
+    expectBalanced(await lab.verifyLedger(store));
+    const times = (): string[] => store.db.prepare('SELECT posted_at FROM journal_entries ORDER BY entry_id').all().map(row => String(row.posted_at));
+    expect(new Set(times())).toEqual(new Set([new Date(start).toISOString()]));
+    vi.setSystemTime(start + 60_000);
+    pay('clock-4');
+    expect(times().at(-1)).toBe(new Date(start + 60_000).toISOString());
+    expectBalanced(await lab.verifyLedger(store));
+  });
+
+  it('an entry moved forward in time is named, not the healthy entries after it', async () => {
+    const store = payouts('clock-forward.db', 4);
+    expectBalanced(await lab.verifyLedger(store));
+    store.db.exec(`UPDATE journal_entries SET posted_at = '2999-01-01T00:00:00.000Z' WHERE entry_id = 2`);
+    const result = await lab.verifyLedger(store);
+    expect(result.balanced).toBe(false);
+    expect(result.invalidEntries.map(entry => entry.entryId)).toEqual([2]);
+    expect(result.invalidEntries[0]?.reason).toMatch(/posted_at 2999-01-01T00:00:00.000Z is later than the next live entry 3's/);
+  });
+});
+
+describe('payment lab ledger: a damaged column is a finding, never a throw', () => {
+  /** A budgeted payout (entries 1 held, 2 payment-succeeded, 3 consumed) and a second payout (entry 4). */
+  async function damaged(file: string): Promise<PayerStore> {
+    const store = payerStore(file);
+    store.setBudget('B', 10_000n);
+    submitted(store, `${file}-a`, 'OP-A', 'payout', 'B');
+    store.applyUpdate(lndPayment(`${file}-a`, 'SUCCEEDED'), 'SendPaymentV2', 1);
+    submitted(store, `${file}-b`, 'OP-B', 'payout');
+    store.applyUpdate(lndPayment(`${file}-b`, 'SUCCEEDED'), 'SendPaymentV2', 1);
+    expectBalanced(await lab.verifyLedger(store));
+    store.db.exec(`PRAGMA foreign_keys = OFF; ${UNCHECKED}`);
+    return store;
+  }
+
+  const cases: [string, string, number | string][] = [
+    ['journal_lines.entry_id text', `UPDATE journal_lines SET entry_id = 'abc' WHERE entry_id = 2 AND line_no = 1`, 2],
+    ['journal_lines.entry_id real', 'UPDATE journal_lines SET entry_id = 2.5 WHERE entry_id = 2 AND line_no = 1', 2],
+    ['journal_lines.entry_id blob', `UPDATE journal_lines SET entry_id = x'00' WHERE entry_id = 2 AND line_no = 1`, 2],
+    ['journal_lines.leg blob on a line without a leg', `UPDATE journal_lines SET leg = x'00' WHERE entry_id = 2 AND line_no = 2`, 2],
+    ['journal_lines.line_no real', 'UPDATE journal_lines SET line_no = 1.5 WHERE entry_id = 4 AND line_no = 1', 4],
+    ['journal_lines.balance_after blob', `UPDATE journal_lines SET balance_after = x'31' WHERE entry_id = 4 AND line_no = 1`, 4],
+    ['journal_entries.operation_id blob', `UPDATE journal_entries SET operation_id = x'00' WHERE entry_id = 4`, 4],
+    ['journal_entries.payment_hash blob', `UPDATE journal_entries SET payment_hash = x'00' WHERE entry_id = 1`, 1],
+    ['journal_entries.posted_at integer', 'UPDATE journal_entries SET posted_at = 7 WHERE entry_id = 4', 4],
+    ['reservations.principal_msat text', `UPDATE reservations SET principal_msat = 'abc'`, 'budget:B'],
+    ['reservations.state blob', `UPDATE reservations SET state = x'00'`, 'budget:B'],
+    ['payments.state blob', `UPDATE payments SET state = x'00' WHERE operation_id = 'OP-B'`, 'lnd-wallet-outgoing'],
+    ['payments.value_msat text', `UPDATE payments SET value_msat = 'abc' WHERE operation_id = 'OP-B'`, 'lnd-wallet-outgoing'],
+    ['balances.last_entry_id text', `UPDATE balances SET last_entry_id = 'abc' WHERE account = 'routing-fees'`, 'routing-fees'],
+  ];
+  cases.forEach(([name, sql, target], index) => {
+    it(`${name}: unbalanced, named`, async () => {
+      const store = await damaged(`damaged-${index}.db`);
+      store.db.exec(sql);
+      const result = await lab.verifyLedger(store);
+      expect(result.balanced).toBe(false);
+      if (typeof target === 'number') expect(namedEntries(result)).toContain(target);
+      else expect(result.accounts.find(item => item.account === target)?.firstEntry?.reason).toEqual(expect.any(String));
+    });
+  });
+
+  it('the journal columns refuse a value of the wrong type', () => {
+    const store = payerStore('damaged-schema.db');
+    submitted(store, 'damaged-schema', 'OP-S', 'payout');
+    store.applyUpdate(lndPayment('damaged-schema', 'SUCCEEDED'), 'SendPaymentV2', 1);
+    store.db.exec('PRAGMA foreign_keys = OFF');
+    for (const sql of [
+      `UPDATE journal_lines SET entry_id = 'abc' WHERE line_no = 1`, 'UPDATE journal_lines SET entry_id = 1.5 WHERE line_no = 1',
+      `UPDATE journal_lines SET leg = x'00' WHERE line_no = 2`, 'UPDATE journal_lines SET line_no = 1.5 WHERE line_no = 1',
+      `UPDATE journal_lines SET amount_msat = '5x' WHERE line_no = 1`, `UPDATE journal_entries SET operation_id = x'00'`,
+      `UPDATE journal_entries SET posted_at = x'00'`, `UPDATE balances SET last_entry_id = 'abc'`, `UPDATE balances SET updated_at = x'00'`,
+    ]) {
+      expect(() => store.db.exec(sql), sql).toThrow(/CHECK constraint failed/);
+    }
+  });
+});
+
+describe('payment lab ledger: the receiver\'s book against its records, without LND', () => {
+  /**
+   * Entries: 1 invoice-settled y (fulfills ORD-1), 2 invoice-settled x (a late not-created invoice of ORD-1),
+   * 3 double-payment x, 4 underpaid-settlement u (400 of 1000), 5 invoice-settled f (ORD-3, 2500 of 1000).
+   */
+  async function received(file: string): Promise<{ store: ReceiverStore; y: string; x: string; u: string }> {
+    const store = receiverStore(file);
+    const { preimage, paymentHash: x } = preimageFor(`${file}-x`);
+    expect(store.recordInvoiceIntent({ orderId: 'ORD-1', amountMsat: VALUE, kind: 'standard', preimage, paymentHash: x }).outcome).toBe('recorded');
+    expect(store.markNotCreated(x)).toBe(true);
+    const y = openInvoice(store, 'ORD-1', `${file}-y`);
+    expect(store.applyInvoice(invoice(y, 'SETTLED', VALUE, 1n), 'subscription')).toBe('fulfilled');
+    expect(store.applyInvoice(invoice(x, 'SETTLED', VALUE, 2n), 'subscription')).toBe('second-payment');
+    const u = openInvoice(store, 'ORD-2', `${file}-u`);
+    expect(store.applyInvoice(invoice(u, 'SETTLED', 400n, 3n), 'subscription')).toBe('underpaid');
+    const f = openInvoice(store, 'ORD-3', `${file}-f`);
+    expect(store.applyInvoice(invoice(f, 'SETTLED', 2500n, 4n), 'subscription')).toBe('fulfilled');
+    expect(store.journal('ORD-1').map(entry => `${entry.entryId}:${entry.event}`)).toEqual(['1:invoice-settled', '2:invoice-settled', '3:double-payment']);
+    expectBalanced(await lab.verifyLedger(store));
+    return { store, y, x, u };
+  }
+
+  const settle = (event: string, hash: string, debit: string, credit: string, amount: bigint) => (db: ReceiverStore['db']): void => {
+    const added = db.prepare(`INSERT INTO journal_entries (event, reference, operation_id, payment_hash, origin, posted_at)
+      SELECT ?, ?, operation_id, payment_hash, 'live', (SELECT MAX(posted_at) FROM journal_entries) FROM journal_entries WHERE reference = ? LIMIT 1`)
+      .run(event, hash, hash) as { lastInsertRowid: bigint };
+    const insert = db.prepare(`INSERT INTO journal_lines (entry_id, line_no, account, direction, amount_msat, balance_after) VALUES (?, ?, ?, ?, ?, '0')`);
+    insert.run(added.lastInsertRowid, 1, debit, 'debit', amount);
+    insert.run(added.lastInsertRowid, 2, credit, 'credit', amount);
+  };
+
+  type Change = string | ((db: ReceiverStore['db']) => void);
+  const cases: [string, (books: { y: string; x: string; u: string }) => Change, RegExp][] = [
+    ['a second settlement entry for a settled invoice', ({ y }) => settle('underpaid-settlement', y, 'lnd-wallet-incoming', 'suspense-double-payment', VALUE),
+      /2 settlement entries/],
+    ['an invoice-settled amount that is not the record\'s amt_paid_msat', () => 'UPDATE journal_lines SET amount_msat = 900 WHERE entry_id = 1',
+      /amt_paid_msat 1000/],
+    ['an underpaid settlement relabelled invoice-settled', () => `UPDATE journal_entries SET event = 'invoice-settled' WHERE entry_id = 4;
+      UPDATE journal_lines SET leg = 'sale' WHERE entry_id = 4 AND line_no = 1;
+      UPDATE journal_lines SET account = 'customer-receivable' WHERE entry_id = 4 AND line_no = 2`, /less than the invoice's 1000 msat/],
+    ['the double-payment entry of a second payment deleted', () => 'DELETE FROM journal_lines WHERE entry_id = 3; DELETE FROM journal_entries WHERE entry_id = 3',
+      /no double-payment entry/],
+    ['a double-payment entry for the invoice that fulfilled the order', ({ y }) => settle('double-payment', y, 'customer-receivable',
+      'suspense-double-payment', VALUE), /fulfilled the order itself/],
+    ['a settlement entry for an invoice whose record says open', ({ y }) => `UPDATE invoices SET state = 'open' WHERE payment_hash = '${y}'`,
+      /is open in the record/],
+    ['a settlement entry for a late invoice LND has not settled', ({ x }) => `UPDATE invoices SET late_lnd_state = 'OPEN' WHERE payment_hash = '${x}'`,
+      /is not-created in the record/],
+  ];
+  cases.forEach(([name, change, reason], index) => {
+    it(`${name}: unbalanced, named`, async () => {
+      const { store, ...books } = await received(`received-${index}.db`);
+      const sql = change(books);
+      if (typeof sql === 'string') store.db.exec(sql); else sql(store.db);
+      rebuildBalances(store.db);
+      const result = await lab.verifyLedger(store);
+      expect(result.balanced).toBe(false);
+      expect(result.accounts.map(item => item.firstEntry?.reason ?? '').join('\n')).toMatch(reason);
+    });
+  });
+});
+
+describe('payment lab ledger: the payer\'s double-payment entries against its records', () => {
+  /** OP-D paid twice (entries: dp-a succeeded, then dp-b succeeded and its double-payment entry) and OP-S paid once. */
+  async function paidTwice(file: string): Promise<PayerStore> {
+    const store = payerStore(file);
+    submitted(store, `${file}-a`, 'OP-D');
+    store.applyUpdate(lndPayment(`${file}-a`, 'FAILED'), 'SendPaymentV2', 1);
+    submitted(store, `${file}-b`, 'OP-D');
+    store.applyUpdate(lndPayment(`${file}-a`, 'SUCCEEDED'), 'TrackPaymentV2');
+    store.applyUpdate(lndPayment(`${file}-b`, 'SUCCEEDED'), 'SendPaymentV2', 1);
+    submitted(store, `${file}-s`, 'OP-S');
+    store.applyUpdate(lndPayment(`${file}-s`, 'SUCCEEDED'), 'SendPaymentV2', 1);
+    expect(store.journal('OP-D').map(entry => entry.event)).toEqual(['payment-succeeded', 'payment-succeeded', 'double-payment']);
+    expectBalanced(await lab.verifyLedger(store));
+    return store;
+  }
+
+  type Change = string | ((db: PayerStore['db']) => void);
+  const cases: [string, (file: string) => Change, RegExp][] = [
+    ['the double-payment entry deleted', () => 'DELETE FROM journal_lines WHERE entry_id = 3; DELETE FROM journal_entries WHERE entry_id = 3',
+      /no double-payment entry/],
+    ['the double-payment amount changed on both lines', () => 'UPDATE journal_lines SET amount_msat = 1 WHERE entry_id = 3', /value_msat 1000/],
+    ['a double-payment entry for an operation paid once', file => (db): void => {
+      const hash = preimageFor(`${file}-s`).paymentHash;
+      const added = db.prepare(`INSERT INTO journal_entries (event, reference, operation_id, payment_hash, origin, posted_at)
+        VALUES ('double-payment', ?, 'OP-S', ?, 'live', (SELECT MAX(posted_at) FROM journal_entries))`).run(hash, hash) as { lastInsertRowid: bigint };
+      const insert = db.prepare(`INSERT INTO journal_lines (entry_id, line_no, account, direction, amount_msat, balance_after) VALUES (?, ?, ?, ?, 1000, '0')`);
+      insert.run(added.lastInsertRowid, 1, 'suspense-double-payment', 'debit');
+      insert.run(added.lastInsertRowid, 2, 'customer-receivable', 'credit');
+    }, /first succeeded payment of operation OP-S/],
+  ];
+  cases.forEach(([name, change, reason], index) => {
+    it(`${name}: unbalanced, named`, async () => {
+      const file = `paid-twice-${index}.db`;
+      const store = await paidTwice(file);
+      const sql = change(file);
+      if (typeof sql === 'string') store.db.exec(sql); else sql(store.db);
+      rebuildBalances(store.db);
+      const result = await lab.verifyLedger(store);
+      expect(result.balanced).toBe(false);
+      expect(result.accounts.map(item => item.firstEntry?.reason ?? '').join('\n')).toMatch(reason);
+    });
+  });
+});
+
+describe('payment lab ledger: ledger-verify output is bounded', () => {
+  it('the first 100 entries per category with the totals; an unbalanced entry is not also listed as malformed', async () => {
+    const store = payouts('capped.db', 105);
+    store.db.exec('UPDATE journal_lines SET amount_msat = amount_msat + 1 WHERE line_no = 1');
+    const result = await lab.verifyLedger(store) as CountedVerification;
+    expect(result.balanced).toBe(false);
+    expect(result.unbalancedEntries.map(entry => entry.entryId)).toEqual(Array.from({ length: 100 }, (_, index) => index + 1));
+    expect(result.unbalancedEntryCount).toBe(105);
+    expect(result.invalidEntries).toEqual([]);
+    expect(result.invalidEntryCount).toBe(0);
+    store.close();
+
+    const stdout: string[] = [];
+    vi.spyOn(process.stdout, 'write').mockImplementation(chunk => { stdout.push(String(chunk)); return true; });
+    try {
+      const services = { payer: () => ({ api: {} as FakePayerApi, store: payerStore('capped.db'), emit: quiet }),
+        receiver: () => { throw new Error('not used'); } };
+      expect(await lab.main(['payer', 'ledger-verify', '--as', 'customer-payer'], services)).toBe(1);
+      expect(await lab.main(['payer', 'ledger-verify', '--as', 'customer-payer', '--json'], services)).toBe(1);
+    } finally {
+      vi.restoreAllMocks();
+    }
+    const [summary, report] = stdout.flatMap(chunk => chunk.split('\n')).filter(line => line !== '').map(line => JSON.parse(line) as Record<string, unknown>)
+      .filter(item => item.event === 'ledger-verify' || item.event === undefined);
+    expect(summary).toMatchObject({ unbalancedEntryCount: 105, unbalancedEntriesMore: '… 5 more', invalidEntryCount: 0 });
+    expect(summary?.unbalancedEntries).toHaveLength(100);
+    expect(summary).not.toHaveProperty('invalidEntriesMore');
+    expect(report).toMatchObject({ unbalancedEntryCount: 105, invalidEntryCount: 0 });
+    expect(report?.unbalancedEntries).toHaveLength(100);
+  });
+});
+
+describe('payment lab ledger: verify reads the books in batches', () => {
+  /** `count` succeeded payouts of VALUE and FEE written straight into the tables, as the store would have posted them. */
+  function bulkPayouts(store: PayerStore, count: number): void {
+    const at = '2026-10-10T12:00:00.000Z';
+    const n = `WITH RECURSIVE n(k) AS (SELECT 1 UNION ALL SELECT k + 1 FROM n WHERE k < ${count})`;
+    const hash = `printf('%064x', k)`;
+    store.db.exec(`BEGIN IMMEDIATE;
+      ${n} INSERT INTO operations (operation_id, kind, amount_msat, state, created_at, updated_at, completed_at)
+        SELECT 'OP' || k, 'payout', ${VALUE}, 'completed', '${at}', '${at}', '${at}' FROM n;
+      ${n} INSERT INTO payments (payment_hash, operation_id, payment_request, destination, amount_msat, fee_limit_msat, max_parts, state, submissions,
+          fee_msat, value_msat, created_at, updated_at, resolved_at)
+        SELECT ${hash}, 'OP' || k, 'lnbcrt1', '${DESTINATION}', ${VALUE}, ${ALLOWANCE}, 1, 'succeeded', 1, ${FEE}, ${VALUE}, '${at}', '${at}', '${at}' FROM n;
+      ${n} INSERT INTO journal_entries (entry_id, event, reference, operation_id, payment_hash, origin, posted_at)
+        SELECT k, 'payment-succeeded', ${hash}, 'OP' || k, ${hash}, 'live', '${at}' FROM n;
+      ${n} INSERT INTO journal_lines (entry_id, line_no, account, direction, amount_msat, leg, balance_after)
+        SELECT k, 1, 'payouts-payable', 'debit', ${VALUE}, 'principal', CAST(k * ${VALUE} AS TEXT) FROM n
+        UNION ALL SELECT k, 2, 'lnd-wallet-outgoing', 'credit', ${VALUE}, NULL, CAST(-((k - 1) * ${VALUE + FEE} + ${VALUE}) AS TEXT) FROM n
+        UNION ALL SELECT k, 3, 'routing-fees', 'debit', ${FEE}, 'routing-fee', CAST(k * ${FEE} AS TEXT) FROM n
+        UNION ALL SELECT k, 4, 'lnd-wallet-outgoing', 'credit', ${FEE}, NULL, CAST(-(k * ${VALUE + FEE}) AS TEXT) FROM n;
+      INSERT INTO balances (account, balance_msat, last_entry_id, updated_at) VALUES
+        ('payouts-payable', '${BigInt(count) * VALUE}', ${count}, '${at}'), ('lnd-wallet-outgoing', '${-BigInt(count) * (VALUE + FEE)}', ${count}, '${at}'),
+        ('routing-fees', '${BigInt(count) * FEE}', ${count}, '${at}');
+      COMMIT;`);
+  }
+
+  it('200,000 entries: balanced, with a sampled peak heap under 300 MB', async () => {
+    const store = payerStore('bulk.db');
+    bulkPayouts(store, 200_000);
+    let peak = process.memoryUsage().heapUsed;
+    const timer = setInterval(() => { peak = Math.max(peak, process.memoryUsage().heapUsed); }, 1);
+    const started = performance.now();
+    let result: LedgerVerification;
+    try {
+      result = await lab.verifyLedger(store);
+    } finally {
+      clearInterval(timer);
+    }
+    peak = Math.max(peak, process.memoryUsage().heapUsed);
+    const elapsed = performance.now() - started;
+    expectBalanced(result);
+    expect(result.entries).toBe(200_000);
+    expect(peak / 1e6).toBeLessThan(300);
+    // About 2 s on a laptop; the bound only catches a quadratic step.
+    expect(elapsed).toBeLessThan(30_000);
+  }, 120_000);
 });

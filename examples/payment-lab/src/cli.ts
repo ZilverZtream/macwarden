@@ -254,7 +254,16 @@ function outboxStatusCommand(values: Record<string, unknown>, db: DatabaseSync):
   return status.overdueCount > 0 ? EXIT.unresolved : EXIT.ok;
 }
 
-/** ledger-verify: the report as events (or one JSON object with --json) and the exit code (see the header). */
+/** "… N more" when a capped list (the first LIST_LIMIT) leaves entries out, else nothing. */
+function more(listed: number, count: number): string | undefined {
+  return count > listed ? `… ${count - listed} more` : undefined;
+}
+
+/**
+ * ledger-verify: the report as events (or one JSON object with --json) and the exit code (see the header).
+ * Both list at most the first LIST_LIMIT unbalanced and malformed entries, with their totals; the
+ * text summary adds "… N more" for each list that leaves entries out.
+ */
 async function ledgerVerify(store: LedgerStore, source: LndLedgerSource | undefined, json: boolean): Promise<number> {
   const result = await verifyLedger(store, source);
   if (json) {
@@ -262,8 +271,11 @@ async function ledgerVerify(store: LedgerStore, source: LndLedgerSource | undefi
   } else {
     for (const account of result.accounts) emit({ event: 'ledger-account', ...account });
     emit({ event: 'ledger-verify', book: result.book, balanced: result.balanced, entries: result.entries,
-      unbalancedEntries: result.unbalancedEntries, invalidEntries: result.invalidEntries, lnd: result.lnd, lndDetail: result.lndDetail,
-      firstDifference: result.firstDifference });
+      unbalancedEntries: result.unbalancedEntries, unbalancedEntryCount: result.unbalancedEntryCount,
+      unbalancedEntriesMore: more(result.unbalancedEntries.length, result.unbalancedEntryCount),
+      invalidEntries: result.invalidEntries, invalidEntryCount: result.invalidEntryCount,
+      invalidEntriesMore: more(result.invalidEntries.length, result.invalidEntryCount),
+      lnd: result.lnd, lndDetail: result.lndDetail, firstDifference: result.firstDifference });
   }
   if (!result.balanced) return EXIT.failed;
   return result.lnd === 'compared' ? EXIT.ok : EXIT.unresolved;
