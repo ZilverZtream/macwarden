@@ -125,6 +125,10 @@ async function runSteps(args: string[], deps: Deps): Promise<ReconcileOutput> {
   const untilFlag = untilArg === undefined ? null : timeArgument(untilArg, now);
   if (sinceArg !== undefined && sinceFlag === null) return fail(2, 'Q1', '--since must be a UTC time (YYYY-MM-DDThh:mm:ssZ) or <n>(m|h|d) before now');
   if (untilArg !== undefined && untilFlag === null) return fail(2, 'Q1', '--until must be a UTC time (YYYY-MM-DDThh:mm:ssZ) or <n>(m|h|d) before now');
+  // The journal holds no time before the Unix epoch, and a window reaching before the year 0
+  // cannot be written as an instant the output schema accepts (PF-2).
+  if (sinceFlag !== null && sinceFlag < 0) return fail(2, 'Q1', '--since must not be before 1970-01-01T00:00:00Z');
+  if (untilFlag !== null && untilFlag < 0) return fail(2, 'Q1', '--until must not be before 1970-01-01T00:00:00Z');
   if (sinceFlag !== null && untilFlag !== null && sinceFlag > untilFlag) return fail(2, 'Q1', '--since must not be after --until');
   const { host, cert: certPath, own: ownPath, problem: mixedSource } = connectionSettings(flag => flags.get(flag), deps.env);
   if (mixedSource) return fail(2, 'Q1', mixedSource);

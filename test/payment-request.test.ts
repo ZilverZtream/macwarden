@@ -155,6 +155,33 @@ it('PAYJ/bolt11 a checksum, character, case or padding error, or a missing p fie
   expect((decodeBolt11(twice) as { paymentHash: string }).paymentHash).toBe(paymentHash.toString('hex'));
 });
 
+it('PAYJ/bolt11 non-ASCII characters are invalid before case folding: Kelvin sign, long s, dotted and dotless I, fullwidth (PF-1)', () => {
+  const paymentHash = hash('pf1');
+  const text = invoice({ hash: paymentHash, amount: '10u' });
+  const upper = text.toUpperCase();
+  expect(decodeBolt11(upper)).toEqual({ paymentHash: paymentHash.toString('hex'), amountMsat: 1_000_000n });
+  // Each replaces one data character with a look-alike that a Unicode case mapping folds onto, or
+  // leaves beside, an ASCII bech32 character.
+  const swaps: [string, string, string][] = [
+    [upper, 'K', 'K'], // KELVIN SIGN: toLowerCase gives 'k', toUpperCase leaves it
+    [text, 's', 'ſ'], // LATIN SMALL LETTER LONG S: toUpperCase gives 'S'
+    [text, 'l', 'ı'], // LATIN SMALL LETTER DOTLESS I: toUpperCase gives 'I'
+    [upper, 'L', 'İ'], // LATIN CAPITAL LETTER I WITH DOT ABOVE: toLowerCase gives 'i' + U+0307
+    [upper, 'Q', 'Ｑ'], // FULLWIDTH LATIN CAPITAL LETTER Q: toLowerCase gives U+FF51
+    [text, 'q', 'ｑ'],
+  ];
+  for (const [base, ascii, lookalike] of swaps) {
+    const at = base.indexOf(ascii, base.lastIndexOf(base === upper ? '1' : '1') + 1);
+    expect(at, `${ascii} in the data part`).toBeGreaterThan(0);
+    const swapped = `${base.slice(0, at)}${lookalike}${base.slice(at + 1)}`;
+    expect(decodeBolt11(swapped), `U+${lookalike.charCodeAt(0).toString(16)}`).toBeNull();
+    expect(paymentFacts(SEND, bytes(5, swapped), false)).toMatchObject({ paymentHash: null, extraction: 'invoice-invalid' });
+  }
+  // In the human-readable part too, and a non-ASCII character anywhere else.
+  expect(decodeBolt11(`K${upper.slice(1)}`)).toBeNull();
+  expect(decodeBolt11(`${text}é`)).toBeNull();
+});
+
 it('PAYJ/bolt11 bounds: above the character limit is too long, and decoding stays linear in the length', () => {
   const long = invoice({ before: Array.from({ length: 1_950 }, () => field(13, [1])) });
   expect(long.length).toBeLessThanOrEqual(MAX_INVOICE_CHARS);

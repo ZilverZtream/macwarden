@@ -225,7 +225,7 @@ async function payer(command: string, args: string[]): Promise<number> {
 async function answerFromRecord(deps: PayerDeps, operationId: string, paymentRequest: string): Promise<number | undefined> {
   const operation = deps.store.operation(operationId);
   if (operation === undefined) return undefined;
-  let recorded = recordedPayment(deps, operationId, paymentRequest);
+  const recorded = recordedPayment(deps, operationId, paymentRequest);
   if (operation.state === 'completed') {
     const paid = deps.store.paymentForOperation(operationId);
     if (paid?.state !== 'succeeded') return undefined;
@@ -245,7 +245,6 @@ async function answerFromRecord(deps: PayerDeps, operationId: string, paymentReq
           + '; inspect the record with "payer show"' });
         return EXIT.refused;
       }
-      recorded = match;
       emit({ event: 'stored-invoice-damaged', operationId, paymentHashes: damaged.map(item => item.paymentHash),
         matchedBy: 'payment hash from DecodePayReq' });
     }

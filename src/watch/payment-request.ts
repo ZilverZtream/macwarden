@@ -295,23 +295,26 @@ function hrpAmount(value: string): bigint | 'invalid' {
 
 /**
  * The payment hash and amount of a BOLT11 payment request, 'too-long' above MAX_INVOICE_CHARS,
- * or null when it is not a well-formed invoice (bad characters, mixed case, bad checksum, no
+ * or null when it is not a well-formed invoice (a character outside printable US-ASCII, mixed case, bad checksum, no
  * 52-group `p` field, nonzero padding). The signature is not verified: LND does that and refuses
  * the payment otherwise; the hash is what LND would pay. The first `p` field of the right
  * length is used, as LND's zpay32 uses it.
  */
 export function decodeBolt11(input: string): { paymentHash: string; amountMsat: bigint | null } | 'too-long' | null {
   if (input.length > MAX_INVOICE_CHARS) return 'too-long';
+  // Printable US-ASCII only, checked before any case folding (PF-1): Unicode case mappings turn
+  // the Kelvin sign U+212A into 'k', U+0130 into 'i' plus a combining dot, and leave U+017F,
+  // U+0131 and fullwidth letters unchanged by one of the two foldings, so a non-ASCII character
+  // could pass the one-case check or fold into a bech32 character. LND's decoder refuses them.
+  for (let index = 0; index < input.length; index++) {
+    const code = input.charCodeAt(index);
+    if (code < 33 || code > 126) return null;
+  }
   const lower = input.toLowerCase();
   if (lower !== input && input.toUpperCase() !== input) return null;
   const separator = lower.lastIndexOf('1');
   if (separator < 3) return null;
   const hrp = lower.slice(0, separator);
-  // Printable US-ASCII only in the human-readable part (BIP-173).
-  for (let index = 0; index < hrp.length; index++) {
-    const code = hrp.charCodeAt(index);
-    if (code < 33 || code > 126) return null;
-  }
   const dataLength = lower.length - separator - 1;
   if (dataLength < TIMESTAMP_GROUPS + SIGNATURE_GROUPS + CHECKSUM_GROUPS) return null;
   const data = new Uint8Array(dataLength);
