@@ -336,7 +336,8 @@ it('RECONCILE/bounds the listing is paged and capped, and per-hash lookups are l
   expect(lookups).toMatchObject({ tracked: TRACK_LIMIT, trackLimited: 3 });
   expect(trackCalls.filter(call => call.startsWith('trackPayment')).length).toBe(TRACK_LIMIT);
   expect((looked.result as ReconcileResult).payments.filter(item => item.settlement.status === 'unknown').length).toBe(3);
-});
+  // Pages LIST_LIMIT payments through the fake: 17 s on a 2-core Windows runner.
+}, 90_000);
 
 it('RECONCILE/budget a listing the 10 minute budget ends is reported as the budget, not the count limit (audit 1.2.1 N2)', async () => {
   // The budget runs out while the third page is read: the listing stops there, far below LIST_LIMIT.

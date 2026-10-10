@@ -3,6 +3,7 @@ import * as fs from 'node:fs/promises';
 import { constants, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
+import { writeOwnerOnly } from './helpers/owner-only-fixture.js';
 import { run as reconcileRun } from '../src/commands/reconcile.js';
 import { addFirstPartyCaveat } from '../src/decode/index.js';
 import snapshot from '../src/grade/lnd-permissions.json' with { type: 'json' };
@@ -126,7 +127,7 @@ it('PAYJ/durability a write cut short by a crash is ignored, and the next run re
   const payment = record('payment', 2, { requestId: '1', method: SEND, credential: identityOf(vector('preset-pay-only')), rootKeyId: '0',
     paymentHash: hash('before crash').toString('hex'), amountMsat: null, amountSource: null, feeLimitMsat: '0', amp: false, extraction: 'complete' });
   const partial = '{"v":1,"type":"payment","time":"2026-10-09T10:5';
-  writeFileSync(path, `${[start(0), record('registered', 1, { session: 1 }), payment].join('\n')}\n${partial}`, { mode: 0o600 });
+  await writeOwnerOnly(path, `${[start(0), record('registered', 1, { session: 1 }), payment].join('\n')}\n${partial}`);
   const torn = await readJournal(path);
   expect(torn.tornTail).toBe(true);
   expect(torn.records.map(item => item.type)).toEqual(['run-start', 'registered', 'payment']);
@@ -147,7 +148,7 @@ it('PAYJ/durability a write cut short by a crash is ignored, and the next run re
 it('PAYJ/durability a crash after a complete record but before its newline is repaired too', async () => {
   const dir = scratch();
   const path = join(dir, 'newline.journal');
-  writeFileSync(path, `${start(0)}\n${record('registered', 1, { session: 1 })}`, { mode: 0o600 });
+  await writeOwnerOnly(path, `${start(0)}\n${record('registered', 1, { session: 1 })}`);
   expect((await readJournal(path)).tornTail).toBe(true);
   const journal = await openJournal(path);
   await journal.close();
@@ -209,7 +210,7 @@ it('PAYJ/reader the path rules of the other sidecars: protected names, non-files
   await expect(readJournal(join(dir, 'missing.journal'))).rejects.toThrow('payment journal not found');
   await expect(readJournal(dir)).rejects.toThrow('payment journal is not a regular file');
   const large = join(dir, 'large.journal');
-  writeFileSync(large, `${start(0)}\n`, { mode: 0o600 });
+  await writeOwnerOnly(large, `${start(0)}\n`);
   truncateSync(large, JOURNAL_LIMIT_BYTES + 1);
   await expect(readJournal(large)).rejects.toThrow('payment journal too large');
 });
@@ -318,7 +319,7 @@ it('PAYJ/size the journal never grows past its limit: a full record ends coverag
   const head = `${start(0)}\n`;
   const room = JOURNAL_START_ROOM_BYTES + 2_000;
   const filler = JOURNAL_LIMIT_BYTES - JOURNAL_RESERVE_BYTES - room - Buffer.byteLength(head) - 1;
-  writeFileSync(path, Buffer.concat([Buffer.from(head), Buffer.alloc(filler, 0x78), Buffer.from('\n')]), { mode: 0o600 });
+  await writeOwnerOnly(path, Buffer.concat([Buffer.from(head), Buffer.alloc(filler, 0x78), Buffer.from('\n')]));
   const stops: string[] = [];
   const journal = await openJournal(path, { onStop: reason => stops.push(reason) });
   journal.registered();
@@ -348,7 +349,7 @@ it('PAYJ/open refusals: protected names, directories, other files, a second writ
   await expect(openJournal(join(dir, 'my-password.journal'))).rejects.toThrow(JournalError);
   await expect(openJournal(dir)).rejects.toThrow('payment journal is not a regular file');
   const other = join(dir, 'notes.txt');
-  writeFileSync(other, 'my notes\n', { mode: 0o600 });
+  await writeOwnerOnly(other, 'my notes\n');
   await expect(openJournal(other)).rejects.toThrow('not a macwarden payment journal');
   expect(readFileSync(other, 'utf8')).toBe('my notes\n');
   const path = join(dir, 'locked.journal');
@@ -407,7 +408,7 @@ it('PAYJ/create a new journal is created exclusively and owner-only, and a file 
     const flags = args[1];
     if (String(args[0]) === target && typeof flags === 'number' && (flags & constants.O_APPEND)) {
       await fs.rename(target, `${target}.moved`);
-      writeFileSync(target, NOTES, { mode: 0o600 });
+      await writeOwnerOnly(target, NOTES);
     }
     return fs.open(...args);
   } }) as typeof fs;
@@ -669,9 +670,16 @@ it('PAYJ/budget a flood of 64 KiB payloads never blocks the event loop for long:
   const route = Buffer.concat([Buffer.from([0x30, 0x05]), ...Array.from({ length: 16 }, () => hop)]);
   const payload = message(bytes(1, hash('flood')), ...Array.from({ length: 1_750 }, () => bytes(2, route)));
   expect(payload.length).toBeLessThan(64 * 1024);
+  // The bound is the host's own idle jitter (a loaded 2-core CI runner pauses a 1 ms timer for
+  // hundreds of milliseconds on its own) times a small factor, never below 150 ms: what the test
+  // proves is that decoding adds no multi-second stall of its own, as it did before the budget.
   let worstGap = 0;
   let last = performance.now();
   const watchdog = setInterval(() => { const now = performance.now(); worstGap = Math.max(worstGap, now - last); last = now; }, 1);
+  await new Promise(resolve => setTimeout(resolve, 300));
+  const idleGap = worstGap;
+  worstGap = 0;
+  last = performance.now();
   const began = performance.now();
   try {
     for (let round = 0; round < 6; round++) {
@@ -681,10 +689,12 @@ it('PAYJ/budget a flood of 64 KiB payloads never blocks the event loop for long:
   } finally { clearInterval(watchdog); }
   const stats = await journal.close();
   const elapsed = performance.now() - began;
-  console.log(`PAYJ/budget worst loop gap ${worstGap.toFixed(0)} ms over ${elapsed.toFixed(0)} ms; journaled ${stats.payments}, dropped ${stats.dropped}`);
+  console.log(`PAYJ/budget worst loop gap ${worstGap.toFixed(0)} ms (idle ${idleGap.toFixed(0)} ms) over ${elapsed.toFixed(0)} ms; ` +
+    `journaled ${stats.payments}, dropped ${stats.dropped}`);
   expect(stats.payments + stats.dropped).toBe(2_400);
   expect(stats.dropped).toBeGreaterThan(0);
-  expect(worstGap).toBeLessThan(150);
+  expect(worstGap).toBeLessThan(Math.max(150, 4 * idleGap));
+  expect(worstGap).toBeLessThan(1_000);
   const read = await readJournal(path);
   expect(read.records.filter(item => item.type === 'drop').length).toBeGreaterThan(0);
 }, 60_000);
@@ -718,7 +728,7 @@ it('PAYJ/full-drop payments discarded when the journal fills leave a drop record
   const path = join(dir, 'full-drop.journal');
   const head = `${start(0)}\n`;
   const filler = JOURNAL_LIMIT_BYTES - JOURNAL_RESERVE_BYTES - (JOURNAL_START_ROOM_BYTES + 2_000) - Buffer.byteLength(head) - 1;
-  writeFileSync(path, Buffer.concat([Buffer.from(head), Buffer.alloc(filler, 0x78), Buffer.from('\n')]), { mode: 0o600 });
+  await writeOwnerOnly(path, Buffer.concat([Buffer.from(head), Buffer.alloc(filler, 0x78), Buffer.from('\n')]));
   let now = Date.parse(at(0));
   const stops: string[] = [];
   const journal = await openJournal(path, { clock: () => new Date(now), onStop: reason => stops.push(reason) });
@@ -789,7 +799,7 @@ async function intakeDropAtLimit(drop: (seconds: number) => MiddlewareCall) {
   const opened = Buffer.byteLength(`${JSON.stringify({ v: 1, type: 'run-start', time: at(0), run, node: NODE, version: '1.2.0-test', repairedTail: true })}\n`)
     + Buffer.byteLength(`${JSON.stringify({ v: 1, type: 'registered', time: at(1), run, session: 1 })}\n`);
   const filler = JOURNAL_LIMIT_BYTES - JOURNAL_RESERVE_BYTES - JOURNAL_INTAKE_ITEMS * line - opened - Buffer.byteLength(head) - 1;
-  writeFileSync(path, Buffer.concat([Buffer.from(head), Buffer.alloc(filler, 0x78), Buffer.from('\n')]), { mode: 0o600 });
+  await writeOwnerOnly(path, Buffer.concat([Buffer.from(head), Buffer.alloc(filler, 0x78), Buffer.from('\n')]));
   let now = Date.parse(at(0));
   const stops: string[] = [];
   const journal = await openJournal(path, { clock: () => new Date(now), onStop: reason => stops.push(reason) });

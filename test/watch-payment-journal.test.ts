@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { hostname } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
+import { writeOwnerOnly } from './helpers/owner-only-fixture.js';
 import { withCancellation } from '../src/cancellation.js';
 import { run, type Register } from '../src/commands/watch.js';
 import type { MiddlewareCall, MiddlewareEnd } from '../src/lnd/index.js';
@@ -150,7 +151,7 @@ it('WATCH/payment-journal without the flag no payload is selected or read', asyn
 
 it('WATCH/payment-journal a journal that cannot be opened stops watch at W6, before anything registers', async () => {
   const s = setup();
-  writeFileSync(s.journal, 'someone else\'s file\n', { mode: 0o600 });
+  await writeOwnerOnly(s.journal, 'someone else\'s file\n');
   let registered = false;
   const register = (() => { registered = true; throw new Error('must not register'); }) as unknown as Register;
   const { result } = await watchWith([...s.args, '--payment-journal', s.journal], register, async () => undefined);
