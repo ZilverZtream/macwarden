@@ -1117,3 +1117,89 @@ describe('payment lab round 5', () => {
     expect(store.invoice(late)).toMatchObject({ state: 'not-created', lateLndState: 'OPEN' });
   });
 });
+
+/**
+ * Ledger verifier finding (H3c): LND reporting two different amounts for one settled invoice (a hostile
+ * or buggy node) must never post two settlements for one payment hash. invoice-settled and
+ * underpaid-settlement are different journal events, so their (event, reference) keys did not stop
+ * both being posted; the first settlement recorded for a hash now wins and a differing one is a
+ * settlement-amount-conflict delivery that changes nothing else.
+ */
+describe('payment lab one settlement per payment hash', () => {
+  function created(store: ReceiverStore, label: string, orderId: string): string {
+    const { preimage, paymentHash } = preimageFor(label);
+    expect(store.recordInvoiceIntent({ orderId, amountMsat: 1000n, kind: 'standard', preimage, paymentHash }).outcome).toBe('recorded');
+    store.markCreated(paymentHash, `lnbcrt-${label}`, 1n);
+    return paymentHash;
+  }
+
+  function snapshot(store: ReceiverStore): string {
+    const tables = ['journal_entries', 'journal_lines', 'balances', 'fulfillments', 'orders', 'invoices', 'outbox'];
+    return JSON.stringify(tables.map(table => store.db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()),
+      (_key, value: unknown) => typeof value === 'bigint' ? value.toString() : value);
+  }
+
+  function outcomes(store: ReceiverStore, paymentHash: string): string[] {
+    return store.db.prepare('SELECT outcome FROM deliveries WHERE payment_hash = ? ORDER BY delivery_id').all(paymentHash)
+      .map(row => String(row.outcome));
+  }
+
+  function walletIncoming(store: ReceiverStore): string | undefined {
+    const [row] = store.db.prepare(`SELECT balance_msat FROM balances WHERE account = 'lnd-wallet-incoming'`).all();
+    return row === undefined ? undefined : String(row.balance_msat);
+  }
+
+  async function balancedAgainst(store: ReceiverStore, paid: Invoice[]): Promise<void> {
+    expect((await lab.verifyLedger(store)).balanced).toBe(true);
+    const lnd = await lab.verifyLedger(store, { listInvoicesPage: () => Promise.resolve({ invoices: paid, lastIndexOffset: BigInt(paid.length) }) });
+    expect(lnd.lnd).toBe('compared');
+    expect(lnd.balanced).toBe(true);
+  }
+
+  it('H3c: full then underpaid for one hash: the second posts nothing, is a settlement-amount-conflict, the order stays fulfilled', async () => {
+    const store = receiverStore('h3c-full-under.db');
+    const hash = created(store, 'h3c-full-under', 'O-full-under');
+    expect(store.applyInvoice(invoice(hash, 'SETTLED', 1000n, 1n), 'subscription')).toBe('fulfilled');
+    const before = snapshot(store);
+    for (const source of ['lookup', 'subscription']) {
+      expect(store.applyInvoice(invoice(hash, 'SETTLED', 999n, 1n), source)).toBe('settlement-amount-conflict');
+    }
+    expect(snapshot(store)).toBe(before);
+    expect(store.journal('O-full-under').map(entry => entry.event)).toEqual(['invoice-settled']);
+    expect(walletIncoming(store)).toBe('1000');
+    expect(store.order('O-full-under')?.state).toBe('fulfilled');
+    expect(store.invoice(hash)?.amtPaidMsat).toBe(1000n);
+    expect(outcomes(store, hash)).toEqual(['fulfilled', 'settlement-amount-conflict', 'settlement-amount-conflict']);
+    await balancedAgainst(store, [invoice(hash, 'SETTLED', 1000n, 1n)]);
+  });
+
+  it('H3c: underpaid then full for one hash: the second posts nothing and does not fulfill the order', async () => {
+    const store = receiverStore('h3c-under-full.db');
+    const hash = created(store, 'h3c-under-full', 'O-under-full');
+    expect(store.applyInvoice(invoice(hash, 'SETTLED', 999n, 1n), 'subscription')).toBe('underpaid');
+    const before = snapshot(store);
+    expect(store.applyInvoice(invoice(hash, 'SETTLED', 1000n, 1n), 'lookup')).toBe('settlement-amount-conflict');
+    expect(store.applyInvoice(invoice(hash, 'SETTLED', 1001n, 1n), 'subscription')).toBe('settlement-amount-conflict');
+    expect(snapshot(store)).toBe(before);
+    expect(store.journal('O-under-full').map(entry => entry.event)).toEqual(['underpaid-settlement']);
+    expect(walletIncoming(store)).toBe('999');
+    expect(store.order('O-under-full')?.state).toBe('awaiting-payment');
+    expect(store.fulfillmentCount('O-under-full')).toBe(0);
+    expect(store.outbox('O-under-full')).toEqual([]);
+    await balancedAgainst(store, [invoice(hash, 'SETTLED', 999n, 1n)]);
+  });
+
+  it('H3c: a replay with the recorded amount is unchanged (duplicate after fulfilled, underpaid after underpaid)', async () => {
+    const store = receiverStore('h3c-replay.db');
+    const full = created(store, 'h3c-replay-full', 'O-replay-full');
+    const under = created(store, 'h3c-replay-under', 'O-replay-under');
+    expect(store.applyInvoice(invoice(full, 'SETTLED', 1000n, 1n), 'subscription')).toBe('fulfilled');
+    expect(store.applyInvoice(invoice(under, 'SETTLED', 999n, 2n), 'subscription')).toBe('underpaid');
+    const before = snapshot(store);
+    expect(store.applyInvoice(invoice(full, 'SETTLED', 1000n, 1n), 'lookup')).toBe('duplicate');
+    expect(store.applyInvoice(invoice(under, 'SETTLED', 999n, 2n), 'lookup')).toBe('underpaid');
+    expect(snapshot(store)).toBe(before);
+    expect(walletIncoming(store)).toBe('1999');
+    await balancedAgainst(store, [invoice(full, 'SETTLED', 1000n, 1n), invoice(under, 'SETTLED', 999n, 2n)]);
+  });
+});

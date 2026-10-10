@@ -122,9 +122,12 @@ export interface OrderRecord {
  * (the order has another live invoice, or no longer awaits payment); it is to be canceled in LND.
  * `second-payment`: an invoice of an order already fulfilled by another invoice was paid; the
  * money is posted, the order is not fulfilled again, and the payment is to be returned.
+ * `settlement-amount-conflict`: LND reported the invoice settled again for an amount other than
+ * the settlement already posted for its payment hash (a hostile or buggy node); the first
+ * settlement recorded wins, and nothing but this delivery is recorded.
  */
 export type DeliveryOutcome = 'fulfilled' | 'duplicate' | 'state-updated' | 'unchanged' | 'unknown-invoice' | 'underpaid'
-  | 'late-invoice' | 'second-payment';
+  | 'late-invoice' | 'second-payment' | 'settlement-amount-conflict';
 
 function invoiceFrom(row: Row): InvoiceRecord {
   return {
@@ -346,6 +349,15 @@ export class ReceiverStore {
       .run(nowIso(), paymentHash, createdBefore ?? null, createdBefore ?? null)) === 1);
   }
 
+  /** The amount of the settlement posted for this payment hash (invoice-settled or underpaid-settlement), if any. */
+  #settledMsat(paymentHash: string): bigint | undefined {
+    const row = this.db.prepare(`SELECT journal_lines.amount_msat FROM journal_entries
+      JOIN journal_lines ON journal_lines.entry_id = journal_entries.entry_id AND journal_lines.line_no = 1
+      WHERE journal_entries.reference = ? AND journal_entries.event IN ('invoice-settled', 'underpaid-settlement')
+      ORDER BY journal_entries.entry_id LIMIT 1`).get(paymentHash);
+    return row === undefined ? undefined : int(row, 'amount_msat');
+  }
+
   /** Whether a not-created record may not become its order's live invoice: another one is live, or the order is decided. */
   #mayNotAdopt(record: InvoiceRecord): boolean {
     return this.db.prepare(`SELECT 1 AS n FROM invoices WHERE order_id = ? AND payment_hash <> ?
@@ -381,6 +393,14 @@ export class ReceiverStore {
     if (record === undefined) return 'unknown-invoice';
     const next = LND_TO_RECORD[invoice.state];
     if (next === undefined) return 'unchanged';
+    // One settlement per payment hash, whichever event posted it: invoice-settled and
+    // underpaid-settlement have different (event, reference) keys, so posting idempotency alone
+    // would let LND reporting a second, different amount post both (and fulfill an underpaid order).
+    // The first settlement recorded wins; a differing one changes no record, order or ledger.
+    if (next === 'settled') {
+      const settledMsat = this.#settledMsat(invoice.paymentHash);
+      if (settledMsat !== undefined && settledMsat !== invoice.amtPaidMsat) return 'settlement-amount-conflict';
+    }
     let outcome: DeliveryOutcome = 'unchanged';
     // A record marked not-created that LND reports after all moves to LND's state (it is adopted),
     // unless the order has another live invoice by now or no longer awaits payment: the move would
