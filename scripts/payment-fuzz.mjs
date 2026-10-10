@@ -468,7 +468,7 @@ function expectDeletion(method, spec) {
     return { paymentHash, scope: spec.failedHtlcs ? 'failed-htlcs' : 'payment', extraction: spec.hash && !paymentHash ? 'malformed' : 'complete' };
   }
   // failed_htlcs_only is its own scope, alone too (1.2.1, audit F09: LND v0.21.4 accepts it alone).
-  const scope = spec[2] ? 'failed-htlcs' : spec[3] ? 'all-payments' : spec[1] ? 'failed-payments' : 'none';
+  const scope = spec[3] ? (spec[1] || spec[2] ? 'none' : 'all-payments') : spec[2] ? 'failed-htlcs' : spec[1] ? 'failed-payments' : 'none';
   return { paymentHash: null, scope, extraction: 'complete' };
 }
 

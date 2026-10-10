@@ -251,7 +251,7 @@ function startHelper(path: string, systemRoot: string, mode: 'create' | 'verify'
   try {
     child = execFile(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
       Buffer.from(helperScript, 'utf16le').toString('base64')], {
-      shell: false, windowsHide: true, timeout: 20_000, maxBuffer: 64 * 1024, encoding: 'utf8',
+      shell: false, windowsHide: true, timeout: 20_000, maxBuffer: 4 * 1024 * 1024, encoding: 'utf8',
       env: { SystemRoot: systemRoot, WINDIR: systemRoot, PATH: win32.join(systemRoot, 'System32'),
         PSModulePath: win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules'),
         MACWARDEN_PRIVATE_OUT: path, MACWARDEN_PRIVATE_MODE: mode },
