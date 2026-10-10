@@ -17,8 +17,20 @@ export function formatMsat(msat: bigint): string {
   return `${negative ? '-' : ''}${whole}${fraction} sat`;
 }
 
-/** Parses a non-negative integer given on the command line. */
+/** The largest value SQLite stores in an INTEGER column (a signed 64-bit integer): 2^63 - 1. */
+export const MAX_INT64 = 2n ** 63n - 1n;
+
+/** Parses a non-negative integer given on the command line, at most MAX_INT64 (anything larger can not be stored). */
 export function parseAmount(text: string, what: string): bigint {
   if (!/^(0|[1-9][0-9]{0,18})$/.test(text)) throw new Error(`${what} must be a non-negative integer`);
-  return BigInt(text);
+  const value = BigInt(text);
+  if (value > MAX_INT64) throw new Error(`${what} must be at most ${MAX_INT64}`);
+  return value;
+}
+
+/** `value` limited to the signed 64-bit range, for a figure that is stored but may exceed it (a sum of stored amounts). */
+export function saturateInt64(value: bigint): bigint {
+  if (value > MAX_INT64) return MAX_INT64;
+  if (value < -MAX_INT64 - 1n) return -MAX_INT64 - 1n;
+  return value;
 }

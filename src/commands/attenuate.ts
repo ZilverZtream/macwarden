@@ -13,6 +13,8 @@ import { isProtectedPath, outputNameProblem, resolveUnprotectedPath } from '../p
 import type { Secret } from '../secret.js';
 import { reserveOut, type ReservedOut } from './bake/write-out.js';
 import { reserveFailure } from './bake/out-errors.js';
+import { interruptibleChecks, interruptibleReserve, OUT_CREATION_INTERRUPTED, rethrowCancelled } from './bake/out-interrupt.js';
+import { namesRegistryFile, registryPath, REGISTRY_OUT_REFUSAL } from './bake/out-registry.js';
 
 export type Deps = {
   stdin: Readable & { isTTY?: boolean };
@@ -116,15 +118,19 @@ async function runSteps(args: string[], deps: Deps, state: CleanupState): Promis
     conditions.push(`iprange ${value}`);
   }
 
-  // A3: the output must be a new, unprotected path.
+  // A3: the output must be a new, unprotected path that is not the (default) registry or one of
+  // its files, as in bake B4. Each check is abandoned on an interrupt: exit 6, step cancelled.
   if (isProtectedPath(request.out)) return fail(3, 'A3', 'protected output path');
   const outName = outputNameProblem(request.out);
   if (outName) return fail(3, 'A3', `output path refused: ${outName}`);
+  const checks = interruptibleChecks(deps.fs);
   let outPath: string;
-  try { outPath = await resolveUnprotectedPath(request.out, deps.fs); }
-  catch { return fail(3, 'A3', 'cannot check output path'); }
-  try { await deps.fs.lstat(request.out); return fail(3, 'A3', 'output file already exists'); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return fail(3, 'A3', 'cannot check output path'); }
+  try { outPath = await resolveUnprotectedPath(request.out, checks); }
+  catch (error) { rethrowCancelled(error); return fail(3, 'A3', 'cannot check output path'); }
+  const registryFile = await registryPath(undefined, checks, deps.env);
+  if (registryFile !== null && namesRegistryFile(outPath, registryFile)) return fail(3, 'A3', REGISTRY_OUT_REFUSAL);
+  try { await checks.lstat(request.out); return fail(3, 'A3', 'output file already exists'); }
+  catch (error) { rethrowCancelled(error); if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return fail(3, 'A3', 'cannot check output path'); }
 
   // A4: read and fully decode the input; nothing is attenuated otherwise.
   const warnings: AttenuateOutput['warnings'] = [];
@@ -175,10 +181,13 @@ async function runSteps(args: string[], deps: Deps, state: CleanupState): Promis
   let reservation: ReservedOut | undefined;
   try {
     try {
-      const reserved = await reserveOut(outPath, deps.fs);
+      const reserved = await interruptibleReserve(() => reserveOut(outPath, deps.fs));
       reservation = reserved.reservation;
       if (reserved.aclWarning) warnings.push('acl-best-effort');
-    } catch (error) { return fail(3, 'A6', reserveFailure(error, 'cannot create output file'), warnings); }
+    } catch (error) {
+      if (error instanceof Cancelled) return fail(6, 'cancelled', OUT_CREATION_INTERRUPTED, warnings);
+      return fail(3, 'A6', reserveFailure(error, 'cannot create output file'), warnings);
+    }
     checkCancellation();
     try { await reservation.write(child); }
     catch { return fail(3, 'A6', 'cannot write, flush or close the output file', warnings); }

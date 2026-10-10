@@ -239,10 +239,15 @@ async function runSteps(args: string[], deps: Deps): Promise<RecommendOutput> {
     const label = entry?.label ? narrowLabel(entry.label) : 'narrowed';
     const connection = `--lnd-rest ${quote(host)} --tls-cert ${quote(recoveryPath(certPath))} --macaroon ${quote(recoveryPath(ownPath))}` +
       (registryPath ? ` --registry ${quote(recoveryPath(registryPath))}` : '');
-    commands.push(`macwarden bake --label ${label} --uri ${methods.join(',')} --out <file> ${connection}`);
+    // The method list is quoted like the paths: unquoted, PowerShell (a function or npm's .ps1 shim)
+    // splits a,b into an array. <file> is a placeholder the operator replaces with the new path.
+    commands.push(`macwarden bake --label ${label} --uri ${quote(methods.join(','))} --out <file> ${connection}`);
     // Revoking deletes the whole root key ID: only suggested when the selection covered every
     // credential observed on it (a label or root key ID), never from one credential's usage.
-    if (entry?.label && select.credential === undefined) commands.push(`after switching the app to the new file: macwarden revoke ${entry.label} ${connection}`);
+    // Each entry is a command that runs as printed; the precondition is a trailing comment,
+    // which POSIX sh and PowerShell both ignore.
+    if (entry?.label && select.credential === undefined)
+      commands.push(`macwarden revoke ${entry.label} ${connection}  # after switching the app to the new file`);
   }
   const result: RecommendResult = { node: pubkey, selector: label, label: entry?.label ?? null,
     rootKeyId: entry?.rootKeyId ?? (byId ? selector : identity), credentials: sortUnique(records.map(record => record.credential)),

@@ -1,9 +1,8 @@
 import { expect, it } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync } from 'node:fs';
-import { join } from 'node:path';
 import { fixtureTopology } from '../fixture/topology.mjs';
 import { createFixture } from '../fixture/fixture.mjs';
+import { createPrivateDirectory } from '../../scripts/private-scratch.mjs';
 import { childEnvironment } from '../helpers/environment.js';
 
 it('CP-050/B3 fixed isolated fixture owners use distinct projects and loopback ports', () => {
@@ -19,7 +18,7 @@ it.each([
   { network: 'mainnet', version: '0.21.4-beta' },
   { network: 'regtest', version: '0.20.0-beta' },
 ])('CP-050/B3 shard controller refuses wrong pinned state %j before credential copies', async info => {
-  const root = mkdtempSync(join(process.env.MACWARDEN_TEST_TMP!, 'cp050-invalid-'));
+  const root = await createPrivateDirectory(process.env.MACWARDEN_TEST_TMP!, 'cp050-invalid-');
   const calls: string[] = [];
   const fixture = createFixture({ env: { MACWARDEN_FIXTURE_SHARD: '1' }, tempBase: root,
     docker: args => { calls.push(args[0]!); return { status: 0, stdout: Buffer.alloc(0) }; },
@@ -39,7 +38,7 @@ it.each([
   expect(calls.filter(call => call === 'down')).toHaveLength(2);
 });
 it.each(['up', 'down'])('CP-050/B3 unavailable shard %s is INVALID and still tears down its owner', async failure => {
-  const root = mkdtempSync(join(process.env.MACWARDEN_TEST_TMP!, 'cp050-unavailable-'));
+  const root = await createPrivateDirectory(process.env.MACWARDEN_TEST_TMP!, 'cp050-unavailable-');
   const calls: string[] = [];
   const fixture = createFixture({ env: { MACWARDEN_FIXTURE_SHARD: '1' }, tempBase: root,
     docker: args => { calls.push(args[0]!); return { status: args[0] === failure ? 1 : 0, stdout: '' }; } });

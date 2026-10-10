@@ -4,10 +4,10 @@ import { resolve } from 'node:path';
 import { expect, it } from 'vitest';
 import { childEnvironment } from '../helpers/environment.js';
 
-it('CP-040/A10-release package and lock identify the current release, 1.2.0', () => {
+it('CP-040/A10-release package and lock identify the current release, 1.2.1', () => {
   const pkg = JSON.parse(readFileSync(resolve('package.json'), 'utf8')) as {version:string};
   const lock = JSON.parse(readFileSync(resolve('package-lock.json'), 'utf8')) as {version:string;packages:{'':{version:string}}};
-  expect([pkg.version, lock.version, lock.packages[''].version]).toEqual(Array(3).fill('1.2.0'));
+  expect([pkg.version, lock.version, lock.packages[''].version]).toEqual(Array(3).fill('1.2.1'));
 });
 it('CP-040/B9-scratch-ignore legacy scratch directories are ignored by Git', () => {
   const run = spawnSync('git', ['check-ignore', '--no-index', 'test/.tmp/probe', 'test/.sentinels/probe'],
@@ -32,5 +32,5 @@ it('CP-040/A10-release the 1.0.0 release is recorded and the real-node field che
   const check = readFileSync(resolve('docs/field-check.md'), 'utf8');
   for (const step of ['inventory --verify', 'bake --label field-check', 'rotate field-check --finish', 'revoke field-check', 'Surprises'])
     expect(check).toContain(step);
-  expect(readme).toContain('macwarden@1.2.0');
+  expect(readme).toContain('macwarden@1.2.1');
 });

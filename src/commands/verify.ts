@@ -44,6 +44,7 @@ export const ROOT_KEY_0_ACCEPTED = [
 export const CAN_BAKE_ACCEPTED = 'This credential can bake macaroons (macaroon:generate or uri:/lnrpc.Lightning/BakeMacaroon), or macwarden could not assess all of its permissions. If it leaked, its holder may have created credentials on other root key IDs, and revoking this one does not remove them. Replace and revoke every registered credential with macwarden respond, list unknown root key IDs with macwarden inventory, and if this credential may have been used, regenerate all root keys (see docs/incident-playbook.md).';
 export const CAN_BAKE_ROOT_KEY_0 = 'It can also bake macaroons (macaroon:generate or uri:/lnrpc.Lightning/BakeMacaroon), or may (not all of its permissions could be assessed): its holder may have created credentials on other root key IDs. The regeneration invalidates those too; afterwards, revoke any root key ID macwarden inventory still shows as unknown that no app of yours uses.';
 export const OWN_ROOT_KEY_ACCEPTED = "This credential shares the root key ID of the credential macwarden is running with, and macwarden revoke refuses its own root key ID. Revoke it with another own credential, or delete that root key ID with lncli deletemacaroonid after switching macwarden to a new session macaroon.";
+export const ROOT_KEY_MISSING_CONTRADICTED = 'The rejection message says the root key ID no longer exists, but ListMacaroonIDs still lists it. The two answers contradict each other, so neither is a verdict: the message text may come from a caveat someone wrote into this copy. Treat the credential as live until its root key ID is revoked.';
 export const REJECTED_INCONCLUSIVE = 'LND rejected this check, but did not report that the root key ID is gone or that the credential expired. A caveat that depends on the caller (an IP lock, or a custom caveat such as a canary\'s) can make LND accept it from another address or while a middleware runs. Treat it as live until its root key ID is revoked.';
 export const LOCAL_EXPIRY_UNCONFIRMED = "By this machine's clock a time-before caveat has passed, but LND did not report the expiry: the clocks may differ, or LND refused an earlier caveat first. A local clock is no proof that the credential is dead.";
 export const SIGNATURE_MISMATCH_INCONCLUSIVE = 'LND reports a signature mismatch, but the root key ID is still listed (or could not be listed). This copy is not the credential LND issued: either the root keys were regenerated, or this copy was altered (a flipped byte, a mangled paste, a decoy) and the original it came from may still be accepted. Treat the original as live until its root key ID is revoked.';
@@ -118,7 +119,7 @@ function registryMatch(entries: RegistryEntry[], pubkey: string, facts: Macaroon
   return related ? { label: related.label, status: related.status, match: 'root-key-id' } : null;
 }
 
-function guidance(result: Omit<VerifyResult, 'guidance'>, localExpiry: boolean): string[] {
+function guidance(result: Omit<VerifyResult, 'guidance'>, localExpiry: boolean, contradicted = false): string[] {
   const id = result.rootKeyId;
   if (result.status === 'accepted') {
     const lines = ['LND accepts this credential now: whoever holds a copy can use it against this node.'];
@@ -137,6 +138,7 @@ function guidance(result: Omit<VerifyResult, 'guidance'>, localExpiry: boolean):
   }
   if (!result.conclusive) {
     const lines = [result.rejection === 'signature-mismatch' ? SIGNATURE_MISMATCH_INCONCLUSIVE : REJECTED_INCONCLUSIVE];
+    if (contradicted) lines.push(ROOT_KEY_MISSING_CONTRADICTED);
     if (result.rejection === 'signature-mismatch') lines.push(SIGNATURE_MISMATCH_HOW_TO_CONCLUDE);
     if (result.rejection === 'signature-mismatch' && id === '0') lines.push(SIGNATURE_MISMATCH_ROOT_KEY_0);
     if (result.caveats.some(caveat => caveat.type === 'lnd-custom')) lines.push(CUSTOM_CAVEAT_REJECTED);
@@ -239,8 +241,13 @@ async function runSteps(args: string[], deps: Deps, warnings: OutputWarning[]): 
   // caveat that depends on the caller (IP lock, custom caveat) may be what LND refused.
   const nodeExpired = !checked.valid && checked.reason === 'expired'
     && facts.caveats.some(caveat => caveat.type === 'time-before' && caveat.value === checked.caveat);
-  const rejection: VerifyResult['rejection'] = checked.valid ? null
+  const reported: VerifyResult['rejection'] = checked.valid ? null
     : checked.reason === 'expired' ? (nodeExpired ? 'expired' : 'other') : checked.reason;
+  // LND's two answers must agree (1.2.1): a rejection saying the root key ID no longer exists
+  // while ListMacaroonIDs still lists it is no evidence of anything (the adapter blanks quoted
+  // caveat text, but no message text outranks the listing), so it counts as any other rejection.
+  const contradicted = reported === 'root-key-missing' && rootKeyListed === true;
+  const rejection: VerifyResult['rejection'] = contradicted ? 'other' : reported;
   // A rejection holds everywhere when the root key ID is gone or the credential expired; any other
   // rejection may depend on the caller (IP lock, custom caveat) or on the copy itself.
   // A signature mismatch is what LND answers both after a root key regeneration and for any
@@ -264,7 +271,7 @@ async function runSteps(args: string[], deps: Deps, warnings: OutputWarning[]): 
     canBake: canBake(facts.permissions, offline.grade, offline.warnings),
     registry,
   };
-  const result: VerifyResult = { ...partial, guidance: guidance(partial, localExpiry) };
+  const result: VerifyResult = { ...partial, guidance: guidance(partial, localExpiry, contradicted) };
   // Exit 1 is a finding, as with scan --fail-on: the credential is live, or may be.
   return { schema: 1, command: 'verify', ok: true, warnings, result, error: null,
     ...(result.status === 'accepted' || !result.conclusive ? { exitCode: 1 } : {}) };

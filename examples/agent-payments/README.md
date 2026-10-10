@@ -114,7 +114,7 @@ macwarden's own credential is baked with `lncli bakemacaroon --root_key_id 7001`
 
 [agent.mjs](agent.mjs) uses only Node.js built-ins and only its own macaroon, read from `AGENT_MACAROON`. It is written to be read and adapted:
 
-- **TLS** to LND is verified against LND's certificate (`AGENT_TLS_CERT`); there is no option to skip verification.
+- **TLS** to LND is verified against LND's certificate (`AGENT_TLS_CERT`), and the paid API's certificate is verified against the system trust store; both requests set `rejectUnauthorized` explicitly, so there is no option to skip verification, not even `NODE_TLS_REJECT_UNAUTHORIZED=0` in the environment (1.2.1).
 - **Invoice checks before paying.** It decodes the invoice with DecodePayReq and refuses one without an amount, one above `AGENT_MAX_PRICE_SAT` (default 500 sat) or one that has expired. The routing fee is capped with `AGENT_MAX_FEE_SAT` (default 10 sat). These are the agent's own rules: see [Limits](#limits).
 - **Payments are sent once.** SendPaymentV2 is never retried. If its stream ends without a final state (a timeout or a dropped connection), the agent asks TrackPaymentV2 for the payment's state by payment hash instead of paying again; LND also refuses a second payment of the same hash.
 - **Timeouts and bounded retries.** Every request has a deadline (15 s; the payment 45 s). Idempotent requests (the API request, DecodePayReq, TrackPaymentV2) are retried at most three times, with backoff, on transport errors and HTTP 502, 503 or 504 only. A refusal from LND is never retried.
@@ -129,7 +129,7 @@ macwarden's own credential is baked with `lncli bakemacaroon --root_key_id 7001`
 | `lightninglabs/aperture` | v0.5.0 | `sha256:29e03e2c38dca0314f748cc07f483f03615dbf9876620c8e15b94b904fa16114` |
 | `node` (paid API) | 22.23.2-alpine3.24 | `sha256:b6f26b36c8ff49624cfdac716b8ea1138d606df02586a77d364bb5536a634f85` |
 
-Aperture reads only bob's TLS certificate and `invoice.macaroon` (it loads that file by name from `macdir`), from bob's data volume mounted read-only.
+Aperture uses only bob's TLS certificate and `invoice.macaroon` (it loads that file by name from `macdir`). The demo mounts bob's whole data volume read-only, which also holds `admin.macaroon`, `wallet.db` and `tls.key`: in production mount only those two files.
 
 ## Expected output
 

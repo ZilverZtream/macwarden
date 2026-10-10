@@ -19,13 +19,14 @@ jobs:
   scan:
     runs-on: ubuntu-latest
     steps:
+      # The action tags here are illustrative: pin each action to a commit SHA in a real workflow.
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0            # full history for --git-history
       - uses: actions/setup-node@v5
         with:
           node-version: 22
-      - run: npx --yes macwarden@1.2.0 scan . --git-history --format sarif > macwarden.sarif
+      - run: npx --yes macwarden@1.2.1 scan . --git-history --format sarif > macwarden.sarif
         continue-on-error: true     # upload the results even when credentials were found
       - uses: github/codeql-action/upload-sarif@v3
         with:
@@ -38,7 +39,7 @@ Each result carries `partialFingerprints.macwardenFingerprint/v1`, so an alert k
 ## GitHub annotations (free on private repositories)
 
 ```yaml
-      - run: npx --yes macwarden@1.2.0 scan . --git-history --fail-on READ --format github
+      - run: npx --yes macwarden@1.2.1 scan . --git-history --fail-on READ --format github
 ```
 
 Each finding becomes an inline `::error`, `::warning` or `::notice` annotation on the file and line. `--fail-on READ` makes the job fail when any credential is found.
@@ -49,12 +50,12 @@ Each finding becomes an inline `::error`, `::warning` or `::notice` annotation o
 
 ## Pre-commit
 
-As a [pre-commit](https://pre-commit.com) hook, so a credential never reaches a commit. The hook runs an installed `macwarden` (`npm install -g macwarden@1.2.0`). Create an empty `.macwardenignore` at the repository root first.
+As a [pre-commit](https://pre-commit.com) hook, so a credential never reaches a commit. The hook runs an installed `macwarden` (`npm install -g macwarden@1.2.1`). Create an empty `.macwardenignore` at the repository root first.
 
 ```yaml
 repos:
   - repo: https://github.com/ZilverZtream/macwarden
-    rev: v1.2.0
+    rev: v1.2.1
     hooks:
       - id: macwarden-scan
 ```
@@ -69,6 +70,8 @@ If you already run one of these, add macwarden's detectors to it:
 - TruffleHog: `trufflehog filesystem . --config rules/trufflehog.yaml --no-verification`. TruffleHog prints matched secrets, so treat its output as sensitive.
 
 These rule packs only find candidates. They cannot decode a macaroon or say what it can do; `macwarden scan` does both.
+
+The packs are regular expressions over the literal credential prefixes, so they miss forms `scan` finds: hex split by separators (`02:01:03…`, `0x02, 0x01, …`), base64 that starts at a byte offset other than zero or is base64-encoded twice (a Kubernetes Secret holding a `.env`), UTF-16 text, a percent-encoded `nostr%2Bwalletconnect://` scheme, a bare NWC secret without its URI, and Core Lightning runes. Run `macwarden scan` as well where those can occur.
 
 ## Agent configurations
 

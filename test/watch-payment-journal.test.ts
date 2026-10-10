@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { hostname } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
+import { writeOwnerOnly } from './helpers/owner-only-fixture.js';
 import { withCancellation } from '../src/cancellation.js';
 import { run, type Register } from '../src/commands/watch.js';
 import type { MiddlewareCall, MiddlewareEnd } from '../src/lnd/index.js';
@@ -150,7 +151,7 @@ it('WATCH/payment-journal without the flag no payload is selected or read', asyn
 
 it('WATCH/payment-journal a journal that cannot be opened stops watch at W6, before anything registers', async () => {
   const s = setup();
-  writeFileSync(s.journal, 'someone else\'s file\n', { mode: 0o600 });
+  await writeOwnerOnly(s.journal, 'someone else\'s file\n');
   let registered = false;
   const register = (() => { registered = true; throw new Error('must not register'); }) as unknown as Register;
   const { result } = await watchWith([...s.args, '--payment-journal', s.journal], register, async () => undefined);
@@ -200,7 +201,10 @@ it('WATCH/payment-journal a journal that stops is reported once as a status even
     await turn();
     stop();
   }, { fs: failingFs });
-  expect(opened).toBe(1);
+  // One descriptor writes the journal. A new journal is first created exclusively and owner-only
+  // on every platform through a separate handle that is closed before the writing one is opened
+  // (1.2.1); the failing writes above all go through the second.
+  expect(opened).toBe(2);
   expect(result).toMatchObject({ ok: true, result: { paymentJournal: { stopped: 'write-failed', payments: 0, dropped: 2 } } });
   const codes = result.warnings.map(item => typeof item === 'string' ? item : item.code);
   expect(codes).toEqual(expect.arrayContaining(['payment-journal-stopped', 'payment-journal-dropped']));

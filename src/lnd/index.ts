@@ -25,6 +25,10 @@ const MAX_RESPONSE = 1_048_576;
 const TIMEOUT_MS = 10_000;
 const ROOT_MISSING = /root key with id [0-9]+ doesn't exist/i;
 const SIGNATURE_MISMATCH = /signature mismatch/i;
+// LND quotes the text of a failing caveat in its message (Go %q: "caveat %q not satisfied: ...").
+// Whoever holds a macaroon can append a caveat with any text, so nothing inside a quoted span
+// is node evidence: every quoted span is blanked before a message is classified (1.2.1).
+const unquoted = (message: string): string => message.replace(/"(?:[^"\\]|\\.)*"/g, '""');
 // LND v0.21.4 CheckMacaroonPermissions (rpcserver.go) returns gRPC InvalidArgument with err.Error() of
 // macaroons/service.go CheckMacAuth. Its bakery (macaroon-bakery v2.0.1) checks every first-party caveat
 // in order and reports the first that fails as `caveat %q not satisfied: <reason>` (checkers.go), and
@@ -41,8 +45,12 @@ function ownAuthenticationFailure(response: Response): boolean {
     const value: unknown = JSON.parse(response.body);
     if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
     const message = (value as Record<string, unknown>).message;
-    return typeof message === 'string' && (ROOT_MISSING.test(message)
-      || /permission denied|macaroon.*expired|expired.*macaroon|caveat.*(expired|not satisfied)|verification failed|signature mismatch/i.test(message));
+    if (typeof message !== 'string') return false;
+    // A bounded prefix and fixed phrases (audit 1.2.1): the wildcard alternatives this replaced
+    // backtracked quadratically, so a hostile 1 MiB error body stalled every call for 65 s.
+    const node = unquoted(message.slice(0, 4_096));
+    return ROOT_MISSING.test(node)
+      || /permission denied|macaroon has expired|expired macaroon|macaroon expired|caveat .{0,256}? not satisfied|caveat .{0,256}? expired|verification failed|signature mismatch/i.test(node);
   } catch { return false; }
 }
 
@@ -271,8 +279,11 @@ export function createLndAdapter(config: Config): LndAdapter & PaymentLookup {
         { permissions: perms.map(permission), root_key_id: rootKeyId.toString() });
       if (ownAuthenticationFailure(response))
         throw new LndError(4, stage, 'LND authentication failure');
-      if (response.status < 200 || response.status >= 300)
-        throw new BakeLndError(ROOT_MISSING.test(response.body) ? 'root-key-missing' : 'other');
+      if (response.status < 200 || response.status >= 300) {
+        let message = '';
+        try { const value: unknown = JSON.parse(response.body); message = String((value as { message?: unknown })?.message ?? '').slice(0, 4_096); } catch { /* not JSON */ }
+        throw new BakeLndError(ROOT_MISSING.test(unquoted(message)) ? 'root-key-missing' : 'other');
+      }
       const value = json(response.body, stage);
       const macaroon = string(value.macaroon, stage);
       if (!macaroon || macaroon.length % 2 !== 0 || !/^[0-9a-f]+$/i.test(macaroon))
@@ -299,10 +310,11 @@ export function createLndAdapter(config: Config): LndAdapter & PaymentLookup {
           throw new LndError(5, stage, 'LND request rejected');
         // Classify only the observed target failures; never emit LND's response text.
         const value = json(response.body, stage);
-        const message = string(value.message, stage).trim();
+        const message = string(value.message, stage).trim().slice(0, 4_096);
         if (!message) throw new LndError(5, stage, 'invalid LND response');
-        const missing = response.status === 400 && ROOT_MISSING.test(message);
-        const mismatch = response.status === 400 && SIGNATURE_MISMATCH.test(message);
+        const node = unquoted(message);
+        const missing = response.status === 400 && ROOT_MISSING.test(node);
+        const mismatch = response.status === 400 && SIGNATURE_MISMATCH.test(node);
         const expired = NODE_EXPIRED.exec(message);
         if (expired && !missing && !mismatch)
           return { valid: false, reason: 'expired', caveat: expired[1], message: 'LND rejected macaroon' };
@@ -333,7 +345,12 @@ export type LndPayment = {
   valueMsat: bigint;
   feeMsat: bigint;
   /** One per HTLC attempt: its status, the amount it delivers and its route's fees. */
-  htlcs: { status: 'succeeded' | 'failed' | 'in-flight' | 'unknown'; amountMsat: bigint; feesMsat: bigint }[];
+  /** HTLC attempts LND reports and their amounts by status, summed while parsing; the attempts themselves are not kept (audit 1.2.1). */
+  attempts: number;
+  succeededAttempts: number;
+  succeededMsat: bigint;
+  succeededFeesMsat: bigint;
+  inFlightMsat: bigint;
   /** LND's failure reason without the FAILURE_REASON_ prefix, lower case with dashes; null for none. */
   failureReason: string | null;
   /** LND's payment index (for paging ListPayments). */
@@ -358,7 +375,11 @@ const MAX_PAGE = 1_000;
 const MAX_UINT64 = (1n << 64n) - 1n;
 // LND (paymentsdb) refuses to track a hash it holds no payment for with this error text.
 const NOT_INITIATED = /payment isn'?t initiated|payment not initiated/i;
-const HTLC_STATUS: Record<string, LndPayment['htlcs'][number]['status']> = { IN_FLIGHT: 'in-flight', SUCCEEDED: 'succeeded', FAILED: 'failed' };
+type HtlcStatus = 'succeeded' | 'failed' | 'in-flight' | 'unknown';
+const HTLC_STATUS: Record<string, HtlcStatus> = { IN_FLIGHT: 'in-flight', SUCCEEDED: 'succeeded', FAILED: 'failed' };
+const MAX_INT64 = (1n << 63n) - 1n;
+// Nanoseconds that Date#toISOString renders with a four-digit year (before the year 10000).
+const MAX_CREATION_NS = 253_402_300_799_999n * 1_000_000n;
 const PAYMENT_STATUS: Record<string, LndPayment['status']> = { SUCCEEDED: 'succeeded', FAILED: 'failed', IN_FLIGHT: 'in-flight',
   INITIATED: 'in-flight', UNKNOWN: 'unknown' };
 
@@ -378,26 +399,40 @@ function paymentLookup(call: ReturnType<typeof transport>['call'], read: ReturnT
     const hash = string(item.payment_hash, stage).toLowerCase();
     if (!/^[0-9a-f]{64}$/.test(hash)) throw new LndError(5, stage, 'invalid LND response');
     const htlcs = item.htlcs === undefined || item.htlcs === null ? [] : item.htlcs;
+    // The attempt count is bounded by the response size only: LND keeps every failed attempt of a
+    // retried payment, so one can hold far more than its concurrent parts limit.
     if (!Array.isArray(htlcs)) throw new LndError(5, stage, 'invalid LND response');
+    // Amounts and times outside LND's own types are not an LND record (audit 1.2.1): they would
+    // reach the output outside its schema.
+    const createdAtNs = integer(item.creation_time_ns, stage);
+    const valueMsat = integer(item.value_msat, stage);
+    const feeMsat = integer(item.fee_msat, stage);
+    const index = integer(item.payment_index, stage);
+    if (createdAtNs > MAX_CREATION_NS || valueMsat > MAX_INT64 || feeMsat > MAX_INT64 || index > MAX_UINT64) throw new LndError(5, stage, 'invalid LND response');
+    let succeededAttempts = 0, succeededMsat = 0n, succeededFeesMsat = 0n, inFlightMsat = 0n;
+    for (const entry of htlcs) {
+      const htlc = record(entry, stage);
+      const route = record(htlc.route, stage);
+      const total = integer(route.total_amt_msat, stage);
+      const fees = integer(route.total_fees_msat, stage);
+      if (total > MAX_INT64 || total < fees) throw new LndError(5, stage, 'invalid LND response');
+      const status = HTLC_STATUS[string(htlc.status, stage)] ?? 'unknown';
+      if (status === 'succeeded') { succeededAttempts += 1; succeededMsat += total - fees; succeededFeesMsat += fees; }
+      else if (status === 'in-flight') inFlightMsat += total - fees;
+      // The sums are bounded too (audit 1.2.1): no payment moves more than an int64 of
+      // millisatoshi (21 million bitcoin is 2.1e18), so a larger sum is not an LND record.
+      if (succeededMsat > MAX_INT64 || succeededFeesMsat > MAX_INT64 || inFlightMsat > MAX_INT64) throw new LndError(5, stage, 'invalid LND response');
+    }
     const reason = item.failure_reason === undefined ? 'FAILURE_REASON_NONE' : string(item.failure_reason, stage);
     if (!/^FAILURE_REASON_[A-Z_]{1,64}$/.test(reason)) throw new LndError(5, stage, 'invalid LND response');
     // Only these fields are read; the preimage and the payment request LND also returns are never kept.
     return {
       paymentHash: hash,
       status: PAYMENT_STATUS[string(item.status, stage)] ?? 'unknown',
-      createdAtNs: integer(item.creation_time_ns, stage, true),
-      valueMsat: integer(item.value_msat, stage, true),
-      feeMsat: integer(item.fee_msat, stage, true),
-      htlcs: htlcs.map(entry => {
-        const htlc = record(entry, stage);
-        const route = record(htlc.route, stage);
-        const total = integer(route.total_amt_msat, stage, true);
-        const fees = integer(route.total_fees_msat, stage, true);
-        if (fees < 0n || total < fees) throw new LndError(5, stage, 'invalid LND response');
-        return { status: HTLC_STATUS[string(htlc.status, stage)] ?? 'unknown', amountMsat: total - fees, feesMsat: fees };
-      }),
+      createdAtNs, valueMsat, feeMsat,
+      attempts: htlcs.length, succeededAttempts, succeededMsat, succeededFeesMsat, inFlightMsat,
       failureReason: reason === 'FAILURE_REASON_NONE' ? null : reason.slice('FAILURE_REASON_'.length).toLowerCase().replaceAll('_', '-'),
-      index: integer(item.payment_index, stage),
+      index,
     };
   };
   return {
@@ -406,12 +441,18 @@ function paymentLookup(call: ReturnType<typeof transport>['call'], read: ReturnT
       if (!Number.isSafeInteger(startSeconds) || !Number.isSafeInteger(endSeconds) || startSeconds < 0 || endSeconds < startSeconds
         || !Number.isSafeInteger(max) || max < 1 || max > MAX_PAGE || indexOffset < 0n || indexOffset > MAX_UINT64)
         throw new UsageError('invalid payment query');
+      // omit_hops is never requested: LND v0.21.4 then builds each attempt's route without hops,
+      // and Route.TotalFees() is 0 for a route with no hops, so total_fees_msat (and the
+      // payment's fee_msat) would read 0 and every fee would be counted as settled amount (SQL
+      // payments store, payments/db/sql_converters.go; the kv store ignores the flag).
       const query = new URLSearchParams({ include_incomplete: 'true', index_offset: indexOffset.toString(), max_payments: String(max),
         reversed: 'false', count_total_payments: 'false', creation_date_start: String(startSeconds), creation_date_end: String(endSeconds) });
       const value = json(await read(stage, 'GET', `/v1/payments?${query.toString()}`, undefined, { maxResponse: PAYMENT_RESPONSE_LIMIT }), stage);
       const payments = value.payments === undefined || value.payments === null ? [] : value.payments;
       if (!Array.isArray(payments) || payments.length > max) throw new LndError(5, stage, 'invalid LND response');
-      return { payments: payments.map(item => payment(item, stage)), lastIndexOffset: integer(value.last_index_offset, stage) };
+      const lastIndexOffset = integer(value.last_index_offset, stage);
+      if (lastIndexOffset > MAX_UINT64) throw new LndError(5, stage, 'invalid LND response');
+      return { payments: payments.map(item => payment(item, stage)), lastIndexOffset };
     },
     async trackPayment(paymentHash) {
       const stage = 'track-payment';
@@ -507,6 +548,8 @@ export function registerMiddleware(config: { host: string; port: number; tlsCert
       return;
     }
     if (request.kind === 'reg_complete') {
+      // One confirmation per registration (audit 1.2.1): a repeat is not a new session.
+      if (registered) return;
       registered = true;
       clearTimeout(registrationDeadline);
       onRegistered();

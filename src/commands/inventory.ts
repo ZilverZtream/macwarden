@@ -1,7 +1,7 @@
 import { endpoint, connectionProblem, flagProblem, nodeInfo, drift, listIds, failureDetails, readBoundedFile, readOnlineCredential, onlineAdapter, onlineWarnings, connectionSettings } from '../online.js';
 import * as nodeFs from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { isProtectedPath, outputNameProblem } from '../protected-path.js';
+import { isProtectedPath, outputNameProblem, resolveUnprotectedPath } from '../protected-path.js';
 import { unsafeNodeDiagnostics } from '../environment.js';
 import { decodeMacaroon, parseTimeBefore } from '../decode/index.js';
 import { type InputIO } from '../input/index.js';
@@ -12,8 +12,11 @@ import { inventoryResult, type InventoryResult, type OutputResult } from '../out
 import { readUsage, usagePath, type UsageStore } from '../watch/usage.js';
 import { buildAccessReview, formatAccessReview, REPORT_FORMATS, type ReportFormat } from '../report/access-review.js';
 import { macwardenVersion } from '../version.js';
+import { namesRegistryFile, registryPath, REGISTRY_OUT_REFUSAL } from './bake/out-registry.js';
 import { reserveOut } from './bake/write-out.js';
 import { reserveFailure } from './bake/out-errors.js';
+import { interruptibleChecks, interruptibleReserve, OUT_CREATION_INTERRUPTED, rethrowCancelled } from './bake/out-interrupt.js';
+import { Cancelled } from '../cancellation.js';
 
 type ReadLnd = LndAdapter;
 export type Deps = {
@@ -108,6 +111,16 @@ async function runSteps(args: string[], deps: Deps): Promise<InventoryOutput> {
   if (reportOut !== undefined && isProtectedPath(reportOut)) return fail(3, 'N7', 'protected report path');
   const reportName = reportOut === undefined ? null : outputNameProblem(reportOut);
   if (reportName) return fail(3, 'N7', `report path refused: ${reportName}`);
+  if (reportOut !== undefined) {
+    // Each check is abandoned on an interrupt (a stalled mount): exit 6, step cancelled.
+    const checks = interruptibleChecks(deps.fs);
+    let reportPath: string;
+    try { reportPath = await resolveUnprotectedPath(reportOut, checks); }
+    catch (error) { rethrowCancelled(error); return fail(3, 'N7', 'cannot check report path'); }
+    const registryFile = await registryPath(supplied['--registry'], checks, deps.env);
+    if (registryFile !== null && namesRegistryFile(reportPath, registryFile))
+      return fail(3, 'N7', REGISTRY_OUT_REFUSAL.replace('output path', 'report path'));
+  }
   const settings = connectionSettings(flag => supplied[flag], deps.env);
   if (settings.problem) return fail(2, null, settings.problem);
   // connectionProblem below refuses a missing setting before either path is used.
@@ -225,8 +238,12 @@ async function runSteps(args: string[], deps: Deps): Promise<InventoryOutput> {
       let mac: Secret;
       let decoded: ReturnType<typeof decodeMacaroon>;
       try {
-        if (!(await deps.fs.stat(entry.outPath)).isFile()) continue;
-        mac = (await readOnlineCredential(entry.outPath,
+        // SAFE-02: a registry entry is editable metadata; a protected outPath (macaroons.db,
+        // wallet.db, a *.key, ...), or one that resolves to it, is never probed: unverified.
+        if (isProtectedPath(entry.outPath)) continue;
+        const path = await deps.fs.realpath(entry.outPath);
+        if (isProtectedPath(path) || !(await deps.fs.stat(path)).isFile()) continue;
+        mac = (await readOnlineCredential(path,
           { stdin: process.stdin, fs: deps.fs })).secret;
         decoded = decodeMacaroon(mac);
       } catch { continue; }
@@ -268,14 +285,17 @@ async function runSteps(args: string[], deps: Deps): Promise<InventoryOutput> {
   const text = formatAccessReview(review, reportFormat);
   let path: string | null = null;
   if (reportOut !== undefined) {
-    try { await deps.fs.lstat(reportOut); return fail(3, 'N7', 'report file already exists', warnings); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return fail(3, 'N7', 'cannot check report path', warnings); }
+    try { await interruptibleChecks(deps.fs).lstat(reportOut); return fail(3, 'N7', 'report file already exists', warnings); }
+    catch (error) { rethrowCancelled(error); if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return fail(3, 'N7', 'cannot check report path', warnings); }
     try {
-      const reserved = await reserveOut(reportOut, deps.fs as typeof nodeFs);
+      const reserved = await interruptibleReserve(() => reserveOut(reportOut, deps.fs as typeof nodeFs));
       if (reserved.aclWarning) warnings.push('acl-best-effort');
       try { await reserved.reservation.write(new Secret(Buffer.from(text, 'utf8'))); }
       catch (error) { await reserved.reservation.discard().catch(() => undefined); throw error; }
-    } catch (error) { return fail(3, 'N7', reserveFailure(error, 'cannot write report file'), warnings); }
+    } catch (error) {
+      if (error instanceof Cancelled) return fail(6, 'cancelled', OUT_CREATION_INTERRUPTED.replace('output file', 'report file'), warnings);
+      return fail(3, 'N7', reserveFailure(error, 'cannot write report file'), warnings);
+    }
     path = resolve(reportOut);
   }
   if (output.ok && output.command === 'inventory') {

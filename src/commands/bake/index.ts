@@ -14,8 +14,10 @@ import { openRegistry, RegistryInputError, RegistryUsageError, type RegistryEntr
 import { DecodeError, LndError, LndUncertainError, UsageError } from '../../errors.js';
 import { Secret } from '../../secret.js';
 import type { OutputResult } from '../../output/index.js';
+import { namesRegistryFile, registryPath, REGISTRY_OUT_REFUSAL } from './out-registry.js';
 import { reserveOut, type ReservedOut } from './write-out.js';
 import { reserveFailure } from './out-errors.js';
+import { interruptibleChecks, interruptibleReserve, OUT_CREATION_INTERRUPTED, rethrowCancelled } from './out-interrupt.js';
 import { allocateRootKeyId } from './allocate.js';
 import { canaryCondition, canaryConfigPath, ensureCanaryConfig, newCondition } from '../../watch/canary.js';
 
@@ -157,11 +159,15 @@ async function runSteps(args: string[], deps: Deps, state: RunState): Promise<Ba
   if (isProtectedPath(request.out)) return fail(3, 'B4', 'protected output path');
   const outName = outputNameProblem(request.out);
   if (outName) return fail(3, 'B4', `output path refused: ${outName}`);
+  // Each check is abandoned on an interrupt (a stalled mount): exit 6, step cancelled.
+  const checks = interruptibleChecks(deps.fs);
   let outPath: string;
-  try { outPath = await resolveUnprotectedPath(request.out, deps.fs); }
-  catch { return fail(3, 'B4', 'cannot check output path'); }
-  try { await deps.fs.lstat(request.out); return fail(3, 'B4', 'output file already exists'); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
+  try { outPath = await resolveUnprotectedPath(request.out, checks); }
+  catch (error) { rethrowCancelled(error); return fail(3, 'B4', 'cannot check output path'); }
+  const registryFile = await registryPath(request.registry, checks, deps.env);
+  if (registryFile !== null && namesRegistryFile(outPath, registryFile)) return fail(3, 'B4', REGISTRY_OUT_REFUSAL);
+  try { await checks.lstat(request.out); return fail(3, 'B4', 'output file already exists'); }
+  catch (error) { rethrowCancelled(error); if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
     return fail(3, 'B4', 'cannot check output path'); }
   request.out = outPath;
 
@@ -207,10 +213,13 @@ async function runSteps(args: string[], deps: Deps, state: RunState): Promise<Ba
         catch { return fail(3, 'B6', 'cannot read or create the canary configuration; nothing sent to LND', warnings); }
       }
       try {
-        const reserved = await reserveOut(request.out, deps.fs);
+        const reserved = await interruptibleReserve(() => reserveOut(request.out, deps.fs));
         reservation = reserved.reservation;
         if (reserved.aclWarning) warnings.push('acl-best-effort');
-      } catch (error) { return fail(3, 'B7', reserveFailure(error), warnings); }
+      } catch (error) {
+        if (error instanceof Cancelled) return fail(6, 'cancelled', OUT_CREATION_INTERRUPTED, warnings);
+        return fail(3, 'B7', reserveFailure(error), warnings);
+      }
     }
     const adapter = deps.lnd ?? deps.createAdapter?.({ restUrl: request.host, tlsCert: cert, macaroon: own });
     if (!adapter) return fail(8, 'internal', 'unexpected failure', warnings);
@@ -297,6 +306,9 @@ async function runSteps(args: string[], deps: Deps, state: RunState): Promise<Ba
     entry.fingerprint = finalFacts.fingerprint;
     if (finalFacts.rootKeyId !== rootKeyId || !samePermissions(finalFacts.permissions, request.permissions))
       return await recover('B12', 'bake response root key ID or permissions differ from the request');
+    // BakeMacaroon never returns caveats (audit 1.2.1): a response carrying one (a custom caveat would
+    // make the new credential depend on a middleware) is not LND's answer to this request.
+    if (finalFacts.caveats.length) return await recover('B12', 'bake response carries caveats the request did not ask for');
     entry.permissions = [...finalFacts.permissions];
     entry.caveats = finalFacts.caveats.map(({ type, value }) => ({ type, value }));
     try {

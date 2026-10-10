@@ -404,3 +404,74 @@ it('git-history/oversized-macaroon an oversized .macaroon blob is undecodable wi
   expect(result.findings).toEqual([expect.objectContaining({ kind: 'undecodable', fingerprint: expected, commit: added })]);
   expect(result.skipped.filter(item => item.reason === 'size')).toEqual([]);
 }));
+
+// 1.2.1 (audit F16): an empty blob is scanned and counted like the empty file the walk scans,
+// never skipped for size.
+it('git-history/empty-blob an empty file and an empty .macaroon are scanned as the walk scans them, not skipped for size', async () => temp(async dir => {
+  writeFileSync(join(dir, 'empty.txt'), '');
+  writeFileSync(join(dir, 'empty.macaroon'), '');
+  const added = commit(dir, 'add');
+  const walk = (await import('../src/scan/index.js')).scan;
+  const walked = await walk([dir], {}) as Result;
+  rmSync(join(dir, 'empty.txt'));
+  rmSync(join(dir, 'empty.macaroon'));
+  commit(dir, 'remove');
+  const result = await scan([dir]);
+  const notExcluded = (items: { reason: string }[]) => items.filter(item => item.reason !== 'excluded-dir');
+  expect(notExcluded(walked.skipped)).toEqual([]);
+  expect(notExcluded(result.skipped)).toEqual([]);
+  // Both files have the same (empty) content: one blob, read as text and as a *.macaroon file.
+  expect(result.summary.blobsScanned).toBe(1);
+  expect(walked.findings).toEqual([expect.objectContaining({ kind: 'undecodable', path: display(join(dir, 'empty.macaroon')) })]);
+  expect(result.findings).toEqual([expect.objectContaining({ kind: 'undecodable', path: display(join(dir, 'empty.macaroon')),
+    fingerprint: walked.findings[0].fingerprint, commit: added })]);
+}));
+
+// 1.2.1 (audit F17): summary.dropped counts history blobs exactly as it counts work-tree files.
+it('git-history/dropped an lndconnect URI without a macaroon in history is counted in summary.dropped like the walk counts it', async () => temp(async dir => {
+  const text = 'node: lndconnect://127.0.0.1:10009?cert=MIIB\n';
+  writeFileSync(join(dir, 'connect.txt'), text);
+  commit(dir, 'add');
+  const walk = (await import('../src/scan/index.js')).scan;
+  const walked = await walk([dir], {}) as Result & { summary: { dropped: number } };
+  expect(walked.summary.dropped).toBe(1);
+  rmSync(join(dir, 'connect.txt'));
+  commit(dir, 'remove');
+  const history = await scan([dir]) as Result & { summary: { dropped: number } };
+  expect(history.summary.blobsScanned).toBe(1);
+  expect(history.summary.dropped).toBe(1);
+  // A blob with findings adds its dropped count as well.
+  writeFileSync(join(dir, 'mixed.env'), text + 'TOKEN=' + bytes('default-admin').toString('hex') + '\n');
+  commit(dir, 'mixed');
+  rmSync(join(dir, 'mixed.env'));
+  commit(dir, 'remove mixed');
+  const mixed = await scan([dir]) as Result & { summary: { dropped: number } };
+  expect(mixed.findings).toEqual([expect.objectContaining({ fingerprint: admin.fingerprint })]);
+  expect(mixed.summary.blobsScanned).toBe(2);
+  expect(mixed.summary.dropped).toBe(2);
+}));
+
+// 1.2.1 (verifier, F17): the walk already counted a work-tree file's URIs, so --git-history counts
+// a blob only when it was also committed at a path where the work tree does not hold that content,
+// as a history finding is skipped only at the (path, fingerprint) pairs the work tree reported.
+it('git-history/dropped a blob the work tree holds unchanged at every path is not counted again', async () => temp(async dir => {
+  const two = 'a lndconnect://h1:10009?cert=AAA\nb lndconnect://h2:10009?cert=BBB\n';
+  const dropped = async () => ((await scan([dir])) as Result & { summary: { dropped: number; blobsScanned: number } }).summary;
+  writeFileSync(join(dir, 'uris.txt'), two);
+  commit(dir, 'add');
+  const walk = (await import('../src/scan/index.js')).scan;
+  expect(((await walk([dir], {})) as Result & { summary: { dropped: number } }).summary.dropped).toBe(2);
+  expect(await dropped()).toMatchObject({ blobsScanned: 1, dropped: 2 });
+  // Line endings git may convert on checkout (core.autocrlf) do not make the content differ.
+  writeFileSync(join(dir, 'uris.txt'), two.replaceAll('\n', '\r\n'));
+  expect(await dropped()).toMatchObject({ dropped: 2 });
+  // The same content committed at a second path the work tree also holds: still the walk's.
+  writeFileSync(join(dir, 'uris.txt'), two);
+  writeFileSync(join(dir, 'copy.txt'), two);
+  commit(dir, 'copy');
+  expect(await dropped()).toMatchObject({ blobsScanned: 1, dropped: 4 });
+  // uris.txt changes: its old blob (also copy.txt's) is no longer what the work tree holds there.
+  writeFileSync(join(dir, 'uris.txt'), `${two}c lndconnect://h3:10009?cert=CCC\n`);
+  commit(dir, 'third');
+  expect(await dropped()).toMatchObject({ blobsScanned: 2, dropped: 3 + 2 + 2 });
+}));

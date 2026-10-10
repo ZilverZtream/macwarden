@@ -54,8 +54,10 @@ export const RUNE_ALPHABET = /^[A-Za-z0-9_=-]+$/;
 /**
  * base64_decode_using_maps with Core Lightning's URL-safe maps: every quartet but the last must
  * be four alphabet characters; the last group of 1–4 characters may end in any number of '='
- * (all are dropped), must keep at least two characters, and its unused bits are ignored. Any
- * other character, including '+', '/', whitespace and '=' before the end, fails.
+ * (all are dropped); what remains must not be exactly one character, and its unused bits are
+ * ignored. A last group of only '=' (and an empty text) decodes to no bytes, as
+ * base64_decode_tail_using_maps returns 0 when nothing is left after the padding. Any other
+ * character, including '+', '/', whitespace and '=' before the end, fails.
  */
 export function decodeRuneBase64(text: string): Buffer | null {
   const length = text.length;

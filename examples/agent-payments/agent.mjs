@@ -45,6 +45,10 @@ class HttpStatusError extends Error {
 const say = line => process.stdout.write(`  agent> ${line}\n`);
 const short = text => (text.length > 24 ? `${text.slice(0, 12)}…${text.slice(-6)}` : text);
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+/** Millisatoshi (BigInt) as satoshis, keeping any fraction: 500999n → "500.999". */
+const formatMsat = msat => `${msat / 1000n}${msat % 1000n ? `.${String(msat % 1000n).padStart(3, '0').replace(/0+$/, '')}` : ''}`;
+/** A non-negative integer field from LND's JSON (int64 arrives as a string), as BigInt; null when absent or malformed. */
+const msatField = value => (typeof value === 'string' && /^\d{1,20}$/.test(value)) || (Number.isSafeInteger(value) && value >= 0) ? BigInt(value) : null;
 
 function setting(name, fallback) {
   const value = process.env[name] ?? fallback;
@@ -76,8 +80,10 @@ function loadConfig() {
   };
 }
 
+const TRANSIENT_STATUSES = [502, 503, 504];
+
 /** True for failures worth another attempt: transport errors and gateway/unavailable responses. */
-const transient = error => !(error instanceof HttpStatusError) || [502, 503, 504].includes(error.status);
+const transient = error => !(error instanceof HttpStatusError) || TRANSIENT_STATUSES.includes(error.status);
 
 /** Runs an idempotent operation up to RETRY_ATTEMPTS times with exponential backoff. */
 async function withRetries(what, operation) {
@@ -132,7 +138,8 @@ function createLnd(config, macaroonHex, onRequest) {
     if (payload !== undefined) headers['content-type'] = 'application/json';
     onRequest?.(method, path, headers);
     const what = `${method} ${path.split('?')[0].replace(/\/lnbc\w+$/, '/<invoice>')}`;
-    const response = await exchange(httpsRequest, { host: config.lndHost, port: config.lndPort, method, path, headers, ca: config.ca },
+    // rejectUnauthorized is explicit: an inherited NODE_TLS_REJECT_UNAUTHORIZED=0 would otherwise turn the pinned certificate off.
+    const response = await exchange(httpsRequest, { host: config.lndHost, port: config.lndPort, method, path, headers, ca: config.ca, rejectUnauthorized: true },
       payload, timeoutMs, what);
     if (response.status !== 200) throw new HttpStatusError(what, response.status, lndMessage(response.text));
     if (!stream) return parseJson(response.text) ?? {};
@@ -143,9 +150,26 @@ function createLnd(config, macaroonHex, onRequest) {
 /** One request to the paid API, optionally with an Authorization header. */
 function callApi(config, authorization) {
   const headers = authorization ? { authorization } : {};
-  const requestFn = config.serviceUrl.protocol === 'https:' ? httpsRequest : httpRequest;
-  return exchange(requestFn, { host: config.serviceUrl.hostname, port: config.serviceUrl.port || undefined,
-    path: `${config.serviceUrl.pathname}${config.serviceUrl.search}`, headers }, undefined, API_TIMEOUT_MS, `GET ${config.serviceUrl.pathname}`);
+  const https = config.serviceUrl.protocol === 'https:';
+  // The L402 token is a bearer credential: rejectUnauthorized is explicit, as for LND, so an inherited
+  // NODE_TLS_REJECT_UNAUTHORIZED=0 cannot send it to a certificate nobody trusts.
+  return exchange(https ? httpsRequest : httpRequest, { host: config.serviceUrl.hostname, port: config.serviceUrl.port || undefined,
+    path: `${config.serviceUrl.pathname}${config.serviceUrl.search}`, headers, ...(https ? { rejectUnauthorized: true } : {}) },
+  undefined, API_TIMEOUT_MS, `GET ${config.serviceUrl.pathname}`);
+}
+
+/**
+ * callApi with retries. A 502, 503 or 504 is thrown inside the retried operation, so it is retried like a
+ * transport error; every other status (402 with its challenge, 200, other 4xx and 5xx) is returned at once for
+ * the caller to judge. The response body of a transient failure is not echoed.
+ */
+function callApiWithRetries(config, authorization) {
+  return withRetries('paid API', async () => {
+    const response = await callApi(config, authorization);
+    if (TRANSIENT_STATUSES.includes(response.status))
+      throw new HttpStatusError(`GET ${config.serviceUrl.pathname}`, response.status, 'service temporarily unavailable');
+    return response;
+  });
 }
 
 /** Parses `WWW-Authenticate: L402 macaroon="…", invoice="…"`. Aperture also sends the legacy LSAT form first. */
@@ -168,12 +192,16 @@ async function trackPayment(lnd, paymentHashHex) {
 /** Pays one invoice after checking it. Returns the final payment (status SUCCEEDED) or throws. */
 async function pay(config, lnd, invoice) {
   const decoded = await withRetries('DecodePayReq', () => lnd('GET', `/v1/payreq/${invoice}`));
-  const amount = Number(decoded.num_satoshis);
+  // num_msat, not num_satoshis: num_satoshis drops the millisatoshi part, so 500999 msat would read as 500 sat
+  // and 999 msat as no amount. All amount checks are in millisatoshi, as BigInt.
+  const amountMsat = msatField(decoded.num_msat ?? '0');
   const expiresAt = (Number(decoded.timestamp) + Number(decoded.expiry)) * 1000;
-  say(`DecodePayReq: ${amount} sat to ${short(decoded.destination)}, "${decoded.description || 'no description'}", hash ${short(decoded.payment_hash)}`);
+  if (amountMsat === null) throw new Error('DecodePayReq returned no readable amount; not paying');
+  say(`DecodePayReq: ${formatMsat(amountMsat)} sat to ${short(decoded.destination)}, "${decoded.description || 'no description'}", hash ${short(decoded.payment_hash)}`);
   // The agent's own spending rules. They are advisory: the macaroon itself limits no amount.
-  if (!(amount > 0)) throw new Error('invoice without an amount; not paying');
-  if (amount > config.maxPriceSat) throw new Error(`price ${amount} sat is above the agent's limit of ${config.maxPriceSat} sat; not paying`);
+  const maxPriceMsat = BigInt(config.maxPriceSat) * 1000n;
+  if (amountMsat <= 0n) throw new Error('invoice without an amount; not paying');
+  if (amountMsat > maxPriceMsat) throw new Error(`price ${formatMsat(amountMsat)} sat is above the agent's limit of ${config.maxPriceSat} sat; not paying`);
   if (!(expiresAt > Date.now() + 5_000)) throw new Error('invoice expired or about to expire; not paying');
 
   // SendPaymentV2 is sent once. LND refuses a second payment of the same payment hash, and an
@@ -181,7 +209,7 @@ async function pay(config, lnd, invoice) {
   let final = null;
   try {
     const messages = await lnd('POST', '/v2/router/send', {
-      body: { payment_request: invoice, timeout_seconds: PAYMENT_TIMEOUT_S, fee_limit_sat: String(config.maxFeeSat), no_inflight_updates: true },
+      body: { payment_request: invoice, timeout_seconds: PAYMENT_TIMEOUT_S, fee_limit_msat: String(BigInt(config.maxFeeSat) * 1000n), no_inflight_updates: true },
       stream: true, timeoutMs: (PAYMENT_TIMEOUT_S + 15) * 1000 });
     const streamError = messages.map(message => message.error?.message).find(Boolean);
     if (streamError) throw new HttpStatusError('POST /v2/router/send', 200, streamError);
@@ -193,7 +221,9 @@ async function pay(config, lnd, invoice) {
   if (!final || final.status === 'IN_FLIGHT' || final.status === 'INITIATED') final = await trackPayment(lnd, decoded.payment_hash);
   if (final?.status !== 'SUCCEEDED') throw new Error(`payment ${final?.status ?? 'state unknown'}${final?.failure_reason ? ` (${final.failure_reason})` : ''}`);
   if (!/^[0-9a-f]{64}$/.test(final.payment_preimage ?? '')) throw new Error('payment succeeded without a usable preimage');
-  say(`SendPaymentV2: SUCCEEDED, ${final.value_sat} sat + ${final.fee_sat} sat fee`);
+  const paidMsat = msatField(final.value_msat);
+  const feeMsat = msatField(final.fee_msat);
+  say(`SendPaymentV2: SUCCEEDED, ${paidMsat === null ? '?' : formatMsat(paidMsat)} sat + ${feeMsat === null ? '?' : formatMsat(feeMsat)} sat fee`);
   return final;
 }
 
@@ -206,7 +236,7 @@ async function buy(config, { simulateLeak }) {
   } : undefined);
 
   say(`GET ${config.serviceUrl.href}`);
-  const first = await withRetries('paid API', () => callApi(config));
+  const first = await callApiWithRetries(config);
   if (first.status !== 402) throw new Error(`expected 402 Payment Required, got HTTP ${first.status}`);
   const challenge = l402Challenge(first.headers);
   if (!challenge) throw new Error('402 response without an L402 challenge');
@@ -214,7 +244,7 @@ async function buy(config, { simulateLeak }) {
 
   const payment = await pay(config, lnd, challenge.invoice);
   const token = `${challenge.macaroon}:${payment.payment_preimage}`;
-  const second = await withRetries('paid API', () => callApi(config, `L402 ${token}`));
+  const second = await callApiWithRetries(config, `L402 ${token}`);
   say(`GET with Authorization: L402 <token> → ${second.status}`);
   if (second.status !== 200) throw new Error(`paid request failed with HTTP ${second.status}`);
   say(`data: ${second.text}`);
@@ -265,7 +295,7 @@ async function reuse(config) {
   const env = readFileSync(join(config.workdir, '.env'), 'utf8');
   const line = env.split('\n').find(entry => entry.startsWith('L402_TOKEN='));
   if (!line) throw new Error('no L402_TOKEN in .env');
-  const response = await withRetries('paid API', () => callApi(config, `L402 ${line.slice('L402_TOKEN='.length).trim()}`));
+  const response = await callApiWithRetries(config, `L402 ${line.slice('L402_TOKEN='.length).trim()}`);
   say(`GET with the L402 token from .env, no payment → ${response.status}`);
   if (response.status !== 200) throw new Error(`HTTP ${response.status}`);
   say(`data: ${response.text}`);

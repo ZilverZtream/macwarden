@@ -63,3 +63,12 @@ it('RO-2/windows-names bake and rotate refuse a normalised name before any LND c
   expect(f.lnd.calls).toEqual([]);
   expect(existsSync(`${f.out}.`)).toBe(false); expect(existsSync(join(f.dir, 'AUX.macaroon'))).toBe(false);
 });
+
+// Audit 1.2.1: \\?\ hands the rest of the path to the kernel; only a drive or UNC root under it names a file.
+it('RO-2/windows-names a \\\\?\\ path is accepted only with a drive or UNC root', () => {
+  for (const path of ['\\\\?\\GLOBALROOT\\Device\\Null', '\\\\?\\GLOBALROOT\\Device\\HarddiskVolume1\\out\\app.macaroon',
+    '\\\\?\\Volume{1}\\app.macaroon', '\\\\?\\pipe\\name'])
+    expect(outputNameProblem(path, 'win32'), path).toMatch(/device namespace/);
+  for (const path of ['\\\\?\\C:\\out\\app.macaroon', '\\\\?\\UNC\\server\\share\\app.macaroon', '\\\\?\\c:\\out'])
+    expect(outputNameProblem(path, 'win32'), path).toBeNull();
+});

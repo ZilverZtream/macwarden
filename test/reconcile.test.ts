@@ -2,8 +2,8 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { afterEach, expect, it } from 'vitest';
-import { LIST_LIMIT, LIST_PAGE, TRACK_LIMIT, run } from '../src/commands/reconcile.js';
+import { afterEach, expect, it, vi } from 'vitest';
+import { LIST_LIMIT, LIST_PAGE, MAX_MSAT, RECONCILE_BUDGET_MS, TRACK_LIMIT, run } from '../src/commands/reconcile.js';
 import { LndError } from '../src/errors.js';
 import snapshot from '../src/grade/lnd-permissions.json' with { type: 'json' };
 import type { LndAdapter, LndPayment, PaymentLookup } from '../src/lnd/index.js';
@@ -14,7 +14,7 @@ import { NODE, OTHER_NODE, vector } from './helpers/payment-journal.js';
 const repo = resolve();
 const tmpRoot = process.env.MACWARDEN_TEST_TMP || join(repo, 'test/.tmp');
 const dirs: string[] = [];
-afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+afterEach(() => { vi.restoreAllMocks(); for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
 const BASE = Date.parse('2026-10-09T10:00:00.000Z');
 const at = (seconds: number) => new Date(BASE + seconds * 1_000).toISOString();
@@ -36,13 +36,19 @@ const payment = (seconds: number, credential: string, rootKeyId: string, payment
   paymentHash, amountMsat, amountSource: amountMsat === null ? null : 'request', feeLimitMsat: '5000', amp: false,
   extraction: paymentHash ? 'complete' : 'amp', ...extra }, run);
 
-function lnd(paymentHash: string, createdSeconds: number, status: LndPayment['status'], htlcs: LndPayment['htlcs'] = [],
+type Htlc = { status: 'succeeded' | 'failed' | 'in-flight' | 'unknown'; amountMsat: bigint; feesMsat: bigint };
+// An LND payment as the adapter reduces it: the attempts are summed by status, not kept.
+function lnd(paymentHash: string, createdSeconds: number, status: LndPayment['status'], htlcs: Htlc[] = [],
   failureReason: string | null = null, index = 1n): LndPayment {
   const succeeded = htlcs.filter(item => item.status === 'succeeded');
+  const inFlight = htlcs.filter(item => item.status === 'in-flight');
   return { paymentHash, status, createdAtNs: ns(createdSeconds), valueMsat: succeeded.reduce((total, item) => total + item.amountMsat, 0n),
-    feeMsat: succeeded.reduce((total, item) => total + item.feesMsat, 0n), htlcs, failureReason, index };
+    feeMsat: succeeded.reduce((total, item) => total + item.feesMsat, 0n), attempts: htlcs.length, succeededAttempts: succeeded.length,
+    succeededMsat: succeeded.reduce((total, item) => total + item.amountMsat, 0n),
+    succeededFeesMsat: succeeded.reduce((total, item) => total + item.feesMsat, 0n),
+    inFlightMsat: inFlight.reduce((total, item) => total + item.amountMsat, 0n), failureReason, index };
 }
-const htlc = (status: LndPayment['htlcs'][number]['status'], amountMsat: bigint, feesMsat: bigint) => ({ status, amountMsat, feesMsat });
+const htlc = (status: Htlc['status'], amountMsat: bigint, feesMsat: bigint): Htlc => ({ status, amountMsat, feesMsat });
 
 type Fake = Partial<LndAdapter & PaymentLookup> & { listed?: LndPayment[]; tracked?: Map<string, LndPayment | null | Error>; calls?: string[] };
 function fakeLnd(fake: Fake): LndAdapter & PaymentLookup {
@@ -151,11 +157,13 @@ it('RECONCILE/classification settlement, attribution, gaps and unattributed paym
   expect(byHash.get(H('h7'))!.settlement).toMatchObject({ status: 'succeeded', source: 'track-payment', predatesObservation: true });
 
   const rows = new Map(result.credentials.map(row => [row.credential, row]));
-  expect(rows.get(C1)).toEqual({ credential: C1, rootKeyIds: ['4294967341'], label: 'shop', payments: 4, succeeded: 2, failed: 1, inFlight: 0,
-    notFound: 0, unknown: 1, ambiguous: 1, unmatched: 0, deletions: 0, requestedMsat: String(100_000 + 200_000 + 7_000 + 4_000),
-    settledMsat: String(100_000 + 4_000), feesMsat: String(2_500 + 1), inFlightMsat: '0' });
+  // h7's LND record predates its journaled request (1.2.1): historical, counted for no credential.
+  expect(byHash.get(H('h7'))).toMatchObject({ attribution: 'historical', credentials: [C1] });
+  expect(rows.get(C1)).toEqual({ credential: C1, rootKeyIds: ['4294967341'], label: 'shop', payments: 3, succeeded: 1, failed: 1, inFlight: 0,
+    notFound: 0, unknown: 1, ambiguous: 1, historical: 1, unmatched: 0, deletions: 0, requestedMsat: String(100_000 + 200_000 + 7_000),
+    settledMsat: String(100_000), feesMsat: String(2_500), inFlightMsat: '0' });
   expect(rows.get(C2)).toEqual({ credential: C2, rootKeyIds: ['0'], label: null, payments: 2, succeeded: 0, failed: 0, inFlight: 1,
-    notFound: 1, unknown: 0, ambiguous: 1, unmatched: 1, deletions: 1, requestedMsat: '60000', settledMsat: '0', feesMsat: '0',
+    notFound: 1, unknown: 0, ambiguous: 1, historical: 0, unmatched: 1, deletions: 1, requestedMsat: '60000', settledMsat: '0', feesMsat: '0',
     inFlightMsat: '50000' });
   expect(result.unmatched).toEqual([expect.objectContaining({ credential: C2, extraction: 'amp', time: at(700) })]);
   expect(result.unattributed.map(item => [item.paymentHash, item.coverage, item.status, item.settledMsat])).toEqual([
@@ -229,6 +237,32 @@ it('RECONCILE/relative windows and a payment journaled before the window is attr
   expect((later.result as ReconcileResult).lookups.attributedOutsideWindow).toBe(1);
 });
 
+it('RECONCILE/epoch a window reaching before 1970 is refused at Q1; a large valid window stays inside the schema (PF-2)', async () => {
+  const s = setup([start(0), line('registered', 1, { session: 1 }), line('alive', 3_590)]);
+  const lndOk = fakeLnd({});
+  for (const [args, message] of [
+    [['--since', '999999d'], '--since must not be before 1970-01-01T00:00:00Z'],
+    [['--since', '20736d'], '--since must not be before 1970-01-01T00:00:00Z'], // the clock, 2026-10-09T12:00Z, is 20,735.5 days after the epoch
+    [['--since', '1969-12-31T23:59:59Z'], '--since must not be before 1970-01-01T00:00:00Z'],
+    [['--since', '999999d', '--until', '999999h'], '--since must not be before 1970-01-01T00:00:00Z'],
+    [['--since', '0001-01-01T00:00:00Z', '--until', '1969-12-31T23:59:59.999Z'], '--since must not be before 1970-01-01T00:00:00Z'],
+    [['--until', '1969-12-31T23:59:59Z'], '--until must not be before 1970-01-01T00:00:00Z'],
+  ] as [string[], string][]) {
+    const output = await reconcile([...s.args, ...args, '--json'], lndOk);
+    expect(output.error, args.join(' ')).toMatchObject({ code: 2, step: 'Q1', message });
+    expectSchemaValid(output);
+  }
+  // The epoch itself is a valid start, and so is a relative window of decades.
+  for (const since of ['1970-01-01T00:00:00Z', '20000d']) {
+    const output = await reconcile([...s.args, '--since', since, '--json'], fakeLnd({}));
+    expect(output.error ?? null, since).toBeNull();
+    expectSchemaValid(output);
+    const result = output.result as ReconcileResult;
+    expect(Date.parse(result.window.since)).toBeGreaterThanOrEqual(0);
+    expect(result.coverage.gaps[0].from).toBe(result.window.since);
+  }
+});
+
 it('RECONCILE/steps arguments, permissions, the journal and LND failures stop at their step with nothing changed', async () => {
   const s = setup([start(0)]);
   const lndOk = fakeLnd({});
@@ -284,21 +318,89 @@ it('RECONCILE/bounds the listing is paged and capped, and per-hash lookups are l
   } });
   const s = setup([start(0), line('registered', 1, { session: 1 })]);
   const output = await reconcile([...s.args, '--since', at(0), '--until', at(100)], endless);
+  expectSchemaValid(output);
   const result = output.result as ReconcileResult;
   expect(pages).toBe(LIST_LIMIT / LIST_PAGE);
   expect(result.lookups).toMatchObject({ listed: LIST_LIMIT, listTruncated: true });
   expect(output.exitCode).toBe(1);
-  expect(output.warnings.map(item => typeof item === 'string' ? item : item.code)).toContain('lookups-limited');
+  expect(output.warnings).toContainEqual({ code: 'lookups-limited',
+    message: `LND's payment listing stopped at ${LIST_LIMIT} payments; narrow the window with --since and --until` });
 
   const many = [start(0), line('registered', 1, { session: 1 }),
     ...Array.from({ length: TRACK_LIMIT + 3 }, (_, index) => payment(2 + index / 1_000, C1, '1', H(`t-${index}`), '1'))];
   const limited = setup(many);
   const trackCalls: string[] = [];
   const looked = await reconcile([...limited.args, '--since', at(0), '--until', at(100)], fakeLnd({ calls: trackCalls }));
+  expectSchemaValid(looked);
   const lookups = (looked.result as ReconcileResult).lookups;
   expect(lookups).toMatchObject({ tracked: TRACK_LIMIT, trackLimited: 3 });
   expect(trackCalls.filter(call => call.startsWith('trackPayment')).length).toBe(TRACK_LIMIT);
   expect((looked.result as ReconcileResult).payments.filter(item => item.settlement.status === 'unknown').length).toBe(3);
+  // Pages LIST_LIMIT payments through the fake: 17 s on a 2-core Windows runner.
+}, 90_000);
+
+it('RECONCILE/budget a listing the 10 minute budget ends is reported as the budget, not the count limit (audit 1.2.1 N2)', async () => {
+  // The budget runs out while the third page is read: the listing stops there, far below LIST_LIMIT.
+  let clock = Date.now();
+  vi.spyOn(Date, 'now').mockImplementation(() => clock);
+  let pages = 0;
+  const slow = fakeLnd({ listPayments: async ({ indexOffset, max }) => {
+    pages += 1;
+    if (pages === 3) clock += RECONCILE_BUDGET_MS + 1;
+    const payments = Array.from({ length: max }, (_, index) => lnd(H(`slow-${indexOffset + BigInt(index)}`), 10, 'succeeded', [], null,
+      indexOffset + BigInt(index) + 1n));
+    return { payments, lastIndexOffset: indexOffset + BigInt(max) };
+  } });
+  const s = setup([start(0), line('registered', 1, { session: 1 })]);
+  const output = await reconcile([...s.args, '--since', at(0), '--until', at(100)], slow);
+  expectSchemaValid(output);
+  expect(pages).toBe(3);
+  expect((output.result as ReconcileResult).lookups).toMatchObject({ listed: 3 * LIST_PAGE, listTruncated: true });
+  expect(output.exitCode).toBe(1);
+  const limited = output.warnings.find(item => typeof item !== 'string' && item.code === 'lookups-limited');
+  expect(limited).toEqual({ code: 'lookups-limited', message: `LND's payment listing stopped after ${3 * LIST_PAGE} payments when the `
+    + `${RECONCILE_BUDGET_MS / 60_000} minute budget ran out; narrow the window with --since and --until` });
+  expect(JSON.stringify(limited)).not.toContain(String(LIST_LIMIT));
+});
+
+it('RECONCILE/sums LND amounts that sum past an int64 for one credential are not LND records: exit 5 at Q6 (audit 1.2.1 N1)', async () => {
+  // Each payment is within LND's int64 type (the adapter refuses a larger one); their sum for one credential is not.
+  const journal = [start(0), line('registered', 1, { session: 1 }), payment(10, C1, '1', H('big-1'), '1000'), payment(20, C1, '1', H('big-2'), '1000')];
+  const listed = [lnd(H('big-1'), 10, 'succeeded', [htlc('succeeded', MAX_MSAT, 0n)], null, 1n),
+    lnd(H('big-2'), 20, 'succeeded', [htlc('succeeded', 1n, 0n)], null, 2n)];
+  const s = setup(journal);
+  const output = await reconcile([...s.args, '--since', at(0), '--until', at(100)], fakeLnd({ listed }));
+  expectSchemaValid(output);
+  expect(output).toMatchObject({ ok: false, result: null, error: { code: 5, step: 'Q6', message: 'invalid LND response' } });
+  for (const [fees, inFlight] of [[MAX_MSAT, 0n], [0n, MAX_MSAT]]) {
+    const other = [lnd(H('big-1'), 10, inFlight ? 'in-flight' : 'succeeded', [htlc(inFlight ? 'in-flight' : 'succeeded', inFlight || 1n, fees)], null, 1n),
+      lnd(H('big-2'), 20, inFlight ? 'in-flight' : 'succeeded', [htlc(inFlight ? 'in-flight' : 'succeeded', 1n, inFlight ? 0n : 1n)], null, 2n)];
+    const failed = await reconcile([...s.args, '--since', at(0), '--until', at(100)], fakeLnd({ listed: other }));
+    expectSchemaValid(failed);
+    expect(failed.error).toEqual({ code: 5, step: 'Q6', message: 'invalid LND response' });
+  }
+  // At the bound exactly, the sum is reported and the output stays within its schema.
+  const atBound = [lnd(H('big-1'), 10, 'succeeded', [htlc('succeeded', MAX_MSAT - 1n, 0n)], null, 1n),
+    lnd(H('big-2'), 20, 'succeeded', [htlc('succeeded', 1n, 0n)], null, 2n)];
+  const fine = await reconcile([...s.args, '--since', at(0), '--until', at(100)], fakeLnd({ listed: atBound }));
+  expectSchemaValid(fine);
+  expect((fine.result as ReconcileResult).credentials[0]).toMatchObject({ credential: C1, settledMsat: MAX_MSAT.toString() });
+});
+
+it('RECONCILE/sums journaled requests that sum past an int64 are capped and said so; the output stays within its schema (audit 1.2.1 N1)', async () => {
+  // A credential can ask for any amount (LND refuses it); the requests are journaled and summed.
+  const MAX = MAX_MSAT.toString();
+  const journal = [start(0), line('registered', 1, { session: 1 }),
+    ...Array.from({ length: 11 }, (_, index) => payment(10 + index, C1, '1', H(`ask-${index}`), MAX)),
+    ...Array.from({ length: 11 }, (_, index) => payment(30 + index, C2, '2', H('route'), MAX, { method: ROUTE, amountSource: 'route' }))];
+  const s = setup(journal);
+  const output = await reconcile([...s.args, '--since', at(0), '--until', at(100)], fakeLnd({}));
+  expectSchemaValid(output);
+  expect(output).toMatchObject({ ok: true, error: null, exitCode: 1 });
+  const result = output.result as ReconcileResult;
+  expect(result.credentials.map(row => [row.credential, row.requestedMsat])).toEqual([[C1, MAX], [C2, MAX]]);
+  expect(result.payments.find(item => item.paymentHash === H('route'))!.observation.routeAttemptsMsat).toBe(MAX);
+  expect(output.warnings.map(item => typeof item === 'string' ? item : item.code)).toContain('requested-amounts-capped');
 });
 
 it('RECONCILE/read-only reconcile never writes: the journal and registry are unchanged', async () => {
@@ -309,4 +411,108 @@ it('RECONCILE/read-only reconcile never writes: the journal and registry are unc
   expect(readFileSync(s.path).equals(before[0])).toBe(true);
   expect(readFileSync(join(s.dir, 'registry.json')).equals(before[1])).toBe(true);
   expect((await fs.readdir(s.dir)).sort()).toEqual(['own.macaroon', 'payments.journal', 'registry.json', 'tls.cert']);
+});
+
+// 1.2.1: a payment hash's attribution uses every journaled request for it, in the window or before
+// it, and LND's one record is not credited to a credential whose request came after it.
+it('RECONCILE/attribution an earlier request by another credential shares the hash; a record older than every request is historical', async () => {
+  const journal = [
+    start(0), line('registered', 1, { session: 1 }),
+    payment(100, C1, '4294967341', H('reuse'), '100000'),
+    payment(2000, C2, '0', H('reuse'), '100000'),
+    payment(2100, C2, '0', H('old'), '5000'),
+    line('alive', 3_590),
+  ];
+  const s = setup(journal, [entry('shop', '4294967341')]);
+  // Both LND records were created outside the window, so the listing lacks them; each is looked up by hash.
+  const tracked = new Map<string, LndPayment | null | Error>([
+    [H('reuse'), lnd(H('reuse'), 101, 'succeeded', [htlc('succeeded', 100_000n, 10n)], null, 1n)],
+    [H('old'), lnd(H('old'), -86_400, 'succeeded', [htlc('succeeded', 5_000n, 1n)], null, 9n)]]);
+  const output = await reconcile([...s.args, '--since', at(1_800), '--until', at(3_600)], fakeLnd({ tracked }), at(3_600));
+  expectSchemaValid(output);
+  expect(output).toMatchObject({ ok: true, exitCode: 1 });
+  const result = output.result as ReconcileResult;
+  const reuse = result.payments.find(item => item.paymentHash === H('reuse'))!;
+  // C1's request lies before the window; it still shares the attribution, and the settlement is not C2's.
+  expect(reuse).toMatchObject({ attribution: 'ambiguous', credentials: [C1, C2].sort(), observation: { first: at(100), last: at(2000), calls: 2 },
+    settlement: { status: 'succeeded', source: 'track-payment', settledMsat: '100000', predatesObservation: false } });
+  const old = result.payments.find(item => item.paymentHash === H('old'))!;
+  expect(old).toMatchObject({ attribution: 'historical', credentials: [C2], settlement: { status: 'succeeded', predatesObservation: true } });
+  const c2 = result.credentials.find(row => row.credential === C2)!;
+  expect(c2).toMatchObject({ payments: 0, succeeded: 0, ambiguous: 1, historical: 1, settledMsat: '0', feesMsat: '0', requestedMsat: '0' });
+  const c1 = result.credentials.find(row => row.credential === C1)!;
+  expect(c1).toMatchObject({ payments: 0, ambiguous: 1, historical: 0, settledMsat: '0' });
+  expect(output.warnings).toContainEqual(expect.objectContaining({ code: 'attribution-historical' }));
+  expect(output.warnings).toContainEqual(expect.objectContaining({ code: 'attribution-ambiguous' }));
+  const text = render(output, 'text');
+  expect(text).toContain(`observed: ambiguous (${[C1, C2].sort().join(', ')})`);
+  expect(text).toContain('(historical: LND\'s record is older than every journaled request)');
+  expect(text).toContain('1 with an LND record older than any journaled request');
+});
+
+// 1.2.1 (owner finding): the window is ordered after --until defaults to now.
+it('RECONCILE/window a --since after now is refused, never a negative window reported as complete', async () => {
+  const s = setup([start(0), line('registered', 1, { session: 1 }), line('alive', 100)]);
+  const output = await reconcile([...s.args, '--since', at(7_200)], fakeLnd({}), at(3_600));
+  expect(output).toMatchObject({ ok: false, error: { code: 2, step: 'Q1', message: expect.stringContaining('--since must not be after') } });
+});
+
+// 1.2.1 (audit F08): a request journaled after --until never establishes who initiated a payment
+// in the window, nor adds to its observations; requests before --since still do.
+it('RECONCILE/until a request after the window neither hides an unattributed payment in it nor joins its observations', async () => {
+  const window = (journal: string[]) => setup([start(0), line('registered', 1, { session: 1 }), ...journal, line('alive', 1_000)]);
+  const listed = [lnd(H('paid'), 300, 'succeeded', [htlc('succeeded', 1_000n, 0n)], null, 1n)];
+  // 00:00 to 00:10, LND's payment at 00:05, the only request (a retry of the paid invoice) at 00:15.
+  const later = window([payment(900, C1, '4294967341', H('paid'), '1000')]);
+  const output = await reconcile([...later.args, '--since', at(0), '--until', at(600)], fakeLnd({ listed }), at(1_200));
+  expectSchemaValid(output);
+  const result = output.result as ReconcileResult;
+  expect(result.payments).toEqual([]);
+  expect(result.unattributed.map(item => [item.paymentHash, item.coverage])).toEqual([[H('paid'), 'covered']]);
+  expect(result.lookups.attributedOutsideWindow).toBe(0);
+  expect(output).toMatchObject({ ok: true, exitCode: 1 });
+  // A's request at 00:05 for 1000 msat, B's at 00:15 for 9000 msat: A's alone, as A asked for it.
+  const both = window([payment(300, C1, '4294967341', H('paid'), '1000'), payment(900, C2, '0', H('paid'), '9000')]);
+  const shared = (await reconcile([...both.args, '--since', at(0), '--until', at(600)], fakeLnd({ listed }), at(1_200))).result as ReconcileResult;
+  expect(shared.payments).toEqual([expect.objectContaining({ paymentHash: H('paid'), attribution: 'single', credentials: [C1],
+    observation: expect.objectContaining({ first: at(300), last: at(300), calls: 1, requestedMsat: '1000' }) })]);
+  expect(shared.unattributed).toEqual([]);
+  expect(shared.credentials.map(row => row.credential)).toEqual([C1]);
+  // A request before --since still attributes a payment in the window (1.2.1).
+  const before = window([payment(100, C1, '4294967341', H('paid'), '1000'), payment(900, C2, '0', H('paid'), '9000')]);
+  const early = (await reconcile([...before.args, '--since', at(200), '--until', at(600)], fakeLnd({ listed }), at(1_200))).result as ReconcileResult;
+  expect(early.payments).toEqual([]);
+  expect(early.unattributed).toEqual([]);
+  expect(early.lookups.attributedOutsideWindow).toBe(1);
+});
+
+// 1.2.1 (audit F09): DeleteAllPayments with failed_htlcs_only alone deletes the failed attempts of
+// every payment; it is associated with each journaled hash like any other accepted deletion.
+it('RECONCILE/deletions a failed-HTLC cleanup is associated with every journaled payment; a request LND refuses is not', async () => {
+  const deletion = (seconds: number, credential: string, scope: string) => line('deletion', seconds, { requestId: String(++requestId),
+    method: '/lnrpc.Lightning/DeleteAllPayments', credential, rootKeyId: '0', paymentHash: null, scope, extraction: 'complete' });
+  const s = setup([start(0), line('registered', 1, { session: 1 }), payment(10, C1, '4294967341', H('cleaned'), '1000'),
+    deletion(20, C2, 'failed-htlcs'), deletion(30, C1, 'none'), line('alive', 100)]);
+  const listed = [lnd(H('cleaned'), 10, 'succeeded', [htlc('succeeded', 1_000n, 0n)])];
+  const output = await reconcile([...s.args, '--since', at(1), '--until', at(100)], fakeLnd({ listed }), at(100));
+  expectSchemaValid(output);
+  const result = output.result as ReconcileResult;
+  expect(result.payments[0]).toMatchObject({ paymentHash: H('cleaned'), deletedBy: [C2] });
+  expect(result.deletions.map(item => [item.credential, item.scope])).toEqual([[C2, 'failed-htlcs'], [C1, 'none']]);
+});
+
+// 1.2.1 (audit F10): a drop that lasted no measurable time leaves the covered time whole, but a
+// payment created at that instant, or within the clock tolerance of it, is not called covered.
+it('RECONCILE/coverage a payment at an instantaneous recorded drop is a gap, and one near it a boundary, never covered', async () => {
+  const s = setup([start(0), line('registered', 1, { session: 1 }),
+    line('drop', 301, { count: 1, first: at(300), last: at(300), reason: 'overload' }), line('alive', 1_000)]);
+  const listed = [lnd(H('at-drop'), 300, 'succeeded', [], null, 1n), lnd(H('near-drop'), 330, 'succeeded', [], null, 2n),
+    lnd(H('far'), 500, 'succeeded', [], null, 3n)];
+  const output = await reconcile([...s.args, '--since', at(1), '--until', at(900)], fakeLnd({ listed }), at(1_000));
+  expectSchemaValid(output);
+  const result = output.result as ReconcileResult;
+  expect(result.coverage).toMatchObject({ complete: false, gapCount: 1, gapSeconds: 0 });
+  expect(result.coverage.gaps).toEqual([{ from: at(300), to: at(300), reason: 'dropped', dropped: 1 }]);
+  expect(result.unattributed.map(item => [item.paymentHash, item.coverage])).toEqual([
+    [H('at-drop'), 'gap'], [H('near-drop'), 'boundary'], [H('far'), 'covered']]);
 });

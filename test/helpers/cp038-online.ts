@@ -30,7 +30,7 @@ export const instant = '2026-10-05T12:00:00Z';
 export type Entry = {
   nodePubkey: string; label: string | null; rootKeyId: string; permissions: string[];
   caveats: { type: string; value: string; requested?: string }[]; grade: string;
-  fingerprint: string; outPath: string | null; createdAt: string; verified: boolean;
+  fingerprint: string | null; outPath: string | null; createdAt: string; verified: boolean;
   status: 'active' | 'revoked'; revokedAt: string | null; revokeEvidence: string | null;
   replaces: string | null; replacedBy: string | null;
 };

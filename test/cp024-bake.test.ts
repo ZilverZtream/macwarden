@@ -10,6 +10,7 @@ import { userInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { expect, it, vi } from 'vitest';
 import { Secret } from '../src/secret.js';
+import { addFirstPartyCaveat } from '../src/decode/index.js';
 import { decodeMacaroon } from '../src/decode/index.js';
 import { render } from './helpers/render-adversarial.js';
 import { findLeaks } from "./helpers/leak-check.js";
@@ -126,7 +127,7 @@ function fixture(path: string, preset: Preset = 'invoice-only') {
   const state = { chosen: '', issued: Buffer.alloc(0) as Buffer, checked: Buffer.alloc(0) as Buffer,
     checkedPermissions: [] as string[], accepted: false, writeFault: null as WriteFault | null,
     registryFails: false, writes: 0, flushed: false, closed: false,
-    responseId: null as string | null, responsePermissions: null as string[] | null,
+    responseId: null as string | null, responsePermissions: null as string[] | null, responseCaveat: null as string | null,
     corrupt: false, handle: undefined as Awaited<ReturnType<typeof fs.open>> | undefined };
   const lnd = {
     ...adapter({}),
@@ -142,6 +143,8 @@ function fixture(path: string, preset: Preset = 'invoice-only') {
       state.chosen = id.toString();
       state.issued = state.corrupt ? readFileSync(resolve('test/vectors/negative/truncated-protobuf.macaroon')) :
         responseBytes(state.responseId ?? state.chosen, state.responsePermissions ?? requested);
+      // Audit 1.2.1: a response carrying a caveat (BakeMacaroon never adds one) is refused at B12.
+      if (state.responseCaveat) state.issued = Buffer.from(revealSecret(addFirstPartyCaveat(new Secret(state.issued), state.responseCaveat)));
       register(state.issued);
       return new Secret(state.issued);
     }),
@@ -351,11 +354,12 @@ for (const mode of ['text', 'json'] as const) {
   }
 }
 
-type AfterMutationFault = 'wrong ID' | 'wrong permissions' | 'undecodable response' |
+type AfterMutationFault = 'wrong ID' | 'wrong permissions' | 'undecodable response' | 'extra caveat' |
   'rejected' | 'error' | 'timeout' | WriteFault;
 function inject(f: Fixture, fault: AfterMutationFault) {
   if (fault === 'wrong ID') f.state.responseId = '4294967399';
   else if (fault === 'wrong permissions') f.state.responsePermissions = ['info:read'];
+  else if (fault === 'extra caveat') f.state.responseCaveat = 'lnd-custom tenant-00000000 3a1e61423be44eaf';
   else if (fault === 'undecodable response') f.state.corrupt = true;
   else if (fault === 'write' || fault === 'flush' || fault === 'close') f.state.writeFault = fault;
   else f.lnd.checkMacaroon.mockImplementationOnce(async (mac, requested) => {
@@ -370,6 +374,7 @@ const afterMutationCases: Array<[string, AfterMutationFault, string, string]> = 
   ['B3', 'wrong ID', 'B12', 'decoded root ID differs'],
   ['B3', 'wrong permissions', 'B12', 'decoded permissions differ'],
   ['B3', 'undecodable response', 'B12', 'response cannot decode'],
+  ['B3', 'extra caveat', 'B12', 'response carries a caveat'],
   ['B5', 'rejected', 'B14', 'final credential rejected'],
   ['B5', 'error', 'B14', 'final check returns LND error'],
   ['B5', 'timeout', 'B14', 'final check times out'],

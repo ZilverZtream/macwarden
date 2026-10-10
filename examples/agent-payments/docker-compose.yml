@@ -125,6 +125,9 @@ services:
       - 127.0.0.1:19381:8081
     volumes:
       - ./aperture.yaml:/etc/aperture/aperture.yaml:ro
+      # The demo mounts bob's whole data directory read-only (Aperture reads tls.cert and the invoice
+      # macaroon from it). In production mount only those two files: the directory also holds
+      # admin.macaroon, wallet.db and tls.key.
       - bob-data:/lnd:ro
       - aperture-data:/root/.aperture
 

@@ -152,14 +152,17 @@ export function assertions(report) {
       (typeof test.fullName === 'string' || typeof test.title === 'string')) : []);
 }
 
+// The documented private instrumentation directories, which both Vitest projects exclude
+// (vitest.config.ts, privateScratch). The suite inventory and the no-skips scan both skip
+// them through this one list; other directories and platform suffixes stay visible.
+export const PRIVATE_TEST_SCRATCH = Object.freeze(['test/.tmp', 'test/.sentinels']);
+const privateScratch = (root, path) => PRIVATE_TEST_SCRATCH.includes(relative(root, path).replaceAll('\\', '/'));
+
 export function testFiles(root, directory = join(root, 'test')) {
   if (!existsSync(directory)) return [];
   return readdirSync(directory, { withFileTypes: true }).flatMap(item => {
     const path = join(directory, item.name);
-    const localPath = relative(root, path).replaceAll('\\', '/');
-    // These documented private instrumentation directories are excluded by
-    // both Vitest projects. Other directories and platform suffixes stay visible.
-    if (localPath === 'test/.tmp' || localPath === 'test/.sentinels') return [];
+    if (privateScratch(root, path)) return [];
     if (item.isDirectory()) return testFiles(root, path);
     return item.isFile() && /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(item.name)
       ? [relative(root, path).replaceAll('\\', '/')] : [];
@@ -276,6 +279,8 @@ export function skippedSourceCount(root) {
   function walk(path) {
     for (const item of readdirSync(path, { withFileTypes: true })) {
       const child = join(path, item.name);
+      // Scratch fixtures left by an interrupted or concurrent run are outside the suite.
+      if (privateScratch(root, child)) continue;
       if (item.isDirectory()) walk(child);
       else if (/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(item.name)) {
         count += sourceModifierCount(child);

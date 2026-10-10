@@ -1,5 +1,5 @@
 import { assertHash, base64ToHex, presentPreimage } from '../util/encoding.ts';
-import { array, asObject, boolean, enumName, integer, optionalObject, smallInteger, string, type JsonObject } from './json.ts';
+import { array, asObject, boolean, checkedNonNegative, enumName, identifier, integer, optionalObject, smallInteger, string, type JsonObject } from './json.ts';
 
 /** Parsed LND messages. Field names follow lnrpc; amounts are millisatoshi bigints. */
 
@@ -63,7 +63,7 @@ function parseRoute(value: unknown): Route {
     totalFeesMsat: integer(o, 'total_fees_msat'),
     hops: array(o, 'hops').map(item => {
       const hop = asObject(item, 'hop');
-      return { chanId: integer(hop, 'chan_id').toString(), pubKey: string(hop, 'pub_key'),
+      return { chanId: identifier(hop, 'chan_id'), pubKey: string(hop, 'pub_key'),
         amtToForwardMsat: integer(hop, 'amt_to_forward_msat'), feeMsat: integer(hop, 'fee_msat') };
     }),
   };
@@ -88,10 +88,10 @@ function parseAttempt(value: unknown): HtlcAttempt {
   const route = parseRoute(o.route ?? {});
   const failure = optionalObject(o, 'failure');
   return {
-    attemptId: integer(o, 'attempt_id').toString(),
+    attemptId: identifier(o, 'attempt_id'),
     status: enumName(o, 'status', HTLC_STATUS),
     route,
-    principalMsat: route.totalAmtMsat - route.totalFeesMsat,
+    principalMsat: checkedNonNegative(route.totalAmtMsat - route.totalFeesMsat, 'htlc attempt principal'),
     attemptTimeNs: integer(o, 'attempt_time_ns'),
     resolveTimeNs: integer(o, 'resolve_time_ns'),
     failureCode: failure === undefined ? undefined : enumName(failure, 'code', FAILURE_CODE),
@@ -124,7 +124,7 @@ export function parsePayment(value: unknown): Payment {
     paymentRequest: string(o, 'payment_request'),
     failureReason: enumName(o, 'failure_reason', FAILURE_REASON),
     creationTimeNs: integer(o, 'creation_time_ns'),
-    paymentIndex: integer(o, 'payment_index').toString(),
+    paymentIndex: identifier(o, 'payment_index'),
     htlcs: array(o, 'htlcs').map(parseAttempt),
   };
 }
@@ -166,7 +166,7 @@ export function parseInvoice(value: unknown): Invoice {
     paymentRequest: string(o, 'payment_request'),
     htlcs: array(o, 'htlcs').map(item => {
       const htlc = asObject(item, 'invoice htlc');
-      return { chanId: integer(htlc, 'chan_id').toString(), htlcIndex: integer(htlc, 'htlc_index').toString(),
+      return { chanId: identifier(htlc, 'chan_id'), htlcIndex: identifier(htlc, 'htlc_index'),
         amtMsat: integer(htlc, 'amt_msat'), state: enumName(htlc, 'state', INVOICE_HTLC_STATE) };
     }),
   };
@@ -227,7 +227,7 @@ export function parseChannel(value: unknown): Channel {
   return {
     // LND v0.21 reports the 32-byte channel ID as chan_id and the short channel ID as scid;
     // earlier releases put the short channel ID in chan_id. Routes and forwards use the short one.
-    chanId: ('scid' in o ? integer(o, 'scid') : integer(o, 'chan_id')).toString(),
+    chanId: 'scid' in o ? identifier(o, 'scid') : identifier(o, 'chan_id'),
     channelPoint: string(o, 'channel_point'),
     remotePubkey: string(o, 'remote_pubkey'),
     active: boolean(o, 'active'),
@@ -287,8 +287,8 @@ export interface ForwardingEvent {
 
 export function parseForwardingEvent(value: unknown): ForwardingEvent {
   const o = asObject(value, 'forwarding event');
-  return { timestampNs: integer(o, 'timestamp_ns'), chanIdIn: integer(o, 'chan_id_in').toString(),
-    chanIdOut: integer(o, 'chan_id_out').toString(), amtInMsat: integer(o, 'amt_in_msat'),
+  return { timestampNs: integer(o, 'timestamp_ns'), chanIdIn: identifier(o, 'chan_id_in'),
+    chanIdOut: identifier(o, 'chan_id_out'), amtInMsat: integer(o, 'amt_in_msat'),
     amtOutMsat: integer(o, 'amt_out_msat'), feeMsat: integer(o, 'fee_msat') };
 }
 

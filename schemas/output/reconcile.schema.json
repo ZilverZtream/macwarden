@@ -618,6 +618,7 @@
               "notFound",
               "unknown",
               "ambiguous",
+              "historical",
               "unmatched",
               "deletions",
               "requestedMsat",
@@ -678,6 +679,10 @@
                 "type": "integer",
                 "minimum": 0
               },
+              "historical": {
+                "type": "integer",
+                "minimum": 0
+              },
               "unmatched": {
                 "type": "integer",
                 "minimum": 0
@@ -726,7 +731,8 @@
               "attribution": {
                 "enum": [
                   "single",
-                  "ambiguous"
+                  "ambiguous",
+                  "historical"
                 ]
               },
               "credentials": {

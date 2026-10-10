@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
 import { narrowLabel, run as recommend } from '../src/commands/recommend.js';
 import { LndError } from '../src/errors.js';
+import { shellQuote } from '../src/online.js';
 import { expectSchemaValid } from './helpers/output-schema.js';
 import { render } from '../src/output/index.js';
 import { SPAN_LIMIT, UsageStore, writeUsage } from '../src/watch/usage.js';
@@ -76,8 +77,13 @@ it('RECOMMEND/label observed methods map to the exact permissions LND requires a
     { method: '/lnrpc.Lightning/AddInvoice', calls: 2, lastUsed: '2026-10-08T11:00:00Z', permissions: ['invoices:write'] },
     { method: '/lnrpc.Lightning/GetInfo', calls: 3, lastUsed: '2026-10-08T10:00:00Z', permissions: ['info:read'] }]);
   const commands = (result.result as { commands: string[] }).commands;
-  expect(commands[0]).toMatch(/^macwarden bake --label app1-narrow --uri \/lnrpc\.Lightning\/AddInvoice,\/lnrpc\.Lightning\/GetInfo --out <file> --lnd-rest localhost:18080 /);
-  expect(commands[1]).toMatch(/^after switching the app to the new file: macwarden revoke app1 /);
+  // The --uri list is quoted like the paths (1.2.1): unquoted, PowerShell (a function or npm's .ps1
+  // shim) turns a,b into an array and passes "a b". <file> is a placeholder the operator replaces.
+  expect(commands[0].startsWith(`macwarden bake --label app1-narrow --uri ${shellQuote('/lnrpc.Lightning/AddInvoice,/lnrpc.Lightning/GetInfo')} --out <file> --lnd-rest localhost:18080 `)).toBe(true);
+  if (process.platform === 'win32') expect(commands[0]).toContain(" --uri '/lnrpc.Lightning/AddInvoice,/lnrpc.Lightning/GetInfo' --out <file> ");
+  // A runnable command: the note is a trailing comment, valid in POSIX sh and PowerShell (1.2.1).
+  expect(commands[1]).toMatch(/^macwarden revoke app1 --lnd-rest localhost:18080 .*[^ ] {2}# after switching the app to the new file$/);
+  expect(render(result, 'text')).toMatch(/^next {9}macwarden revoke app1 .* {2}# after switching the app to the new file$/m);
   // Recommendation only: registry and usage are untouched.
   expect(JSON.parse(readFileSync(s.registry, 'utf8')).entries).toHaveLength(1);
 });
@@ -323,7 +329,7 @@ it('RECOMMEND/selectors a credential ID narrows when consistent, but never sugge
     expect(commands[0]).toMatch(/^macwarden bake --label shop-narrow --uri \/lnrpc\.Lightning\/GetInfo /);
   }
   const byLabel = await run(['shop', ...s.args], s.deps);
-  expect((byLabel.result as { commands: string[] }).commands[1]).toMatch(/^after switching the app to the new file: macwarden revoke shop /);
+  expect((byLabel.result as { commands: string[] }).commands[1]).toMatch(/^macwarden revoke shop --lnd-rest \S+ .*[^ ] {2}# after switching the app to the new file$/);
 });
 
 it('RECOMMEND/selectors no narrowing command when the usage identity cannot be resolved to one set of permissions', async () => {

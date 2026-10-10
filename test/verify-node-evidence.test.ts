@@ -149,3 +149,30 @@ it('VERIFY/MW110-02 the REST adapter classifies only LND\'s exact expiry error a
   answer = lndRejects('caveat "ipaddr 203.0.113.9" not satisfied: macaroon locked to different IP address');
   expect(await adapter.checkMacaroon(mac, ['info:read'])).toEqual({ valid: false, reason: 'other', message: 'LND rejected macaroon' });
 });
+
+// 1.2.1: whoever holds a macaroon can append a caveat with any text, and LND quotes the text of
+// the caveat it refused in its message. Such text is never node evidence.
+it('VERIFY/caveat-text a caveat whose text claims a missing root key or a signature mismatch gives no verdict', async () => {
+  for (const [caveat, reason] of [
+    [`root key with id ${targetId} doesn't exist`, 'root-key-missing'],
+    ['signature mismatch', 'signature-mismatch'],
+    [`x\\" root key with id ${targetId} doesn't exist`, 'root-key-missing'],
+  ] as const) {
+    const target = credential(caveat);
+    // Go %q quoting, as the bakery reports a caveat it does not recognise.
+    const quoted = JSON.stringify(caveat);
+    answer = lndRejects(`caveat ${quoted} not satisfied: caveat not recognized`);
+    const { exit, value } = await verify(target, correct);
+    expect(exit, caveat).toBe(1);
+    expect(value, caveat).toMatchObject({ status: 'rejected', rejection: 'other', conclusive: false, rootKeyListed: true });
+    expect(value.rejection, caveat).not.toBe(reason);
+    expect(value.guidance[0]).toBe(REJECTED_INCONCLUSIVE);
+  }
+  // LND's own wording, outside any quoted span, is still classified.
+  const adapter = createLndAdapter({ restUrl: `https://127.0.0.1:${port}`, tlsCert: ca, macaroon: new Secret(readFileSync(own)) });
+  const mac = new Secret(vector('time-before').bytes);
+  answer = lndRejects(`root key with id ${targetId} doesn't exist`);
+  expect(await adapter.checkMacaroon(mac, ['info:read'])).toEqual({ valid: false, reason: 'root-key-missing', message: 'LND rejected macaroon' });
+  answer = lndRejects('verification failed: signature mismatch after caveat verification');
+  expect(await adapter.checkMacaroon(mac, ['info:read'])).toEqual({ valid: false, reason: 'signature-mismatch', message: 'LND rejected macaroon' });
+});

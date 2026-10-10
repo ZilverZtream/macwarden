@@ -10,6 +10,9 @@ const pinned = {
   ajv: '8.20.0',
 };
 const scripts = {
+  // npm test and npm publish build first, so no workflow repeats the build before them (audit O05).
+  pretest: 'npm run build',
+  prepack: 'npm run build',
   test: 'vitest run --project product',
   'test:harness': 'vitest run --project harness-docs',
   'test:related': 'vitest related --run',
@@ -61,7 +64,7 @@ it('CP-001/B10 pins the package, lockfile, scripts and strict TypeScript', () =>
   const lock = JSON.parse(read('package-lock.json'));
   const tsconfig = JSON.parse(read('tsconfig.json'));
   expect(pkg).toMatchObject({
-    name: 'macwarden', version: '1.2.0', type: 'module', license: 'MIT',
+    name: 'macwarden', version: '1.2.1', type: 'module', license: 'MIT',
     engines: { node: '^22.23.2 || ^24.18.1 || >=26.5.1' },
   });
   expect(pkg.dependencies ?? {}).toEqual({});
@@ -70,7 +73,7 @@ it('CP-001/B10 pins the package, lockfile, scripts and strict TypeScript', () =>
   expect(pkg.devDependencies).toEqual(pinned);
   expect(pkg.scripts).toMatchObject(scripts);
   expect(lock.packages['']).toMatchObject({
-    name: 'macwarden', version: '1.2.0', devDependencies: pinned,
+    name: 'macwarden', version: '1.2.1', devDependencies: pinned,
   });
   expect(tsconfig.compilerOptions.strict).toBe(true);
 });
@@ -127,7 +130,9 @@ it('CP-001/B12 runs the pinned CI matrix and commands', () => {
     }
   }
   const runsFor = (job: string) => [...job.matchAll(/^\s*-?\s*run:\s*(.+?)\s*$/gm)].map(match => match[1]);
-  expect(runsFor(testJob)).toEqual(['npm ci', 'npm run lint', 'npm run build', 'npm test']);
+  // npm test builds first (pretest) and runs the product project; the harness-docs project, which
+  // npm test does not select, runs next, so harness and documentation contracts gate CI (audit F20).
+  expect(runsFor(testJob)).toEqual(['npm ci', 'npm run lint', 'npm test', 'npm run test:harness']);
   expect(runsFor(oracleJob)).toEqual(['npm ci', 'npm run build', 'npm run fixture:up', 'npm run test:oracle', 'npm run fixture:down']);
   expect(oracleJob).toMatch(/^ {6}- if: always\(\)\n {8}run: npm run fixture:down$/m);
   // The Core Lightning comparison is its own job: an LND oracle failure cannot skip it.
@@ -168,4 +173,24 @@ it('CP-001/B13 restricts network imports to src/lnd and keeps runtime packages o
         `${relative(root, file)} imports package ${specifier}`).toBe(true);
     }
   }
+});
+
+// Audit 1.2.1: pre-commit classes a macaroon file as binary; "types: [text]" never passed one to the scan.
+it('CP-001/B12 the pre-commit hook receives binary files as well as text', () => {
+  const hook = read('.pre-commit-hooks.yaml');
+  expect(hook).toMatch(/^ {2}types_or: \[text, binary\]$/m);
+  expect(hook).not.toMatch(/^ {2}types: \[text\]$/m);
+});
+
+// Audit F20 and O05: the release runs both Vitest projects and lint before publishing, and
+// builds only through npm test's pretest and npm publish's prepack.
+it('CP-001/B12 the release workflow runs both test projects and lint before publishing, without a separate build', () => {
+  const yaml = read('.github/workflows/release.yml');
+  const runs = [...yaml.matchAll(/^\s*-?\s*run:\s*(.+?)\s*$/gm)].map(match => match[1]);
+  // The npm upgrade before npm ci is pinned by test/packaging.test.ts.
+  expect(runs[0]).toMatch(/^npm install --global npm@\d+\.\d+\.\d+$/);
+  expect(runs.slice(1)).toEqual(['npm ci', 'npm test', 'npm run test:harness', 'npm run lint', '|']);
+  const publish = yaml.indexOf('npm publish --provenance');
+  expect(publish).toBeGreaterThan(yaml.indexOf('run: npm run test:harness'));
+  expect(yaml).not.toMatch(/npm run build/);
 });

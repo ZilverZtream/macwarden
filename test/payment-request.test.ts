@@ -128,6 +128,15 @@ it('PAYJ/deletions DeletePayment names its hash and scope; DeleteAllPayments its
   expect(deletionFacts(all, uint(3, 1), false)).toEqual({ paymentHash: null, scope: 'all-payments', extraction: 'complete' });
   expect(deletionFacts(all, uint(1, 1), false)).toMatchObject({ scope: 'failed-payments' });
   expect(deletionFacts(all, message(uint(1, 1), uint(2, 1)), false)).toMatchObject({ scope: 'failed-htlcs' });
+  // LND v0.21.4 refuses all_payments with failed_payments_only or failed_htlcs_only (rpcserver.go
+  // DeleteAllPayments): nothing is deleted, so the scope is `none` (1.2.1 follow-up to audit F09).
+  expect(deletionFacts(all, message(uint(3, 1), uint(2, 1)), false)).toEqual({ paymentHash: null, scope: 'none', extraction: 'complete' });
+  expect(deletionFacts(all, message(uint(3, 1), uint(1, 1)), false)).toEqual({ paymentHash: null, scope: 'none', extraction: 'complete' });
+  expect(deletionFacts(all, message(uint(1, 1), uint(2, 1), uint(3, 1)), false)).toMatchObject({ scope: 'none' });
+  expect(deletionFacts(all, message(uint(3, 1), uint(1, 1), uint(1, 0)), false)).toMatchObject({ scope: 'all-payments' });
+  // failed_htlcs_only alone is a valid request (LND v0.21.4 removes every payment's failed attempts): its own scope, never `none` (audit F09).
+  expect(deletionFacts(all, uint(2, 1), false)).toEqual({ paymentHash: null, scope: 'failed-htlcs', extraction: 'complete' });
+  expect(deletionFacts(all, message(uint(2, 1), uint(2, 0)), false)).toMatchObject({ scope: 'none' });
   expect(deletionFacts(all, Buffer.alloc(0), false)).toMatchObject({ scope: 'none' });
   expect(deletionFacts(all, null, true)).toMatchObject({ extraction: 'payload-too-large' });
   expect(deletionFacts(all, Buffer.from([0x08]), false)).toMatchObject({ extraction: 'malformed' });
@@ -153,6 +162,37 @@ it('PAYJ/bolt11 a checksum, character, case or padding error, or a missing p fie
   expect((decodeBolt11(skipped) as { paymentHash: string }).paymentHash).toBe(other.toString('hex'));
   const twice = invoice({ hash: other, before: [field(1, toGroups(paymentHash))] });
   expect((decodeBolt11(twice) as { paymentHash: string }).paymentHash).toBe(paymentHash.toString('hex'));
+});
+
+it('PAYJ/bolt11 non-ASCII characters are invalid before case folding: Kelvin sign, long s, dotted and dotless I, fullwidth (PF-1)', () => {
+  // A hash whose invoice has every substituted letter in its data part.
+  let n = 0;
+  const dataPart = (candidate: string) => candidate.slice(candidate.lastIndexOf('1') + 1);
+  while (!['k', 's', 'l', 'q'].every(letter => dataPart(invoice({ hash: hash(`pf1-${n}`), amount: '10u' })).includes(letter))) n++;
+  const paymentHash = hash(`pf1-${n}`);
+  const text = invoice({ hash: paymentHash, amount: '10u' });
+  const upper = text.toUpperCase();
+  expect(decodeBolt11(upper)).toEqual({ paymentHash: paymentHash.toString('hex'), amountMsat: 1_000_000n });
+  // Each replaces one data character with a look-alike that a Unicode case mapping folds onto, or
+  // leaves beside, an ASCII bech32 character.
+  const swaps: [string, string, string][] = [
+    [upper, 'K', 'K'], // KELVIN SIGN: toLowerCase gives 'k', toUpperCase leaves it
+    [text, 's', 'ſ'], // LATIN SMALL LETTER LONG S: toUpperCase gives 'S'
+    [text, 'l', 'ı'], // LATIN SMALL LETTER DOTLESS I: toUpperCase gives 'I'
+    [upper, 'L', 'İ'], // LATIN CAPITAL LETTER I WITH DOT ABOVE: toLowerCase gives 'i' + U+0307
+    [upper, 'Q', 'Ｑ'], // FULLWIDTH LATIN CAPITAL LETTER Q: toLowerCase gives U+FF51
+    [text, 'q', 'ｑ'],
+  ];
+  for (const [base, ascii, lookalike] of swaps) {
+    const at = base.indexOf(ascii, base.lastIndexOf('1') + 1);
+    expect(at, `${ascii} in the data part`).toBeGreaterThan(0);
+    const swapped = `${base.slice(0, at)}${lookalike}${base.slice(at + 1)}`;
+    expect(decodeBolt11(swapped), `U+${lookalike.charCodeAt(0).toString(16)}`).toBeNull();
+    expect(paymentFacts(SEND, bytes(5, swapped), false)).toMatchObject({ paymentHash: null, extraction: 'invoice-invalid' });
+  }
+  // In the human-readable part too, and a non-ASCII character anywhere else.
+  expect(decodeBolt11(`K${upper.slice(1)}`)).toBeNull();
+  expect(decodeBolt11(`${text}é`)).toBeNull();
 });
 
 it('PAYJ/bolt11 bounds: above the character limit is too long, and decoding stays linear in the length', () => {
@@ -197,4 +237,28 @@ it('PAYJ/middleware only a selected method\'s request payload is passed on, as a
   expect(oversized.oversizedPayload).toBe(true);
   const exact = decodeMiddlewareRequest(middlewareRequest({ method: SEND, serialized: Buffer.alloc(MAX_PAYLOAD_BYTES, 1) }), selected);
   expect(exact.payload.length).toBe(MAX_PAYLOAD_BYTES);
+});
+
+// 1.2.1: a satoshi amount or fee limit times 1,000, or an invoice amount, can exceed the int64
+// millisatoshi range the journal records; such a value is no amount, never a record the reader refuses.
+it('PAYJ/bounds amounts above the int64 millisatoshi range are no amount; the range itself is kept', () => {
+  const h = hash('bounds');
+  const max = (1n << 63n) - 1n;
+  const over = paymentFacts(SEND, message(bytes(3, h), uint(2, 1n << 62n), uint(7, max)), false);
+  expect(over).toMatchObject({ paymentHash: h.toString('hex'), amountMsat: null, amountSource: null, feeLimitMsat: null, extraction: 'complete' });
+  const atMax = paymentFacts(SEND, message(bytes(3, h), uint(12, max), uint(13, max)), false);
+  expect(atMax).toMatchObject({ amountMsat: max.toString(), amountSource: 'request', feeLimitMsat: max.toString() });
+  const satMax = paymentFacts(SEND, message(bytes(3, h), uint(2, 9_223_372_036_854_775n), uint(7, 9_223_372_036_854_775n)), false);
+  expect(satMax).toMatchObject({ amountMsat: '9223372036854775000', feeLimitMsat: '9223372036854775000' });
+  // An invoice amount of 21 million bitcoin fits; one of 10 billion bitcoin does not.
+  expect(paymentFacts(SEND, message(bytes(5, invoice({ hash: h, amount: '21000000' }))), false).amountMsat).toBe('2100000000000000000');
+  expect(paymentFacts(SEND, message(bytes(5, invoice({ hash: h, amount: '10000000000' }))), false))
+    .toMatchObject({ paymentHash: h.toString('hex'), amountMsat: null, amountSource: null, extraction: 'complete' });
+});
+
+// 1.2.1: proto3 treats an explicitly empty string as absent, and LND then pays the request's hash.
+it('PAYJ/send-payment an explicitly empty payment_request with a valid hash is journaled with the hash', () => {
+  const h = hash('empty-invoice');
+  expect(paymentFacts(SEND, message(bytes(3, h), bytes(5, Buffer.alloc(0)), uint(2, 7)), false))
+    .toMatchObject({ paymentHash: h.toString('hex'), amountMsat: '7000', amountSource: 'request', extraction: 'complete' });
 });

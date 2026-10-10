@@ -4,6 +4,7 @@
 // exist for the current user; it reads them like any other scan path (offline,
 // read-only, protected names never opened). Sources are cited in docs/spec.md.
 import { win32, posix } from 'node:path';
+import { Cancelled, cancellable, checkCancellation } from '../cancellation.js';
 
 export type AgentConfigLocation = { client: string; path: string };
 
@@ -57,7 +58,12 @@ export function agentConfigCandidates({ platform, home, cwd, env }: AgentConfigE
 
 export type AgentConfigDiscovery = { found: AgentConfigLocation[]; absent: AgentConfigLocation[] };
 
-/** Splits the candidates into those that exist (any file type; scan applies its own rules) and those that do not. */
+/**
+ * Splits the candidates into those that exist (any file type; scan applies its own rules) and
+ * those that do not. Each lstat races the invocation's cancellation signal like the scan's own
+ * file system layer, so a stalled home or configuration mount cannot hold the command after an
+ * interrupt: discovery rejects with Cancelled (exit 6), never records the location as absent.
+ */
 export async function discoverAgentConfigs(candidates: AgentConfigLocation[],
   lstat: (path: string) => Promise<unknown>): Promise<AgentConfigDiscovery> {
   const found: AgentConfigLocation[] = [];
@@ -66,8 +72,12 @@ export async function discoverAgentConfigs(candidates: AgentConfigLocation[],
   for (const candidate of candidates) {
     if (seen.has(candidate.path)) continue;
     seen.add(candidate.path);
-    try { await lstat(candidate.path); found.push(candidate); }
-    catch { absent.push(candidate); }
+    checkCancellation();
+    try { await cancellable(() => lstat(candidate.path)); found.push(candidate); }
+    catch (error) {
+      if (error instanceof Cancelled) throw error;
+      absent.push(candidate);
+    }
   }
   return { found, absent };
 }

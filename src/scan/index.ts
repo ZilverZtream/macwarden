@@ -438,13 +438,21 @@ function byStartThenDetector(a: Hit, b: Hit): number {
 
 // Punctuation that commonly follows a URI in text (markdown, prose, YAML flow, shell) but is
 // matched by the lndconnect pattern. It is removed only when the URI as matched does not parse.
-const TRAILING_PUNCTUATION = /[`)\]}>.,;:!?'"*]+$/;
+// Stripped by one backward scan: the anchored regex `[...]+$` this replaced backtracked
+// quadratically on a match that ends in other characters (audit 1.2.1), so one hostile 262 KB
+// line cost 35 s.
+const TRAILING_PUNCTUATION = new Set('`)]}>.,;:!?\'"*');
+function withoutTrailingPunctuation(text: string): string {
+  let end = text.length;
+  while (end > 0 && TRAILING_PUNCTUATION.has(text[end - 1])) end -= 1;
+  return text.slice(0, end);
+}
 
 /** The credential an lndconnect match carries, and the match's length in code points once confirmed. */
 function lndconnectCredential(text: string): { bytes: Buffer; length: number } | null {
   const bytes = parseLndconnect(text, { standardBase64: true });
   if (bytes) return { bytes, length: Array.from(text).length };
-  const trimmed = text.replace(TRAILING_PUNCTUATION, '');
+  const trimmed = withoutTrailingPunctuation(text);
   if (trimmed === text) return null;
   const retried = parseLndconnect(trimmed, { standardBase64: true });
   return retried ? { bytes: retried, length: Array.from(trimmed).length } : null;
@@ -534,7 +542,7 @@ function scanLine(path: string, line: number, text: string, now: Date, ctx: Scan
       confirmedL402.add(hit);
       lineFindings.push({ hit, finding });
     }
-    spans.push(...l402Spans);
+    for (const span of l402Spans) spans.push(span);
     spans.sort((a, b) => a.start - b.start);
   }
   let spanIndex = 0;
@@ -768,6 +776,14 @@ function fileCredential(bytes: Buffer): Buffer | null {
 
 type BytesOutcome = { findings: ScanFinding[]; dropped: number } | { skip: 'size' | 'binary' };
 
+/**
+ * The content of a file or blob whose lndconnect URIs were dropped, for --git-history to tell a
+ * blob the walk already counted (1.2.1). CR LF reads as LF, as git may convert it on checkout.
+ */
+function droppedContentKey(bytes: Buffer): string {
+  return createHash('sha256').update(bytes.toString('latin1').replace(/\r\n/g, '\n'), 'latin1').digest('hex');
+}
+
 /** Scans one file's or blob's bytes exactly as the file walk does. */
 // `name` is the file's base name, used only to recognise MCP JSON configs; history blobs pass ''.
 function scanBytes(safePath: string, bytes: Buffer, macaroonFile: boolean, now: Date, ctx: ScanContext, name = ''): BytesOutcome {
@@ -870,6 +886,8 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
   const ctx: ScanContext = { secrets, facts: new Map(), l402: new Map() };
   let filesScanned = 0;
   let dropped = 0;
+  // (reported path, content) of every walked file with dropped URIs, for --git-history.
+  const walkDropped = new Set<string>();
   let ignored = 0;
   const ignoredFingerprints = new Set<string>();
   async function readIgnoreFile(path: string, optional: boolean): Promise<IgnoreEntry[]> {
@@ -919,7 +937,7 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
   type FileEvent =
     | { type: 'skip'; path: string; reason: string; identity?: string }
     | { type: 'dup'; path: string; identity: string }
-    | { type: 'file'; path: string; identity: string; findings: ScanFinding[]; dropped: number }
+    | { type: 'file'; path: string; identity: string; findings: ScanFinding[]; dropped: number; droppedKey?: string }
     | { type: 'error'; error: unknown };
 
   // The parent directory of a walked file: its resolved path and the identity the walk saw.
@@ -991,7 +1009,8 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
         const safePath = redactPath(reportedPath(path));
         for (const finding of outcome.findings) finding.path = safePath;
       }
-      return { type: 'file', path, identity, findings: outcome.findings, dropped: outcome.dropped };
+      return { type: 'file', path, identity, findings: outcome.findings, dropped: outcome.dropped,
+        ...(outcome.dropped ? { droppedKey: droppedContentKey(bytes) } : {}) };
     } catch (error) {
       if (error instanceof Cancelled || error instanceof ScanAnalysisFailure) throw error;
       if (explicit) return { type: 'error', error: new InputError('input-read', 'cannot read scan path') };
@@ -1027,6 +1046,7 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
     if (event.type === 'skip') { skip(event.path, event.reason); return; }
     for (const finding of event.findings) addFinding(finding);
     dropped += event.dropped;
+    if (event.droppedKey !== undefined) walkDropped.add(`${redactPath(reportedPath(event.path))}\0${event.droppedKey}`);
     filesScanned++;
     scannedFiles.add(event.identity);
     if (event.findings.length) owners.set(event.identity, { arg: currentArg, findings: event.findings });
@@ -1249,17 +1269,24 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
     // Like the walk: text is read up to TEXT_LIMIT; a larger *.macaroon blob keeps only its
     // first MACAROON_LIMIT + 1 bytes and is reported undecodable with that fingerprint.
     const keep = (i: number) => sizes[i] <= TEXT_LIMIT ? sizes[i] : needs(i) & 2 ? MACAROON_LIMIT + 1 : 0;
-    const readable: number[] = [];
-    for (let i = 0; i < reading.length; i++) if (keep(i) > 0) readable.push(i);
-    await readBlobs(git, directory, repository, readable.map(i => names[i]), j => keep(readable[j]), (j, bytes) => {
+    // Dropped URIs of a blob read in this call, while it is not yet known whether the walk
+    // counted them: only when the work tree holds the same content at every path the blob was
+    // committed at, as a finding is skipped only at (path, fingerprint) pairs the walk reported.
+    const blobDropped = new Map<number, { count: number; key: string; counted: boolean }>();
+    const scanBlob = (i: number, bytes: Buffer): void => {
       checkCancellation();
-      const i = readable[j];
       const b = reading[i];
       blobsScanned++;
       for (const bit of [1, 2]) {
         if (!(needs(i) & bit)) continue;
         const macaroonFile = bit === 2;
         const outcome = !macaroonFile && sizes[i] > TEXT_LIMIT ? SIZE_SKIP : scanBytes('', bytes, macaroonFile, now, ctx);
+        // Counted once per blob and use, like the walk counts it once per file (1.2.1), unless
+        // the walk already counted it: see blobDropped below.
+        if (!('skip' in outcome) && outcome.dropped) {
+          if (walkDropped.size === 0) dropped += outcome.dropped;
+          else blobDropped.set(b * 2 + (macaroonFile ? 1 : 0), { count: outcome.dropped, key: droppedContentKey(bytes), counted: false });
+        }
         const empty = !('skip' in outcome) && outcome.findings.length === 0;
         done[b] |= bit;
         if (!empty) outcomes.set(b * 2 + (macaroonFile ? 1 : 0), outcome);
@@ -1269,7 +1296,31 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
           if (!empty) historyOutcomes.set(key, outcome);
         }
       }
-    });
+    };
+    // An empty blob needs no read: it is scanned (and counted) as the empty file it is, like
+    // the walk scans an empty file. keep(i) = 0 otherwise means a text blob over the size limit.
+    const readable: number[] = [];
+    for (let i = 0; i < reading.length; i++) {
+      if (sizes[i] === 0) scanBlob(i, Buffer.alloc(0));
+      else if (keep(i) > 0) readable.push(i);
+    }
+    await readBlobs(git, directory, repository, readable.map(i => names[i]), j => keep(readable[j]),
+      (j, bytes) => scanBlob(readable[j], bytes));
+    if (blobDropped.size) {
+      const droppedPaths = new Map<number, string>();
+      for (let w = 0; w < wantedCount; w++) {
+        if ((w & 4095) === 0) checkCancellation();
+        const at = wanted[w];
+        const p = table.path[at];
+        const pending = blobDropped.get(table.blob[at] * 2 + (pathState[p] & MACAROON ? 1 : 0));
+        if (!pending || pending.counted) continue;
+        let safePath = droppedPaths.get(p);
+        if (safePath === undefined) droppedPaths.set(p, safePath = redactPath(reportedPath(joined(p))));
+        if (walkDropped.has(`${safePath}\0${pending.key}`)) continue;
+        pending.counted = true;
+        dropped += pending.count;
+      }
+    }
     // Oldest first. A credential is reported at the oldest commit and path where that exact
     // (path, fingerprint) pair is new; it is skipped only where that pair was already reported
     // (by the work tree or an older blob). Per (blob, use) a record keeps the blob's

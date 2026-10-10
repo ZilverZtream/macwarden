@@ -28,6 +28,8 @@ export type OutputQueue = {
   dropped(): number;
   /** Resolves true once everything queued is written, or false after timeoutMs. */
   drain(timeoutMs: number): Promise<boolean>;
+  /** After close: resolves true once the write already in flight has completed, or false after timeoutMs. */
+  settle(timeoutMs: number): Promise<boolean>;
   /**
    * Stops output for good: queued lines are dropped and counted, later lines are dropped,
    * and a writer built with the same stop predicate stops retrying. Used when a final
@@ -89,14 +91,25 @@ export function createOutputQueue(writeChunk: ChunkWriter, limitBytes = OUTPUT_L
     writeChunk(chunk).then(written => {
       busy = false;
       const count = Math.max(0, Math.min(written, chunk.length));
-      queued -= count;
-      // A partial write keeps the rest at the front so lines stay in order.
-      if (count < chunk.length) queue.unshift(chunk.subarray(count));
+      if (count < chunk.length) {
+        // A partial write returns the rest as the lines it came from (only the first one
+        // sliced), so a later loss counts every line that was not completely written.
+        let skip = count;
+        let first = 0;
+        while (skip >= parts[first].length) { skip -= parts[first].length; first++; }
+        const rest = [parts[first].subarray(skip), ...parts.slice(first + 1)];
+        // After close nothing more is written: the rest is dropped and counted (1.2.1).
+        if (closed) dropped += rest.length;
+        else queue.unshift(...rest);
+      }
+      // close() already emptied the queue and its byte count.
+      if (!closed) queued -= count;
       pump();
     }, () => {
       busy = false;
       closed = true;
-      dropped += queue.length;
+      // The batch being written is lost with everything still queued (1.2.1).
+      dropped += parts.length + queue.length;
       queue.length = 0;
       queued = 0;
       idle();
@@ -121,6 +134,15 @@ export function createOutputQueue(writeChunk: ChunkWriter, limitBytes = OUTPUT_L
       queue.length = 0;
       queued = 0;
       idle();
+    },
+    /** Resolves once no write is in flight (after close, the queue is empty): true when settled within the deadline. */
+    settle(timeoutMs) {
+      if (!busy) return Promise.resolve(true);
+      return new Promise(resolve => {
+        const timer = setTimeout(() => { waiters.delete(done); resolve(false); }, timeoutMs);
+        const done = () => { clearTimeout(timer); waiters.delete(done); resolve(true); };
+        waiters.add(done);
+      });
     },
     drain(timeoutMs) {
       if (!busy && !queue.length) return Promise.resolve(true);

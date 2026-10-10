@@ -6,6 +6,8 @@ import { Secret } from '../secret.js';
 import { isProtectedPath } from '../protected-path.js';
 import { parseLndconnect } from './lndconnect.js';
 import { InputError, UsageError } from '../errors.js';
+import { Cancelled, cancellationSignal } from '../cancellation.js';
+import { readBounded } from '../bounded-file.js';
 import { decodeMacaroon, DecodeError, isL402Macaroon } from '../decode/index.js';
 import { decodeRuneText, RUNE_ALPHABET, RUNE_SHORTEST_TEXT, RUNE_TEXT_LIMIT } from '../decode/rune.js';
 
@@ -127,11 +129,19 @@ function parseBytes(bytes: Buffer, forms: Forms = {}): Buffer {
   return parseText(bytes.subarray(start).toString('utf8'), forms);
 }
 
+/**
+ * Reads at most RAW_INPUT_LIMIT bytes from stdin. The wait for more data also listens for the
+ * command's cancellation signal (SIGINT, SIGTERM, SIGHUP): a producer that keeps the pipe open
+ * cannot hold the command after a stop, every listener is released, and the interrupt rejects
+ * with Cancelled (exit 6) rather than an input failure.
+ */
 async function stdinBytes(stream: Readable): Promise<Buffer> {
+  const signal = cancellationSignal();
   const parts: Buffer[] = [];
   let total = 0;
   try {
     for (;;) {
+      if (signal?.aborted) throw new Cancelled();
       const remaining = RAW_INPUT_LIMIT + 1 - total;
       stream.read(0);
       // Object-mode Readables return an entire object even when read(size)
@@ -151,12 +161,15 @@ async function stdinBytes(stream: Readable): Promise<Buffer> {
             stream.off('readable', ready);
             stream.off('end', ready);
             stream.off('error', failed);
+            signal?.removeEventListener('abort', cancelled);
           };
           const ready = () => { cleanup(); resolve(); };
           const failed = () => { cleanup(); reject(new InputError('input-read')); };
+          const cancelled = () => { cleanup(); reject(new Cancelled()); };
           stream.once('readable', ready);
           stream.once('end', ready);
           stream.once('error', failed);
+          signal?.addEventListener('abort', cancelled, { once: true });
         });
         continue;
       }
@@ -165,26 +178,15 @@ async function stdinBytes(stream: Readable): Promise<Buffer> {
       if (total > RAW_INPUT_LIMIT) throw new InputError('input-read');
       parts.push(bytes);
     }
-  } catch {
+  } catch (error) {
     stream.destroy();
+    if (error instanceof Cancelled) throw error;
     throw new InputError('input-read');
   }
   return Buffer.concat(parts);
 }
 
 const RAW_INPUT_LIMIT = 1_048_576;
-
-async function fileBytes(handle: fs.FileHandle): Promise<Buffer> {
-  const bytes = Buffer.allocUnsafe(RAW_INPUT_LIMIT + 1);
-  let total = 0;
-  while (total < bytes.length) {
-    const result = await handle.read(bytes, total, bytes.length - total, null);
-    if (!result.bytesRead) break;
-    total += result.bytesRead;
-  }
-  if (total > RAW_INPUT_LIMIT) throw new InputError('input-read');
-  return bytes.subarray(0, total);
-}
 
 export async function readCredential(
   arg: string,
@@ -223,7 +225,10 @@ export async function readCredential(
       if (!openedStat.isFile() || openedStat.dev !== sourceStat.dev || openedStat.ino !== sourceStat.ino) {
         throw new InputError('input-read');
       }
-      bytes = await fileBytes(handle);
+      // Allocation follows the opened file's size (a credential is a few hundred bytes), never
+      // the limit; at most RAW_INPUT_LIMIT + 1 bytes are read, so a larger file still fails.
+      bytes = await readBounded(handle, RAW_INPUT_LIMIT, openedStat.size);
+      if (bytes.length > RAW_INPUT_LIMIT) throw new InputError('input-read');
     } catch {
       readFailed = true;
     } finally {

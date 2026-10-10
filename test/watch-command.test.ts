@@ -714,6 +714,8 @@ it('WATCH/canary-burst a canary used in the same turn as 25,000 ordinary calls s
   const usage = UsageStore.parse(readFileSync(`${s.registry}.usage.json`, 'utf8'));
   expect(usage.droppedAttributions).toBe(summary.droppedAttributions);
   expect(usage.lastAttributionDrop).toBe(new Date(usage.lastAttributionDrop!).toISOString());
+  // The drop time comes from watch's clock (1.2.1), like every other usage time, not the host's.
+  expect(usage.lastAttributionDrop).toBe('2026-10-08T12:00:00.000Z');
   expect(usage.maybeIncomplete()).toBe(true);
 }, 60_000);
 
@@ -773,7 +775,8 @@ it('WATCH/unreachable a run stopped before any session registered does not repor
   const { result } = await watchUntil([...s.args, '--lnd-grpc', 'localhost:10001'], silent, async stop => {
     await registering; await settle(); stop();
   });
-  expect(result).toMatchObject({ ok: false, error: { code: 4, step: 'W7' } });
+  // Stopped by an interrupt before any session registered: interrupted (6), naming the endpoint it waited for (1.2.1).
+  expect(result).toMatchObject({ ok: false, error: { code: 6, step: 'cancelled' } });
   expect(result.error!.message).toContain('localhost:10001 (from --lnd-grpc)');
 });
 
@@ -938,4 +941,20 @@ it('WATCH/schema every --json event type and the final document validate against
   expectDocumentValid(JSON.parse(render(result, 'json')));
   const failed = await watchUntil([...s.args, '--json', '--until', '0s'], fakeRegister(script), async () => undefined);
   expect(failed.result).toMatchObject({ ok: false, error: { code: 2, step: 'W1' } });
+});
+
+// 1.2.1 (owner finding): an explicit :443 is 443, not the empty default the URL parser leaves.
+it('WATCH/grpc-port an explicit gRPC port 443 is kept', async () => {
+  const s = setup();
+  let opened!: () => void;
+  const registering = new Promise<void>(resolve => { opened = resolve; });
+  const silent: Register = (() => {
+    let end!: (value: MiddlewareEnd) => void;
+    const ended = new Promise<MiddlewareEnd>(resolve => { end = resolve; });
+    opened();
+    return { ended, close: () => end({ registered: false, code: 4, stage: 'middleware-stream', message: 'closed', disabled: false }) };
+  }) as Register;
+  const { result } = await watchUntil([...s.args, '--lnd-grpc', 'localhost:443'], silent, async stop => { await registering; await settle(); stop(); });
+  expect(result.error!.message).toContain('localhost:443 (from --lnd-grpc)');
+  expect(result.error!.message).not.toContain('localhost:0');
 });

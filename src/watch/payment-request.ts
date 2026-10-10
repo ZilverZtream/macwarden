@@ -116,6 +116,11 @@ function* fields(data: Buffer): Generator<Field> {
 
 /** proto3 int64: the varint is the two's complement; a negative amount is no amount. */
 function int64(value: bigint): bigint | null { return value >= INT64_SIGN ? null : value; }
+// The journal records millisatoshi amounts up to int64 (LND's own range). A satoshi amount times
+// 1,000, or an invoice amount, can exceed it: such a value is no amount (1.2.1), never a record
+// the journal reader refuses.
+const MSAT_MAX = INT64_SIGN - 1n;
+function bounded(value: bigint | null): bigint | null { return value === null || value < 0n || value > MSAT_MAX ? null : value; }
 
 const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 function text(bytes: Buffer): string {
@@ -143,6 +148,9 @@ function sendPayment(payload: Buffer): PaymentFacts {
       case 3: if (field.wire === 2) hash = field.bytes; break;
       case 5:
         if (field.wire !== 2) break;
+        // proto3: an explicitly empty string is the same as an absent one, and LND then pays the
+        // hash of field 3 (audit 1.2.1).
+        if (field.bytes!.length === 0) { invoiceTooLong = false; invoice = null; break; }
         // A UTF-8 character is at most 4 bytes: anything longer is over the character limit.
         if (field.bytes!.length > MAX_INVOICE_CHARS * 4) { invoiceTooLong = true; invoice = null; }
         else { invoiceTooLong = false; invoice = text(field.bytes!); }
@@ -155,9 +163,9 @@ function sendPayment(payload: Buffer): PaymentFacts {
     }
   }
   // Zero means unset in proto3; LND refuses a request that sets both units, or a negative value.
-  const requested = amtMsat === null || amt === null ? null : amtMsat > 0n ? amtMsat : amt > 0n ? amt * 1000n : null;
+  const requested = bounded(amtMsat === null || amt === null ? null : amtMsat > 0n ? amtMsat : amt > 0n ? amt * 1000n : null);
   // Both unset: SendPaymentV2 considers only zero-fee routes, so the limit is 0.
-  const feeLimit = feeMsat === null || feeSat === null ? null : feeMsat > 0n ? feeMsat : feeSat * 1000n;
+  const feeLimit = bounded(feeMsat === null || feeSat === null ? null : feeMsat > 0n ? feeMsat : feeSat * 1000n);
   const result: PaymentFacts = { paymentHash: null, amountMsat: null, amountSource: null,
     feeLimitMsat: feeLimit === null ? null : feeLimit.toString(), amp, extraction: 'complete' };
   if (invoiceTooLong) result.extraction = 'invoice-too-long';
@@ -167,7 +175,8 @@ function sendPayment(payload: Buffer): PaymentFacts {
     else if (decoded === null) result.extraction = 'invoice-invalid';
     else {
       result.paymentHash = decoded.paymentHash;
-      if (decoded.amountMsat !== null) { result.amountMsat = decoded.amountMsat.toString(); result.amountSource = 'invoice'; }
+      const invoiceAmount = bounded(decoded.amountMsat);
+      if (invoiceAmount !== null) { result.amountMsat = invoiceAmount.toString(); result.amountSource = 'invoice'; }
     }
   } else if (hash) {
     result.paymentHash = hashHex(hash);
@@ -246,9 +255,15 @@ export function deletionFacts(method: string, payload: Buffer | null, oversized:
       return { paymentHash, scope: flags.get(2) ? 'failed-htlcs' : 'payment',
         extraction: hash !== null && paymentHash === null ? 'malformed' : 'complete' };
     }
-    // DeleteAllPayments: LND refuses a request that selects nothing, or both failed_payments_only and all_payments.
-    const scope = flags.get(3) ? 'all-payments' : flags.get(1) ? 'failed-payments' : 'none';
-    return { paymentHash: null, scope: flags.get(2) && scope !== 'none' ? 'failed-htlcs' : scope, extraction: 'complete' };
+    // DeleteAllPayments (LND v0.21.4 rpcserver.go DeleteAllPayments): failed_htlcs_only removes
+    // the failed attempts of every payment, alone or with failed_payments_only (then of failed
+    // payments only), so it is a deletion of its own, `failed-htlcs` (1.2.1: alone it was `none`).
+    // LND refuses a request that selects nothing, and all_payments with either other flag: both
+    // delete nothing, so their scope is `none`.
+    const scope = flags.get(3)
+      ? (flags.get(1) || flags.get(2) ? 'none' : 'all-payments')
+      : flags.get(2) ? 'failed-htlcs' : flags.get(1) ? 'failed-payments' : 'none';
+    return { paymentHash: null, scope, extraction: 'complete' };
   } catch { return { paymentHash: null, scope: 'none', extraction: 'malformed' }; }
 }
 
@@ -286,23 +301,26 @@ function hrpAmount(value: string): bigint | 'invalid' {
 
 /**
  * The payment hash and amount of a BOLT11 payment request, 'too-long' above MAX_INVOICE_CHARS,
- * or null when it is not a well-formed invoice (bad characters, mixed case, bad checksum, no
+ * or null when it is not a well-formed invoice (a character outside printable US-ASCII, mixed case, bad checksum, no
  * 52-group `p` field, nonzero padding). The signature is not verified: LND does that and refuses
  * the payment otherwise; the hash is what LND would pay. The first `p` field of the right
  * length is used, as LND's zpay32 uses it.
  */
 export function decodeBolt11(input: string): { paymentHash: string; amountMsat: bigint | null } | 'too-long' | null {
   if (input.length > MAX_INVOICE_CHARS) return 'too-long';
+  // Printable US-ASCII only, checked before any case folding (PF-1): Unicode case mappings turn
+  // the Kelvin sign U+212A into 'k', U+0130 into 'i' plus a combining dot, and leave U+017F,
+  // U+0131 and fullwidth letters unchanged by one of the two foldings, so a non-ASCII character
+  // could pass the one-case check or fold into a bech32 character. LND's decoder refuses them.
+  for (let index = 0; index < input.length; index++) {
+    const code = input.charCodeAt(index);
+    if (code < 33 || code > 126) return null;
+  }
   const lower = input.toLowerCase();
   if (lower !== input && input.toUpperCase() !== input) return null;
   const separator = lower.lastIndexOf('1');
   if (separator < 3) return null;
   const hrp = lower.slice(0, separator);
-  // Printable US-ASCII only in the human-readable part (BIP-173).
-  for (let index = 0; index < hrp.length; index++) {
-    const code = hrp.charCodeAt(index);
-    if (code < 33 || code > 126) return null;
-  }
   const dataLength = lower.length - separator - 1;
   if (dataLength < TIMESTAMP_GROUPS + SIGNATURE_GROUPS + CHECKSUM_GROUPS) return null;
   const data = new Uint8Array(dataLength);

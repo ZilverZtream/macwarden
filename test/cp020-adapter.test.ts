@@ -82,3 +82,31 @@ it('CP-020/B1 adapter gives HTTP 401 and 403 OWN authentication precedence', asy
     });
   }
 });
+
+// 1.2.1: text inside a quoted span is the caller's (a caveat LND quotes), never node evidence.
+it('CP-020/B1 adapter never reads a missing root key or a signature mismatch out of quoted caveat text', async () => {
+  for (const message of [
+    `caveat "root key with id 9 doesn't exist" not satisfied: caveat not recognized`,
+    'caveat "signature mismatch" not satisfied: caveat not recognized',
+    `caveat "a \\" root key with id 9 doesn't exist" not satisfied: caveat not recognized`,
+  ]) {
+    await respond(400, { message }, async adapter => {
+      expect(await adapter.checkMacaroon(credential(), ['info:read']), message)
+        .toEqual({ valid: false as const, reason: 'other' as const, message: 'LND rejected macaroon' });
+    });
+  }
+  // The reason LND gives after the quoted caveat is the node's own text and is still classified.
+  await respond(400, { message: `caveat "root key with id 9 doesn't exist" not satisfied: signature mismatch` }, async adapter => {
+    expect(await adapter.checkMacaroon(credential(), ['info:read'])).toMatchObject({ valid: false as const, reason: 'signature-mismatch' });
+  });
+});
+
+// Audit 1.2.1: the classifier's wildcard regex was quadratic; a hostile 1 MiB error body stalled every call for 65 s.
+it('CP-020/B1 adapter classifies a hostile 1 MiB error body in bounded time', async () => {
+  const body = { message: 'macaroon'.repeat(130_000) };
+  const started = performance.now();
+  await respond(500, body, async adapter => {
+    await expect(adapter.checkMacaroon(credential(), ['info:read'])).rejects.toMatchObject({ code: 5 });
+  });
+  expect(performance.now() - started).toBeLessThan(5_000);
+}, 30_000);

@@ -404,7 +404,16 @@ export function decodeMacaroon(mac: Secret): MacaroonFacts {
  * credential. The identifier holds no secret: the signature is the credential.
  */
 export function macaroonId(mac: Secret): { rootKeyId: bigint; id: string } {
-  const { parsed: { header } } = parsedMacaroon(revealSecret(mac));
+  // Header only (audit 1.2.1): the identity needs the identifier packet alone, and LND verified
+  // the caveats and signature before the intercept reached watch. Parsing every caveat let a
+  // macaroon padded with 1,900 caveats cost 25 times a plain one per call and exhaust the
+  // attribution budget at 450 calls per second.
+  const data = revealSecret(mac);
+  if (data[0] !== 2) {
+    if (data.subarray(0, 3).toString('ascii') === '001') throw new DecodeError('v2-header', 'macaroon v1 format is not supported');
+    return fail('v2-header');
+  }
+  const [header] = section(data, 1, true);
   const { rootKeyId } = identifier(header.identifier);
   return { rootKeyId, id: `id:${createHash('sha256').update(header.identifier).digest('hex').slice(0, 16)}` };
 }

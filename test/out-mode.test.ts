@@ -1,6 +1,6 @@
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import * as realFs from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { reserveOut } from '../src/commands/bake/write-out.js';
 import { Secret } from '../src/secret.js';
@@ -96,4 +96,65 @@ it('RO-3/mode-verified attenuate refuses at A6 when the mode cannot be kept, and
     verified: true, status: 'active', revokedAt: null, revokeEvidence: null, replaces: null, replacedBy: null };
   expect(render({ schema: 1, command: 'bake', ok: true, warnings: [], result: entry, error: null }, 'text'))
     .toContain('wrote /tmp/bob.macaroon (0600, verified); registry updated');
+});
+
+// Audit O09: the output file was synced but its directory was not, so after a power loss the
+// registry (whose save syncs its directory) could record a file whose name was lost.
+it('RO-3/durable the written file is synced and then its directory, best effort', async () => {
+  const out = join(scratch(), 'app.macaroon');
+  const { fs: base } = simulated([0o600]);
+  const events: string[] = [];
+  const fs = { ...base,
+    async open(path: Parameters<typeof realFs.open>[0], flags?: string | number, mode?: number) {
+      if (String(path) !== dirname(out)) return base.open(path, flags as string, mode);
+      events.push(`open ${String(flags)}`);
+      return { sync: async () => { events.push(`sync ${existsSync(out) ? readFileSync(out, 'utf8') : ''}`); },
+        close: async () => { events.push('close'); } } as unknown as realFs.FileHandle;
+    },
+  } as typeof realFs;
+  const reserved = await reserveOut(out, fs);
+  expect(events).toEqual([]);
+  await reserved.reservation.write(new Secret(Buffer.from('synthetic test bytes')));
+  expect(events).toEqual(['open r', 'sync synthetic test bytes', 'close']);
+});
+
+it('RO-3/durable a directory that cannot be opened or synced does not fail the written output', async () => {
+  for (const failure of ['open', 'sync']) {
+    const out = join(scratch(), 'app.macaroon');
+    const { fs: base } = simulated([0o600]);
+    let closed = false;
+    const fs = { ...base,
+      async open(path: Parameters<typeof realFs.open>[0], flags?: string | number, mode?: number) {
+        if (String(path) !== dirname(out)) return base.open(path, flags as string, mode);
+        if (failure === 'open') throw Object.assign(new Error('EISDIR: illegal operation on a directory'), { code: 'EISDIR' });
+        return { sync: async () => { throw Object.assign(new Error('EINVAL'), { code: 'EINVAL' }); },
+          close: async () => { closed = true; } } as unknown as realFs.FileHandle;
+      },
+    } as typeof realFs;
+    const reserved = await reserveOut(out, fs);
+    await reserved.reservation.write(new Secret(Buffer.from('synthetic test bytes')));
+    expect(readFileSync(out, 'utf8')).toBe('synthetic test bytes');
+    expect(closed).toBe(failure === 'sync');
+    // Written output is kept: discard after a successful write removes nothing.
+    await reserved.reservation.discard();
+    expect(existsSync(out)).toBe(true);
+  }
+});
+
+it('RO-3/durable Windows, which has no directory sync, never opens the directory', async () => {
+  const out = join(scratch(), 'app.macaroon');
+  const { fs: base } = simulated([0o600]);
+  const opened: string[] = [];
+  const fs = { ...base,
+    async open(path: Parameters<typeof realFs.open>[0], flags?: string | number, mode?: number) {
+      opened.push(String(path));
+      return base.open(path, flags as string, mode);
+    },
+  } as typeof realFs;
+  // Reserved through the simulated POSIX path, then written as on Windows.
+  const reserved = await reserveOut(out, fs);
+  Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+  await reserved.reservation.write(new Secret(Buffer.from('synthetic test bytes')));
+  expect(readFileSync(out, 'utf8')).toBe('synthetic test bytes');
+  expect(opened).toEqual([out]);
 });

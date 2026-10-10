@@ -1,9 +1,13 @@
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs';
+import { constants, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
+import { writeOwnerOnly } from './helpers/owner-only-fixture.js';
+import { run as reconcileRun } from '../src/commands/reconcile.js';
 import { addFirstPartyCaveat } from '../src/decode/index.js';
+import snapshot from '../src/grade/lnd-permissions.json' with { type: 'json' };
+import type { LndAdapter, MiddlewareCall, PaymentLookup } from '../src/lnd/index.js';
 import { Secret } from '../src/secret.js';
 import { JOURNAL_INTAKE_ITEMS, JOURNAL_LIMIT_BYTES, JOURNAL_RESERVE_BYTES, JOURNAL_START_ROOM_BYTES, JournalError, journalCoverage, parseRecord, readJournal,
   type JournalRecord } from '../src/watch/payment-journal.js';
@@ -123,7 +127,7 @@ it('PAYJ/durability a write cut short by a crash is ignored, and the next run re
   const payment = record('payment', 2, { requestId: '1', method: SEND, credential: identityOf(vector('preset-pay-only')), rootKeyId: '0',
     paymentHash: hash('before crash').toString('hex'), amountMsat: null, amountSource: null, feeLimitMsat: '0', amp: false, extraction: 'complete' });
   const partial = '{"v":1,"type":"payment","time":"2026-10-09T10:5';
-  writeFileSync(path, `${[start(0), record('registered', 1, { session: 1 }), payment].join('\n')}\n${partial}`, { mode: 0o600 });
+  await writeOwnerOnly(path, `${[start(0), record('registered', 1, { session: 1 }), payment].join('\n')}\n${partial}`);
   const torn = await readJournal(path);
   expect(torn.tornTail).toBe(true);
   expect(torn.records.map(item => item.type)).toEqual(['run-start', 'registered', 'payment']);
@@ -144,7 +148,7 @@ it('PAYJ/durability a write cut short by a crash is ignored, and the next run re
 it('PAYJ/durability a crash after a complete record but before its newline is repaired too', async () => {
   const dir = scratch();
   const path = join(dir, 'newline.journal');
-  writeFileSync(path, `${start(0)}\n${record('registered', 1, { session: 1 })}`, { mode: 0o600 });
+  await writeOwnerOnly(path, `${start(0)}\n${record('registered', 1, { session: 1 })}`);
   expect((await readJournal(path)).tornTail).toBe(true);
   const journal = await openJournal(path);
   await journal.close();
@@ -206,7 +210,7 @@ it('PAYJ/reader the path rules of the other sidecars: protected names, non-files
   await expect(readJournal(join(dir, 'missing.journal'))).rejects.toThrow('payment journal not found');
   await expect(readJournal(dir)).rejects.toThrow('payment journal is not a regular file');
   const large = join(dir, 'large.journal');
-  writeFileSync(large, `${start(0)}\n`, { mode: 0o600 });
+  await writeOwnerOnly(large, `${start(0)}\n`);
   truncateSync(large, JOURNAL_LIMIT_BYTES + 1);
   await expect(readJournal(large)).rejects.toThrow('payment journal too large');
 });
@@ -315,7 +319,7 @@ it('PAYJ/size the journal never grows past its limit: a full record ends coverag
   const head = `${start(0)}\n`;
   const room = JOURNAL_START_ROOM_BYTES + 2_000;
   const filler = JOURNAL_LIMIT_BYTES - JOURNAL_RESERVE_BYTES - room - Buffer.byteLength(head) - 1;
-  writeFileSync(path, Buffer.concat([Buffer.from(head), Buffer.alloc(filler, 0x78), Buffer.from('\n')]), { mode: 0o600 });
+  await writeOwnerOnly(path, Buffer.concat([Buffer.from(head), Buffer.alloc(filler, 0x78), Buffer.from('\n')]));
   const stops: string[] = [];
   const journal = await openJournal(path, { onStop: reason => stops.push(reason) });
   journal.registered();
@@ -345,7 +349,7 @@ it('PAYJ/open refusals: protected names, directories, other files, a second writ
   await expect(openJournal(join(dir, 'my-password.journal'))).rejects.toThrow(JournalError);
   await expect(openJournal(dir)).rejects.toThrow('payment journal is not a regular file');
   const other = join(dir, 'notes.txt');
-  writeFileSync(other, 'my notes\n', { mode: 0o600 });
+  await writeOwnerOnly(other, 'my notes\n');
   await expect(openJournal(other)).rejects.toThrow('not a macwarden payment journal');
   expect(readFileSync(other, 'utf8')).toBe('my notes\n');
   const path = join(dir, 'locked.journal');
@@ -372,6 +376,56 @@ it('PAYJ/open refusals: protected names, directories, other files, a second writ
   await ok.close();
 });
 
+// Gemini review, 1.2.1: a new journal is created exclusively and owner-only by the shared helper on
+// every platform, then reopened for appending (never created by that open) and proven to be the
+// same file; an existing journal keeps its path, and a file swapped in before the reopen is refused.
+it('PAYJ/create a new journal is created exclusively and owner-only, and a file swapped in before the append open is refused', async () => {
+  const dir = scratch();
+  const opens: { path: string; flags: unknown }[] = [];
+  const recording = { ...fs, open: async (...args: Parameters<typeof fs.open>) => {
+    opens.push({ path: String(args[0]), flags: args[1] });
+    return fs.open(...args);
+  } } as typeof fs;
+  const path = join(dir, 'new.journal');
+  const created = await openJournal(path, { fs: recording });
+  await created.close();
+  const mine = opens.filter(item => item.path === path);
+  // No open of the journal may create it unless it is exclusive (O_CREAT only with O_EXCL).
+  for (const { flags } of mine) {
+    if (typeof flags === 'number') expect((flags & constants.O_CREAT) === 0 || (flags & constants.O_EXCL) !== 0).toBe(true);
+    else expect(String(flags)).toMatch(/^(r\+?|wx\+?)$/);
+  }
+  // The last open appends to what was created, without O_CREAT.
+  expect(typeof mine.at(-1)!.flags === 'number' && (mine.at(-1)!.flags as number) & constants.O_APPEND).toBeTruthy();
+  if (process.platform !== 'win32') {
+    expect(mine[0].flags).toBe('wx');
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+  }
+  expect(lines(path)[0]).toMatchObject({ type: 'run-start' });
+  const NOTES = 'my notes\n';
+  // A file swapped in at the path between the check (or the creation) and the append open is refused, untouched.
+  const swapping = (target: string) => ({ ...fs, open: async (...args: Parameters<typeof fs.open>) => {
+    const flags = args[1];
+    if (String(args[0]) === target && typeof flags === 'number' && (flags & constants.O_APPEND)) {
+      await fs.rename(target, `${target}.moved`);
+      await writeOwnerOnly(target, NOTES);
+    }
+    return fs.open(...args);
+  } }) as typeof fs;
+  const fresh = join(dir, 'fresh.journal');
+  await expect(openJournal(fresh, { fs: swapping(fresh) })).rejects.toThrow('payment journal changed while opened');
+  expect(readFileSync(fresh, 'utf8')).toBe(NOTES);
+  expect(readFileSync(`${fresh}.moved`).length).toBe(0);
+  await expect(openJournal(path, { fs: swapping(path) })).rejects.toThrow('payment journal changed while opened');
+  expect(readFileSync(path, 'utf8')).toBe(NOTES);
+  // An existing journal (moved back) is still appended to.
+  rmSync(path);
+  await fs.rename(`${path}.moved`, path);
+  const again = await openJournal(path);
+  await again.close();
+  expect(lines(path).filter(item => item.type === 'run-start')).toHaveLength(2);
+});
+
 it('PAYJ/time a clock that steps back never makes a record earlier than its predecessor', async () => {
   const dir = scratch();
   const path = join(dir, 'clock.journal');
@@ -386,6 +440,46 @@ it('PAYJ/time a clock that steps back never makes a record earlier than its pred
   const read = await readJournal(path);
   const stamps = read.records.map(item => Date.parse(item.time));
   expect(stamps).toEqual([...stamps].sort((a, b) => a - b));
+});
+
+it('PAYJ/time a clock that returns NaN or jumps past the year 9999 never crashes the writer or writes a time the reader refuses (audit 1.2.1 N3)', async () => {
+  const dir = scratch();
+  const path = join(dir, 'bad-clock.journal');
+  const good = Date.parse('2026-10-09T10:00:00.000Z');
+  const year10000 = Date.parse('+010000-01-01T00:00:00.000Z');
+  let now = good;
+  const journal = await openJournal(path, { clock: () => new Date(now) });
+  now = good + 1_000; journal.registered();
+  // NaN once: for a call record and for a marker.
+  now = NaN; journal.capture(paymentCall(SEND, bytes(3, hash('nan')), vector('preset-pay-only'), 1n));
+  await settle();
+  journal.unregistered('stream-lost');
+  now = good + 2_000; journal.registered();
+  await settle();
+  // Past the year 9999, and past what Date can hold at all.
+  now = year10000; journal.capture(paymentCall(SEND, bytes(3, hash('far')), vector('preset-pay-only'), 2n));
+  await settle();
+  journal.unregistered('stream-lost');
+  now = 9e15; journal.registered();
+  const stats = await journal.close();
+  expect(stats).toMatchObject({ payments: 2, dropped: 0, stopped: null });
+  const text = readFileSync(path, 'utf8');
+  expectLinesValid(text, (ok, detail) => expect(ok, detail).toBe(true));
+  const read = await readJournal(path);
+  expect(read).toMatchObject({ tornTail: false, repairedLines: 0 });
+  expect(read.records.map(item => item.type)).toEqual(['run-start', 'registered', 'payment', 'unregistered', 'registered', 'payment',
+    'unregistered', 'registered', 'unregistered', 'run-end']);
+  // An invalid clock reading falls back to the last good time, never earlier than the previous record.
+  expect(read.records.map(item => item.time)).toEqual(['2026-10-09T10:00:00.000Z', '2026-10-09T10:00:01.000Z', '2026-10-09T10:00:01.000Z',
+    '2026-10-09T10:00:01.000Z', '2026-10-09T10:00:02.000Z', '2026-10-09T10:00:02.000Z', '2026-10-09T10:00:02.000Z', '2026-10-09T10:00:02.000Z',
+    '2026-10-09T10:00:02.000Z', '2026-10-09T10:00:02.000Z']);
+  // The run-start has no earlier record to fall back on: an invalid clock is refused at open, nothing written.
+  for (const [name, clock] of [['nan', () => new Date(NaN)], ['year-10000', () => new Date(year10000)],
+    ['throws', () => { throw new Error('no clock'); }]] as const) {
+    const refused = join(dir, `${name}.journal`);
+    await expect(openJournal(refused, { clock })).rejects.toThrow(new JournalError('cannot open payment journal: the system clock is invalid'));
+    expect(existsSync(refused)).toBe(false); // refused before anything is created
+  }
 });
 
 it('PAYJ/alive while registered an alive record is written after 5 quiet minutes', async () => {
@@ -434,4 +528,366 @@ it('PAYJ/coverage gaps carry their reason; coverage exists only between register
     record('unregistered', 20, { session: 1, reason: 'stopping' })].map(line => parseRecord(line)!);
   expect(journalCoverage(instant, NODE, Date.parse(at(1)), Date.parse(at(20))).gaps)
     .toEqual([{ from: Date.parse(at(5)), to: Date.parse(at(5)), reason: 'dropped', dropped: 1 }]);
+});
+
+// docs/spec.md coverage rules (1.2.1): a drop inside time that is uncovered for another reason is
+// listed with its count beside that gap (the listed gaps overlap); it removes no covered time, so
+// the uncovered time is the window less the covered time, never the sum of the listed gaps.
+it('PAYJ/coverage a drop outside every covered span is listed beside the gap it falls in and adds no uncovered time', () => {
+  const records = [
+    start(0), record('drop', 6, { count: 3, first: at(2), last: at(5), reason: 'overload' }),
+    record('registered', 10, { session: 1 }), record('unregistered', 20, { session: 1, reason: 'stopping' }),
+    record('run-end', 21, { payments: 0, deletions: 0, dropped: 3 }),
+  ].map(line => parseRecord(line)!);
+  const from = Date.parse(at(0)), to = Date.parse(at(30));
+  const coverage = journalCoverage(records, NODE, from, to);
+  expect(coverage.gaps.map(gap => [(gap.from - from) / 1_000, (gap.to - from) / 1_000, gap.reason, gap.dropped])).toEqual([
+    [0, 10, 'not-registered', 0],
+    [2, 5, 'dropped', 3],
+    [20, 30, 'not-running', 0],
+  ]);
+  expect(coverage.covered).toEqual([[Date.parse(at(10)), Date.parse(at(20))]]);
+  expect(to - from - coverage.coveredMs).toBe(20_000);
+});
+
+// 1.2.1: coverage is computed in sorted sweeps. A hostile journal holds hundreds of thousands of
+// drop records; pairing each with every span was quadratic.
+it('PAYJ/coverage-linear tens of thousands of disjoint drop windows cost linear time', async () => {
+  const { compare, LINEAR_4X } = await import('./helpers/growth.js');
+  const journalOf = (drops: number) => {
+    const lines = [start(0), record('registered', 1, { session: 1 })];
+    for (let index = 0; index < drops; index++)
+      lines.push(record('drop', 12 + 3 * index, { count: 1, first: at(10 + 3 * index), last: at(11 + 3 * index), reason: 'overload' }));
+    lines.push(record('unregistered', 20 + 3 * drops, { session: 1, reason: 'stopping' }));
+    const records = lines.map(line => parseRecord(line)!);
+    return () => {
+      const coverage = journalCoverage(records, NODE, Date.parse(at(0)), Date.parse(at(30 + 3 * drops)));
+      expect(coverage.gaps.filter(gap => gap.reason === 'dropped')).toHaveLength(drops);
+      expect(coverage.gaps.reduce((total, gap) => total + gap.dropped, 0)).toBe(drops);
+      expect(coverage.covered).toHaveLength(drops + 1);
+    };
+  };
+  const timing = await compare(async () => journalOf(5_000)(), async () => journalOf(20_000)());
+  expect(timing.ratio, timing.summary).toBeLessThan(LINEAR_4X);
+}, 120_000);
+
+// 1.2.1: a write may complete partially; every byte of a line is written before it counts.
+it('PAYJ/short-write a descriptor that writes a few bytes at a time still lands every record; one that makes no progress stops the run', async () => {
+  const dir = scratch();
+  const chunked = (limit: number) => ({ ...fs, open: async (...args: Parameters<typeof fs.open>) => {
+    const handle = await fs.open(...args);
+    return new Proxy(handle, { get(target, key) {
+      if (key === 'write') return async (data: Buffer | string, offset = 0, length?: number, position?: number | null) => {
+        const buffer = typeof data === 'string' ? Buffer.from(data, 'utf8') : data;
+        const take = Math.min(limit, (length ?? buffer.length - offset));
+        return target.write(buffer, offset, take, position ?? null);
+      };
+      const value = Reflect.get(target, key, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+  } } as typeof fs);
+  const path = join(dir, 'chunked.journal');
+  const journal = await openJournal(path, { fs: chunked(7) });
+  journal.registered();
+  journal.capture(paymentCall(SEND, bytes(3, hash('seven')), vector('preset-pay-only')));
+  journal.capture(paymentCall(SEND, bytes(3, hash('eight')), vector('preset-pay-only'), 2n));
+  const stats = await journal.close();
+  expect(stats).toMatchObject({ payments: 2, dropped: 0, stopped: null });
+  const read = await readJournal(path);
+  expect(read.tornTail).toBe(false);
+  expect(read.records.filter(item => item.type === 'payment').map(item => (item as { paymentHash: string }).paymentHash))
+    .toEqual([hash('seven').toString('hex'), hash('eight').toString('hex')]);
+  expect(read.records.map(item => item.type)).toEqual(['run-start', 'registered', 'payment', 'payment', 'unregistered', 'run-end']);
+
+  const stuck = join(dir, 'stuck.journal');
+  const stops: string[] = [];
+  let open = true;
+  const noProgress = { ...fs, open: async (...args: Parameters<typeof fs.open>) => {
+    const handle = await fs.open(...args);
+    return new Proxy(handle, { get(target, key) {
+      if (key === 'write' && !open) return async () => ({ bytesWritten: 0, buffer: Buffer.alloc(0) });
+      const value = Reflect.get(target, key, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+  } } as typeof fs;
+  const second = await openJournal(stuck, { fs: noProgress, onStop: reason => stops.push(reason) });
+  open = false;
+  second.registered();
+  second.capture(paymentCall(SEND, bytes(3, hash('never')), vector('preset-pay-only')));
+  const ended = await second.close();
+  expect(ended.stopped).toBe('write-failed');
+  expect(stops).toEqual(['write-failed']);
+  expect((await readJournal(stuck)).records.map(item => item.type)).toEqual(['run-start']);
+});
+
+// 1.2.1: an amount the journal cannot record (above int64 millisatoshi) is written as no amount,
+// so the reader still accepts the file.
+it('PAYJ/bounds a request whose fee limit or amount overflows the journal range is journaled without it, and the journal stays readable', async () => {
+  const dir = scratch();
+  const path = join(dir, 'overflow.journal');
+  const journal = await openJournal(path);
+  journal.registered();
+  const max = (1n << 63n) - 1n;
+  journal.capture(paymentCall(SEND, message(bytes(3, hash('overflow')), uint(2, 1n << 62n), uint(7, max)), vector('preset-pay-only')));
+  journal.capture(paymentCall(SEND, message(bytes(3, hash('fine')), uint(12, max), uint(13, max)), vector('preset-pay-only'), 2n));
+  const stats = await journal.close();
+  expect(stats).toMatchObject({ payments: 2, dropped: 0, stopped: null });
+  const read = await readJournal(path);
+  const payments = read.records.filter(item => item.type === 'payment') as Array<Record<string, unknown>>;
+  expect(payments[0]).toMatchObject({ paymentHash: hash('overflow').toString('hex'), amountMsat: null, amountSource: null, feeLimitMsat: null, extraction: 'complete' });
+  expect(payments[1]).toMatchObject({ paymentHash: hash('fine').toString('hex'), amountMsat: max.toString(), feeLimitMsat: max.toString() });
+});
+
+// 1.2.1: the reader validates lines as it reads them and refuses a long run of unreadable lines.
+it('PAYJ/reader more than 64 consecutive unreadable lines make the journal invalid wherever they are; 64 at the tail are a torn tail', async () => {
+  const dir = scratch();
+  const prefix = `${start(0)}\n${record('registered', 1, { session: 1 })}\n`;
+  const tolerated = join(dir, 'tolerated.journal');
+  writeFileSync(tolerated, prefix + '\n'.repeat(64));
+  const read = await readJournal(tolerated);
+  expect(read.records.map(item => item.type)).toEqual(['run-start', 'registered']);
+  expect(read.tornTail).toBe(true);
+  const refused = join(dir, 'refused.journal');
+  writeFileSync(refused, prefix + '\n'.repeat(65));
+  await expect(readJournal(refused)).rejects.toThrow('invalid payment journal (line 67)');
+  // A file of nothing but newlines fails at once, not after holding every line.
+  const empties = join(dir, 'empties.journal');
+  writeFileSync(empties, `${start(0)}\n${'\n'.repeat(4_000_000)}`);
+  const started = performance.now();
+  await expect(readJournal(empties)).rejects.toThrow(/invalid payment journal/);
+  expect(performance.now() - started).toBeLessThan(5_000);
+}, 60_000);
+
+// 1.2.1: decoding has the same 20 % time budget as attribution, so a flood of slow payloads
+// cannot keep the event loop busy; the intake fills and drops instead.
+it('PAYJ/budget a flood of 64 KiB payloads never blocks the event loop for long: decoding is budgeted and the rest is dropped', async () => {
+  const dir = scratch();
+  const path = join(dir, 'budget.journal');
+  const journal = await openJournal(path);
+  journal.registered();
+  // A SendToRouteV2 request with 2,000 repeated route messages of 16 empty hops: slow to decode, under the 64 KiB cap.
+  const hop = Buffer.from([0x22, 0x00]);
+  const route = Buffer.concat([Buffer.from([0x30, 0x05]), ...Array.from({ length: 16 }, () => hop)]);
+  const payload = message(bytes(1, hash('flood')), ...Array.from({ length: 1_750 }, () => bytes(2, route)));
+  expect(payload.length).toBeLessThan(64 * 1024);
+  // The bound is the host's own idle jitter (a loaded 2-core CI runner pauses a 1 ms timer for
+  // hundreds of milliseconds on its own) times a small factor, never below 150 ms: what the test
+  // proves is that decoding adds no multi-second stall of its own, as it did before the budget.
+  let worstGap = 0;
+  let last = performance.now();
+  const watchdog = setInterval(() => { const now = performance.now(); worstGap = Math.max(worstGap, now - last); last = now; }, 1);
+  await new Promise(resolve => setTimeout(resolve, 300));
+  const idleGap = worstGap;
+  worstGap = 0;
+  last = performance.now();
+  const began = performance.now();
+  try {
+    for (let round = 0; round < 6; round++) {
+      for (let index = 0; index < 400; index++) journal.capture(paymentCall(ROUTE, payload, vector('preset-pay-only'), BigInt(round * 400 + index + 1)));
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  } finally { clearInterval(watchdog); }
+  const stats = await journal.close();
+  const elapsed = performance.now() - began;
+  console.log(`PAYJ/budget worst loop gap ${worstGap.toFixed(0)} ms (idle ${idleGap.toFixed(0)} ms) over ${elapsed.toFixed(0)} ms; ` +
+    `journaled ${stats.payments}, dropped ${stats.dropped}`);
+  expect(stats.payments + stats.dropped).toBe(2_400);
+  expect(stats.dropped).toBeGreaterThan(0);
+  expect(worstGap).toBeLessThan(Math.max(150, 4 * idleGap));
+  expect(worstGap).toBeLessThan(1_000);
+  const read = await readJournal(path);
+  expect(read.records.filter(item => item.type === 'drop').length).toBeGreaterThan(0);
+}, 60_000);
+
+// 1.2.1 (owner finding): a coverage marker carries the time of the event, not of the queue turn
+// that wrote it; a backlog once moved an unregistered and the next registered to the same instant.
+it('PAYJ/marker-time registration changes are journaled at the time they happened, however late the queue writes them', async () => {
+  const dir = scratch();
+  const path = join(dir, 'marker-time.journal');
+  let now = Date.parse('2026-10-09T10:00:00.000Z');
+  const clock = () => new Date(now);
+  const journal = await openJournal(path, { clock });
+  now += 1_000; journal.registered();
+  // The stream drops at second 10 and comes back at second 30, while the queue is still busy
+  // with payloads captured before: both markers must keep their own time.
+  now += 9_000; journal.unregistered('stream-lost');
+  now += 20_000; journal.registered();
+  now += 5_000;
+  const stats = await journal.close();
+  expect(stats.stopped).toBeNull();
+  const read = await readJournal(path);
+  const times = read.records.filter(item => item.type === 'registered' || item.type === 'unregistered').map(item => `${item.type}@${item.time}`);
+  expect(times).toEqual(['registered@2026-10-09T10:00:01.000Z', 'unregistered@2026-10-09T10:00:10.000Z', 'registered@2026-10-09T10:00:30.000Z',
+    'unregistered@2026-10-09T10:00:35.000Z']);
+  const coverage = journalCoverage(read.records, NODE, Date.parse('2026-10-09T10:00:00.000Z'), Date.parse('2026-10-09T10:00:35.000Z'));
+  expect(coverage.gaps.map(gap => [gap.reason, (gap.to - gap.from) / 1_000])).toEqual([['not-registered', 1], ['not-registered', 20]]);
+});
+
+it('PAYJ/full-drop payments discarded when the journal fills leave a drop record before the full record, and coverage ends where the loss began', async () => {
+  const dir = scratch();
+  const path = join(dir, 'full-drop.journal');
+  const head = `${start(0)}\n`;
+  const filler = JOURNAL_LIMIT_BYTES - JOURNAL_RESERVE_BYTES - (JOURNAL_START_ROOM_BYTES + 2_000) - Buffer.byteLength(head) - 1;
+  await writeOwnerOnly(path, Buffer.concat([Buffer.from(head), Buffer.alloc(filler, 0x78), Buffer.from('\n')]));
+  let now = Date.parse(at(0));
+  const stops: string[] = [];
+  const journal = await openJournal(path, { clock: () => new Date(now), onStop: reason => stops.push(reason) });
+  now = Date.parse(at(1));
+  journal.registered();
+  // Fill the room left before the reserve with payment records of one fixed length (four-digit request IDs).
+  const app = vector('preset-pay-only');
+  let id = 1_000n;
+  journal.capture(paymentCall(SEND, bytes(3, hash(`fill${id}`)), app, id++));
+  await settle();
+  const line = Buffer.byteLength(`${readFileSync(path, 'utf8').split('\n').at(-2)!}\n`);
+  const before = statSync(path).size;
+  const fit = Math.floor((JOURNAL_LIMIT_BYTES - JOURNAL_RESERVE_BYTES - before) / line);
+  for (let i = 0; i < fit; i++) journal.capture(paymentCall(SEND, bytes(3, hash(`fill${id}`)), app, id++));
+  // Decoding is budgeted: wait until every filler record is on disk.
+  for (let turn = 0; turn < 200 && statSync(path).size < before + fit * line; turn++) await settle();
+  expect(stops).toEqual([]);
+  expect(JOURNAL_LIMIT_BYTES - JOURNAL_RESERVE_BYTES - statSync(path).size).toBeLessThan(line);
+  // The owner's reproduction: payments captured at seconds 10 and 20 do not fit; watch stops at second 30.
+  now = Date.parse(at(10));
+  journal.capture(paymentCall(SEND, bytes(3, hash('lost-10')), app, id++));
+  now = Date.parse(at(20));
+  journal.capture(paymentCall(SEND, bytes(3, hash('lost-20')), app, id));
+  await settle();
+  now = Date.parse(at(30));
+  const stats = await journal.close();
+  expect(stats.stopped).toBe('full');
+  expect(stops).toEqual(['full']);
+  expect(stats.dropped).toBe(2);
+  expect(stats.payments).toBe(fit + 1);
+  expect(statSync(path).size).toBeLessThanOrEqual(JOURNAL_LIMIT_BYTES);
+  const read = await readJournal(path);
+  expect(read.records.slice(-2)).toEqual([
+    { v: 1, type: 'drop', time: at(20), run: journal.run, count: 2, first: at(10), last: at(20), reason: 'overload' },
+    { v: 1, type: 'full', time: at(20), run: journal.run },
+  ]);
+  const coverage = journalCoverage(read.records, NODE, Date.parse(at(0)), Date.parse(at(60)));
+  expect(coverage.covered).toEqual([[Date.parse(at(1)), Date.parse(at(10))]]);
+  // No time after second 10 is covered: the loss is listed with its count, and the gap from it keeps the reason journal-full.
+  expect(coverage.gaps).toEqual([
+    { from: Date.parse(at(0)), to: Date.parse(at(1)), reason: 'not-registered', dropped: 0 },
+    { from: Date.parse(at(10)), to: Date.parse(at(20)), reason: 'dropped', dropped: 2 },
+    { from: Date.parse(at(10)), to: Date.parse(at(60)), reason: 'journal-full', dropped: 0 },
+  ]);
+  expect(coverage.coveredMs).toBe(9_000);
+});
+
+/**
+ * A journal with room for exactly JOURNAL_INTAKE_ITEMS payment lines, filled by one full intake
+ * captured at second 5; three more calls (`drop`, at seconds 10, 11 and 12) find the intake full
+ * and are dropped at capture. The drop record that reports them reaches the write queue only
+ * after the journal has no room left.
+ */
+async function intakeDropAtLimit(drop: (seconds: number) => MiddlewareCall) {
+  const dir = scratch();
+  const app = vector('preset-pay-only');
+  const fill = (id: bigint) => paymentCall(SEND, bytes(3, hash(`fill${id}`)), app, id);
+  // The length of one fill line (four-digit request IDs), measured by the real writer.
+  const calibrate = await openJournal(join(dir, 'calibrate.journal'), { clock: () => new Date(at(0)) });
+  calibrate.registered();
+  calibrate.capture(fill(1_000n));
+  await settle();
+  const line = Buffer.byteLength(`${readFileSync(join(dir, 'calibrate.journal'), 'utf8').split('\n').at(-2)!}\n`);
+  await calibrate.close();
+  const path = join(dir, 'intake-drop.journal');
+  const head = `${start(-1)}\n`;
+  const run = '00000000-0000-4000-8000-000000000000';
+  const opened = Buffer.byteLength(`${JSON.stringify({ v: 1, type: 'run-start', time: at(0), run, node: NODE, version: '1.2.0-test', repairedTail: true })}\n`)
+    + Buffer.byteLength(`${JSON.stringify({ v: 1, type: 'registered', time: at(1), run, session: 1 })}\n`);
+  const filler = JOURNAL_LIMIT_BYTES - JOURNAL_RESERVE_BYTES - JOURNAL_INTAKE_ITEMS * line - opened - Buffer.byteLength(head) - 1;
+  await writeOwnerOnly(path, Buffer.concat([Buffer.from(head), Buffer.alloc(filler, 0x78), Buffer.from('\n')]));
+  let now = Date.parse(at(0));
+  const stops: string[] = [];
+  const journal = await openJournal(path, { clock: () => new Date(now), onStop: reason => stops.push(reason) });
+  now = Date.parse(at(1));
+  journal.registered();
+  await settle();
+  const room = () => JOURNAL_LIMIT_BYTES - JOURNAL_RESERVE_BYTES - statSync(path).size;
+  expect(room()).toBe(JOURNAL_INTAKE_ITEMS * line);
+  now = Date.parse(at(5));
+  for (let i = 0; i < JOURNAL_INTAKE_ITEMS; i++) journal.capture(fill(BigInt(1_000 + i)));
+  for (const seconds of [10, 11, 12]) { now = Date.parse(at(seconds)); journal.capture(drop(seconds)); }
+  for (let turn = 0; turn < 400 && room() > 0; turn++) await settle();
+  expect(room()).toBe(0);
+  expect(stops).toEqual([]);
+  return { path, journal, stops, setNow: (seconds: number) => { now = Date.parse(at(seconds)); } };
+}
+
+/** reconcile over the journal with an LND that lists no payment: the dropped calls left none behind. */
+async function reconcileEmpty(path: string, since: number, until: number) {
+  const dir = scratch();
+  writeFileSync(join(dir, 'tls.cert'), 'not used by the fake adapter');
+  writeFileSync(join(dir, 'own.macaroon'), vector('default-readonly'));
+  writeFileSync(join(dir, 'registry.json'), JSON.stringify({ schema: 1, entries: [] }));
+  const unexpected = (): never => { throw new Error('unexpected adapter call'); };
+  const lnd = {
+    getInfo: async () => ({ pubkey: NODE, alias: 'fixture', network: 'regtest', version: '0.21.4-beta' }),
+    listPermissions: async () => snapshot.methods as Record<string, string[]>,
+    listMacaroonIds: unexpected, bakeMacaroon: unexpected, deleteMacaroonId: unexpected, checkMacaroon: unexpected,
+    listPayments: async ({ indexOffset }: { indexOffset: bigint }) => ({ payments: [], lastIndexOffset: indexOffset }),
+    trackPayment: async () => null,
+  } as unknown as LndAdapter & PaymentLookup;
+  return reconcileRun(['--payment-journal', path, '--lnd-rest', 'localhost:8080', '--tls-cert', join(dir, 'tls.cert'),
+    '--macaroon', join(dir, 'own.macaroon'), '--registry', join(dir, 'registry.json'), '--since', at(since), '--until', at(until)],
+  { lnd, fs, env: {}, clock: () => new Date('2026-10-09T12:00:00.000Z') });
+}
+
+it('PAYJ/full-drop a drop record of calls dropped at capture that is itself lost at the limit still counts them from their first capture', async () => {
+  const app = vector('preset-pay-only');
+  const j = await intakeDropAtLimit(seconds => paymentCall(SEND, bytes(3, hash(`intake-drop-${seconds}`)), app, BigInt(8_000 + seconds)));
+  // The next call flushes the intake drop (count 3, 10..12 s) into the queue ahead of it; neither fits.
+  j.setNow(20);
+  j.journal.capture(paymentCall(SEND, bytes(3, hash('lost-20')), app, 9_020n));
+  // The records are stamped when the writer reaches them: wait for the full stop itself, not for
+  // a number of turns (a loaded CI runner needs more, and the clock below must not move first).
+  for (let turn = 0; turn < 400 && !j.stops.includes('full'); turn++) await settle();
+  j.setNow(30);
+  const stats = await j.journal.close();
+  expect(stats).toMatchObject({ payments: JOURNAL_INTAKE_ITEMS, dropped: 4, stopped: 'full' });
+  expect(j.stops).toEqual(['full']);
+  expect(statSync(j.path).size).toBeLessThanOrEqual(JOURNAL_LIMIT_BYTES);
+  const read = await readJournal(j.path);
+  expect(read.records.slice(-2)).toEqual([
+    { v: 1, type: 'drop', time: at(20), run: j.journal.run, count: 4, first: at(10), last: at(20), reason: 'overload' },
+    { v: 1, type: 'full', time: at(20), run: j.journal.run },
+  ]);
+  const coverage = journalCoverage(read.records, NODE, Date.parse(at(1)), Date.parse(at(30)));
+  expect(coverage.covered).toEqual([[Date.parse(at(1)), Date.parse(at(10))]]);
+  expect(coverage.gaps).toEqual([
+    { from: Date.parse(at(10)), to: Date.parse(at(20)), reason: 'dropped', dropped: 4 },
+    { from: Date.parse(at(10)), to: Date.parse(at(30)), reason: 'journal-full', dropped: 0 },
+  ]);
+  const output = await reconcileEmpty(j.path, 2, 11);
+  expect(output.exitCode).toBe(1);
+  expect((output.result as { coverage: { complete: boolean } }).coverage.complete).toBe(false);
+});
+
+it('PAYJ/full-drop a lost drop record followed only by markers still leaves a drop record: dropped DeletePayment calls never read as covered', async () => {
+  const app = vector('preset-pay-only');
+  const j = await intakeDropAtLimit(seconds => paymentCall('/lnrpc.Lightning/DeletePayment', bytes(1, hash(`deleted-${seconds}`)), app,
+    BigInt(8_000 + seconds)));
+  // close() flushes the intake drop, then unregistered and run-end at 30 s: none of them fits.
+  j.setNow(30);
+  const stats = await j.journal.close();
+  expect(stats).toMatchObject({ payments: JOURNAL_INTAKE_ITEMS, deletions: 0, dropped: 3, stopped: 'full' });
+  const read = await readJournal(j.path);
+  expect(read.records.slice(-2)).toEqual([
+    { v: 1, type: 'drop', time: at(30), run: j.journal.run, count: 3, first: at(10), last: at(30), reason: 'overload' },
+    { v: 1, type: 'full', time: at(30), run: j.journal.run },
+  ]);
+  const coverage = journalCoverage(read.records, NODE, Date.parse(at(1)), Date.parse(at(30)));
+  expect(coverage.covered).toEqual([[Date.parse(at(1)), Date.parse(at(10))]]);
+  expect(coverage.gaps).toEqual(expect.arrayContaining([
+    { from: Date.parse(at(10)), to: Date.parse(at(30)), reason: 'dropped', dropped: 3 },
+    { from: Date.parse(at(10)), to: Date.parse(at(30)), reason: 'journal-full', dropped: 0 },
+  ]));
+  expect(coverage.gaps).toHaveLength(2);
+  // LND lists nothing (the payments were deleted), so only coverage can say the window is incomplete.
+  const output = await reconcileEmpty(j.path, 2, 11);
+  expect(output.exitCode).toBe(1);
+  expect((output.result as { coverage: { complete: boolean } }).coverage.complete).toBe(false);
 });

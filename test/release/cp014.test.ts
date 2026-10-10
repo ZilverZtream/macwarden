@@ -84,7 +84,7 @@ it('CP-014/B1 dry-run and extracted tarball have exactly the offline allow-list'
 it('CP-014/B2 installed tarball runs version inspect scan and dormant inventory', () => {
   const version = installedCommand(['--version']);
   expect(version.status).toBe(0);
-  expect(version.stdout.trim()).toBe('1.2.0');
+  expect(version.stdout.trim()).toBe('1.2.1');
 
   const addInvoice = vector('grade-uri-add-invoice');
   expect(addInvoice.expectedGrade).toBe('RECEIVE');
@@ -132,9 +132,9 @@ it('CP-014/B3 package metadata fixes version dependencies allow-list and future 
   const lock = JSON.parse(readFileSync(join(repo, 'package-lock.json'), 'utf8')) as {
     version: string; packages: Record<string, { version: string; dependencies?: Record<string, string> }> };
   expect(pkg.name).toBe('macwarden');
-  expect(pkg.version).toBe('1.2.0');
-  expect(lock.version).toBe('1.2.0');
-  expect(lock.packages[''].version).toBe('1.2.0');
+  expect(pkg.version).toBe('1.2.1');
+  expect(lock.version).toBe('1.2.1');
+  expect(lock.packages[''].version).toBe('1.2.1');
   expect(pkg.license).toBe('MIT');
   expect(pkg.engines.node).toBe('^22.23.2 || ^24.18.1 || >=26.5.1');
   expect(Object.keys(pkg.dependencies ?? {})).toHaveLength(0);
@@ -174,9 +174,12 @@ it('CP-014/B5 CI keeps its triggers and pins and tests the supported platforms a
   const unit = entries.filter(job => ['ubuntu-latest', 'windows-latest'].every(platform => job.includes(platform)));
   expect(unit).toHaveLength(1);
   for (const node of ['22.23.2', '22.x', '24.18.1', '24.x']) expect(unit[0]).toContain(`'${node}'`);
-  const steps = ['npm ci', 'npm run lint', 'npm run build', 'npm test'].map(step => unit[0].indexOf(`run: ${step}`));
+  // npm test builds first (pretest), then the harness-docs project runs: both Vitest projects gate CI.
+  const steps = ['npm ci', 'npm run lint', 'npm test', 'npm run test:harness'].map(step => unit[0].indexOf(`run: ${step}`));
   expect(steps.every(at => at >= 0)).toBe(true);
   expect([...steps].sort((a, b) => a - b)).toEqual(steps);
+  expect(unit[0]).not.toContain('run: npm run build');
+  expect(packageJson().scripts.pretest).toBe('npm run build');
   expect(text).not.toMatch(/macos/i);
   expect(entries.some(job => job.includes('ubuntu-latest') &&
     job.indexOf('npm run fixture:up') >= 0 &&

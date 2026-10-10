@@ -22,9 +22,10 @@ jobs:
           registry-url: https://registry.npmjs.org
       - run: npm install --global npm@11.6.2
       - run: npm ci
+      # npm test builds first (pretest); npm publish rebuilds the published dist (prepack).
       - run: npm test
+      - run: npm run test:harness
       - run: npm run lint
-      - run: npm run build
       - name: Publish
         env:
           # Fallback only: trusted publishing needs no token. If the package is not yet

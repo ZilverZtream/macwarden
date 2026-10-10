@@ -1,4 +1,5 @@
 import { Cancelled, withCancellation } from './cancellation.js';
+import { nodeVersionWarning, unsafeNodeFlags } from './environment.js';
 import { readFileSync } from 'node:fs';
 import { handlers } from './commands/handlers.js';
 import { error, render, renderChunks, warning, type Mode, type OutputResult } from './output/index.js';
@@ -83,7 +84,32 @@ export async function writeChunks(stream: Sink, chunks: Iterable<string>): Promi
   }
 }
 
+// Set once an interrupt result (exit 6 or 7, step `cancelled`) is written: the command has
+// stopped and run its cleanup (lock release, unwritten --out removal), but a file system call it
+// abandoned (a stalled mount) may still be pending and keep the process alive (1.2.1).
+let interruptWritten = false;
+
+/** Whether this process wrote an interrupt result (exit 6 or 7, step `cancelled`). */
+export function interruptedCompletion(): boolean { return interruptWritten; }
+
+/**
+ * Resolves once stdout and stderr hold no unwritten output (or are closed), or after
+ * FLUSH_LIMIT_MS. A write that stayed under the high-water mark emits no 'drain' when it
+ * completes (pipes write asynchronously on POSIX), so completion is observed by polling the
+ * queue length rather than by waiting for an event.
+ */
+export async function flushStandardStreams(): Promise<void> {
+  const deadline = Date.now() + FLUSH_LIMIT_MS;
+  const pending = (stream: NodeJS.WriteStream) => !closedStreams.has(stream) && !stream.destroyed && stream.writableLength > 0;
+  while ([process.stdout, process.stderr].some(pending) && Date.now() < deadline) {
+    await new Promise<void>(resolve => setTimeout(resolve, 5));
+  }
+}
+
+const FLUSH_LIMIT_MS = 2_000;
+
 async function write(result: OutputResult, mode: Mode): Promise<void> {
+  if (result.error?.step === 'cancelled' && (result.error.code === 6 || result.error.code === 7)) interruptWritten = true;
   // The first chunk is produced before anything is written: assertPlain and the
   // secret collection run first, so a rendering failure emits no partial output.
   const chunks = renderChunks(result, mode);
@@ -148,7 +174,7 @@ function installProcessHandlers(): void {
 
 installProcessHandlers();
 
-export async function main(argv: string[]): Promise<number> {
+export async function main(argv: string[], runtime: { execArgv?: readonly string[]; nodeVersion?: string } = {}): Promise<number> {
   const boundary = argv.indexOf('--');
   const flagsEnd = boundary < 0 ? argv.length : boundary;
   const flags = argv.slice(0, flagsEnd);
@@ -200,10 +226,16 @@ export async function main(argv: string[]): Promise<number> {
       return 2;
     }
     if (command && handler) {
+      // Node flags and an unsupported Node version are refused before any command runs (1.2.1):
+      // the flags could expose what the command handles, and watch's HTTP/2 client depends on
+      // the fixed Node releases package.json names.
+      if (runtime.execArgv && unsafeNodeFlags(runtime.execArgv)) { await write(failure(2, null, 'unsafe Node diagnostic settings (node flags)', command), mode); return 2; }
+      const unsupported = command === 'watch' && runtime.nodeVersion !== undefined ? nodeVersionWarning(runtime.nodeVersion) : null;
       // watch streams events while it runs, so it alone keeps --json to format them.
       const args = argv.slice(1).filter((arg, index) => arg !== '--json' || command === 'watch' ||
         (boundary >= 0 && index + 1 > boundary));
       const result = await withProcessErrorContext(context, () => withCancellation(controller.signal, () => handler(args)));
+      if (unsupported && result.warnings) result.warnings.unshift(unsupported);
       if (internalFailure) {
         await write(failure(8, 'internal', internalErrorMessage(context), command), mode);
         return 8;

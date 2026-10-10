@@ -1,5 +1,6 @@
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, realpathSync } from 'node:fs';
 import { createInterface } from 'node:readline';
+import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { diagnose } from './analysis/diagnose.ts';
 import { paymentsForHash } from './analysis/payments.ts';
@@ -9,9 +10,10 @@ import {
 } from './config.ts';
 import { describeError } from './lnd/errors.ts';
 import { decodeInvoice, reconcile, recordIntent, submit, type Fault, type PayOutcome, type PayerDeps } from './payer/payer.ts';
-import { PayerStore, type OperationKind } from './payer/store.ts';
+import { PayerStore, type OperationKind, type PaymentRecord } from './payer/store.ts';
 import { cancelHoldInvoice, createInvoice, listen, reconcileInvoices, settleHoldInvoice, type ReceiverDeps } from './receiver/receiver.ts';
 import { ReceiverStore } from './receiver/store.ts';
+import { bolt11PaymentHash, damagedPaymentRequest } from './util/bolt11.ts';
 import { assertHash } from './util/encoding.ts';
 import { parseAmount } from './util/money.ts';
 
@@ -23,6 +25,12 @@ import { parseAmount } from './util/money.ts';
  * 1 payment definitely failed; 2 usage error; 3 refused (budget, conflicting
  * operation, wrong state); 4 configuration or node error; 75 unresolved: the
  * outcome is not known yet and the record stays open for reconciliation.
+ * A payment's outcome maps to the same code whichever command learned it (pay,
+ * retry, reconcile); for several payments (payer reconcile) the first of 75, 3,
+ * 1 that applies to any of them, else 0.
+ *
+ * Arguments are validated before anything is recorded: a usage error never
+ * leaves a durable change behind.
  */
 
 const EXIT = { ok: 0, failed: 1, usage: 2, refused: 3, error: 4, unresolved: 75 } as const;
@@ -38,6 +46,19 @@ function required(values: Record<string, unknown>, name: string): string {
   const value = values[name];
   if (typeof value !== 'string' || value === '') throw new UsageError(`--${name} is required`);
   return value;
+}
+
+/**
+ * An amount or index given on the command line: a malformed one, or one above 2^63 - 1 (more than SQLite
+ * stores), is a usage error (exit 2), not an internal one.
+ */
+function amountArg(text: string, what: string): bigint {
+  try { return parseAmount(text, what); } catch (error) { throw new UsageError(error instanceof Error ? error.message : String(error)); }
+}
+
+/** A payment hash given on the command line (see amountArg). */
+function hashArg(value: string, what: string): string {
+  try { return assertHash(value, what); } catch (error) { throw new UsageError(error instanceof Error ? error.message : String(error)); }
 }
 
 function identifier(value: string, what: string): string {
@@ -86,8 +107,18 @@ function openReceiver(lab: Lab, profile: ReceiverProfile): ReceiverDeps {
   return { api: invoiceApi(lab, profile), store: new ReceiverStore(databasePath(lab, RECEIVER_PROFILES[profile].database)), emit };
 }
 
-function exitFor(outcome: PayOutcome): number {
-  emit({ event: 'outcome', ...outcome });
+/** How main opens a profile's records and node API; the regression tests pass in-memory stand-ins. */
+export interface Services {
+  payer(labDir: string | undefined, profile: PayerProfile): PayerDeps;
+  receiver(labDir: string | undefined, profile: ReceiverProfile): ReceiverDeps;
+}
+
+const LAB_SERVICES: Services = {
+  payer: (labDir, profile) => openPayer(loadLab(labDir), profile),
+  receiver: (labDir, profile) => openReceiver(loadLab(labDir), profile),
+};
+
+function codeFor(outcome: PayOutcome): number {
   switch (outcome.kind) {
     case 'succeeded': return EXIT.ok;
     case 'failed': return EXIT.failed;
@@ -95,6 +126,18 @@ function exitFor(outcome: PayOutcome): number {
     case 'not-submitted': return EXIT.unresolved;
     case 'unresolved': return EXIT.unresolved;
   }
+}
+
+function exitFor(outcome: PayOutcome): number {
+  emit({ event: 'outcome', ...outcome });
+  return codeFor(outcome);
+}
+
+/** Several payments' outcomes (payer reconcile): unresolved before refused before failed before done. */
+function exitForAll(outcomes: PayOutcome[]): number {
+  for (const outcome of outcomes) emit({ event: 'outcome', ...outcome });
+  const codes = new Set(outcomes.map(codeFor));
+  return [EXIT.unresolved, EXIT.refused, EXIT.failed].find(code => codes.has(code)) ?? EXIT.ok;
 }
 
 async function waitForGo(): Promise<void> {
@@ -122,28 +165,30 @@ function showPayment(deps: PayerDeps, operationId: string): void {
   });
 }
 
-async function payer(command: string, args: string[]): Promise<number> {
+async function payer(command: string, args: string[], services: Services): Promise<number> {
   const { values } = parseArgs({ args, options: {
     as: { type: 'string' }, operation: { type: 'string' }, kind: { type: 'string' }, invoice: { type: 'string' },
     'fee-limit-msat': { type: 'string' }, 'max-parts': { type: 'string' }, 'timeout-s': { type: 'string' }, budget: { type: 'string' },
     'limit-msat': { type: 'string' }, 'payment-hash': { type: 'string' }, fault: { type: 'string' }, 'wait-for-go': { type: 'boolean' },
     lab: { type: 'string' },
   }, strict: true });
-  const lab = loadLab(values.lab);
-  const deps = openPayer(lab, payerProfile(required(values, 'as')));
+  const deps = services.payer(values.lab, payerProfile(required(values, 'as')));
   try {
     switch (command) {
       case 'pay': {
         const operationId = identifier(required(values, 'operation'), '--operation');
         const kind = required(values, 'kind');
         if (!['order-payment', 'refund', 'payout'].includes(kind)) throw new UsageError('--kind must be order-payment, refund or payout');
-        const feeLimitMsat = parseAmount(required(values, 'fee-limit-msat'), '--fee-limit-msat');
-        const maxParts = values['max-parts'] === undefined ? 16 : Number(parseAmount(values['max-parts'], '--max-parts'));
+        const feeLimitMsat = amountArg(required(values, 'fee-limit-msat'), '--fee-limit-msat');
+        const maxParts = values['max-parts'] === undefined ? 16 : Number(amountArg(values['max-parts'], '--max-parts'));
         if (maxParts < 1 || maxParts > 128) throw new UsageError('--max-parts must be 1 to 128');
         const fault = (values.fault ?? 'none') as Fault;
         if (fault !== 'none' && fault !== 'drop-stream-after-in-flight') throw new UsageError('--fault must be drop-stream-after-in-flight');
         const budgetId = values.budget === undefined ? undefined : identifier(values.budget, '--budget');
+        const timeoutSeconds = seconds(values, 'timeout-s', 60);
         const paymentRequest = required(values, 'invoice');
+        const replayed = await answerFromRecord(deps, operationId, paymentRequest);
+        if (replayed !== undefined) return replayed;
         const decoded = await decodeInvoice(deps, paymentRequest);
         if ('error' in decoded) { emit({ event: 'invoice-refused', operationId, reason: decoded.error }); return EXIT.refused; }
         emit({ event: 'invoice-decoded', operationId, paymentHash: decoded.invoice.paymentHash, amountMsat: decoded.invoice.amountMsat,
@@ -156,37 +201,34 @@ async function payer(command: string, args: string[]): Promise<number> {
           return exitFor(await reconcileOrReport(deps, intent.payment.paymentHash, intent.payment.state));
         }
         const signal = stopSignal();
-        return exitFor(await submit(deps, intent.payment.paymentHash, { timeoutSeconds: seconds(values, 'timeout-s', 60), fault, signal }));
+        return exitFor(await submit(deps, intent.payment.paymentHash, { timeoutSeconds, fault, signal }));
       }
       case 'retry': {
         const operationId = identifier(required(values, 'operation'), '--operation');
+        const timeoutSeconds = seconds(values, 'timeout-s', 60);
         const prepared = deps.store.prepareRetry(operationId);
         if (prepared.outcome !== 'recorded') {
           emit({ event: 'retry-refused', operationId, reason: prepared.outcome === 'refused' ? prepared.reason : 'unexpected' });
           return EXIT.refused;
         }
         emit({ event: 'retry-prepared', operationId, paymentHash: prepared.payment.paymentHash });
-        return exitFor(await submit(deps, prepared.payment.paymentHash, { timeoutSeconds: seconds(values, 'timeout-s', 60), fault: 'none',
-          signal: stopSignal() }));
+        return exitFor(await submit(deps, prepared.payment.paymentHash, { timeoutSeconds, fault: 'none', signal: stopSignal() }));
       }
       case 'reconcile': {
-        const signal = stopSignal(values['timeout-s'] === undefined ? undefined : seconds(values, 'timeout-s', 60));
+        const timeoutSeconds = values['timeout-s'] === undefined ? undefined : seconds(values, 'timeout-s', 60);
         const targets = values['payment-hash'] === undefined
           ? deps.store.unresolvedPayments().map(item => item.paymentHash)
-          : [assertHash(values['payment-hash'])];
+          : [hashArg(values['payment-hash'], '--payment-hash')];
+        const signal = stopSignal(timeoutSeconds);
         emit({ event: 'reconcile-started', payments: targets.length });
-        const outcomes = await Promise.all(targets.map(hash => reconcile(deps, hash, signal)));
-        for (const outcome of outcomes) emit({ event: 'outcome', ...outcome });
-        if (outcomes.some(item => item.kind === 'unresolved' || item.kind === 'not-submitted')) return EXIT.unresolved;
-        if (outcomes.some(item => item.kind === 'refused')) return EXIT.refused;
-        return EXIT.ok;
+        return exitForAll(await Promise.all(targets.map(hash => reconcile(deps, hash, signal))));
       }
       case 'show':
         showPayment(deps, identifier(required(values, 'operation'), '--operation'));
         return EXIT.ok;
       case 'budget-set': {
         const budgetId = identifier(required(values, 'budget'), '--budget');
-        deps.store.setBudget(budgetId, parseAmount(required(values, 'limit-msat'), '--limit-msat'));
+        deps.store.setBudget(budgetId, amountArg(required(values, 'limit-msat'), '--limit-msat'));
         emit({ event: 'budget', ...deps.store.budgetStatus(budgetId) });
         return EXIT.ok;
       }
@@ -203,25 +245,94 @@ async function payer(command: string, args: string[]): Promise<number> {
   }
 }
 
+/**
+ * A repeated request is answered from the record before the invoice is decoded,
+ * so a replay depends neither on the invoice still being valid (it may have
+ * expired since it was paid) nor on a fresh DecodePayReq. A completed operation
+ * replays its recorded success for any invoice it recorded, and is refused for
+ * any other; a payment that was sent is answered from the record or TrackPaymentV2.
+ * Only a new invoice, or a recorded intent that was never sent, goes on to be
+ * decoded and checked, because it is about to be sent. Returns undefined for those.
+ *
+ * "An invoice it recorded" is matched by payment hash when the invoice decodes
+ * offline (bolt11.ts), else by text compared case-insensitively: BOLT11 is
+ * case-insensitive, and QR codes carry invoices in upper case. If a completed
+ * operation's stored invoice is damaged, the invoice given cannot be compared
+ * with it as text; it is then read with DecodePayReq (a read, nothing is sent)
+ * and matched by hash, and a refusal says the record is damaged.
+ */
+async function answerFromRecord(deps: PayerDeps, operationId: string, paymentRequest: string): Promise<number | undefined> {
+  const operation = deps.store.operation(operationId);
+  if (operation === undefined) return undefined;
+  const recorded = recordedPayment(deps, operationId, paymentRequest);
+  if (operation.state === 'completed') {
+    const paid = deps.store.paymentForOperation(operationId);
+    if (paid?.state !== 'succeeded') return undefined;
+    if (recorded === undefined) {
+      const damaged = deps.store.paymentsForOperation(operationId).filter(item => damagedPaymentRequest(item.paymentRequest));
+      if (damaged.length === 0) {
+        emit({ event: 'intent-refused', operationId, reason: `operation ${operationId} is already completed` });
+        return EXIT.refused;
+      }
+      const hash = await paymentHashFromLnd(deps, paymentRequest);
+      const match = hash === undefined ? undefined : deps.store.payment(hash);
+      if (match?.operationId !== operationId) {
+        emit({ event: 'intent-refused', operationId, reason: `operation ${operationId} is completed (payment ${paid.paymentHash}), but the stored `
+          + `invoice of payment ${damaged.map(item => item.paymentHash).join(', ')} is damaged, so the invoice given could not be compared with it as text; `
+          + (hash === undefined ? 'DecodePayReq could not read the invoice given either'
+            : `the invoice given is for payment hash ${hash}, which this operation never recorded`)
+          + '; inspect the record with "payer show"' });
+        return EXIT.refused;
+      }
+      emit({ event: 'stored-invoice-damaged', operationId, paymentHashes: damaged.map(item => item.paymentHash),
+        matchedBy: 'payment hash from DecodePayReq' });
+    }
+    emit({ event: 'already-recorded', operationId, paymentHash: paid.paymentHash, state: paid.state });
+    return exitFor({ kind: 'succeeded', paymentHash: paid.paymentHash, feeMsat: paid.feeMsat ?? 0n });
+  }
+  if (recorded === undefined || recorded.state === 'intent') return undefined;
+  if (recorded.state === 'failed') {
+    emit({ event: 'already-recorded', operationId, paymentHash: recorded.paymentHash, state: recorded.state });
+    return exitFor({ kind: 'failed', paymentHash: recorded.paymentHash, reason: recorded.failureReason ?? 'unknown' });
+  }
+  return exitFor(await reconcileOrReport(deps, recorded.paymentHash, recorded.state));
+}
+
+/** The operation's payment for this invoice: by payment hash when it decodes offline, else by case-insensitive text. */
+function recordedPayment(deps: PayerDeps, operationId: string, paymentRequest: string): PaymentRecord | undefined {
+  const hash = bolt11PaymentHash(paymentRequest);
+  const byHash = hash === undefined ? undefined : deps.store.payment(hash);
+  if (byHash?.operationId === operationId) return byHash;
+  return deps.store.paymentForRequest(operationId, paymentRequest);
+}
+
+/** The payment hash LND reads from an invoice, or undefined. DecodePayReq only reads; expiry does not matter here. */
+async function paymentHashFromLnd(deps: PayerDeps, paymentRequest: string): Promise<string | undefined> {
+  try {
+    return (await deps.api.decodePayReq(paymentRequest)).paymentHash;
+  } catch {
+    return undefined;
+  }
+}
+
 /** A repeated request for an operation that was already submitted is answered from LND, never by paying again. */
 async function reconcileOrReport(deps: PayerDeps, paymentHash: string, state: string): Promise<PayOutcome> {
   emit({ event: 'already-submitted', paymentHash, state, action: 'reconcile with TrackPaymentV2; SendPaymentV2 is not called again' });
   return reconcile(deps, paymentHash, AbortSignal.timeout(30_000));
 }
 
-async function receiver(command: string, args: string[]): Promise<number> {
+async function receiver(command: string, args: string[], services: Services): Promise<number> {
   const { values } = parseArgs({ args, options: {
     as: { type: 'string' }, order: { type: 'string' }, 'amount-msat': { type: 'string' }, hold: { type: 'boolean' },
     memo: { type: 'string' }, 'expiry-s': { type: 'string' }, 'settle-index': { type: 'string' }, 'add-index': { type: 'string' },
     'reconcile-interval-s': { type: 'string' }, lab: { type: 'string' },
   }, strict: true });
-  const lab = loadLab(values.lab);
-  const deps = openReceiver(lab, receiverProfile(required(values, 'as')));
+  const deps = services.receiver(values.lab, receiverProfile(required(values, 'as')));
   try {
     switch (command) {
       case 'create-invoice': {
         const orderId = identifier(required(values, 'order'), '--order');
-        const amountMsat = parseAmount(required(values, 'amount-msat'), '--amount-msat');
+        const amountMsat = amountArg(required(values, 'amount-msat'), '--amount-msat');
         if (amountMsat === 0n) throw new UsageError('--amount-msat must be positive');
         const outcome = await createInvoice(deps, { orderId, amountMsat, hold: values.hold === true, memo: values.memo ?? orderId,
           expirySeconds: seconds(values, 'expiry-s', 3600) });
@@ -239,7 +350,8 @@ async function receiver(command: string, args: string[]): Promise<number> {
         return outcome.kind === 'canceled' ? EXIT.ok : outcome.kind === 'unresolved' ? EXIT.unresolved : EXIT.refused;
       }
       case 'reconcile': {
-        const result = await reconcileInvoices(deps, values.order === undefined ? undefined : identifier(values.order, '--order'));
+        const result = await reconcileInvoices(deps, values.order === undefined ? undefined : identifier(values.order, '--order'),
+          stopSignal());
         emit({ event: 'outcome', ...result });
         return result.unknown > 0 ? EXIT.unresolved : EXIT.ok;
       }
@@ -250,8 +362,8 @@ async function receiver(command: string, args: string[]): Promise<number> {
         return EXIT.ok;
       }
       case 'cursor-set': {
-        const settleIndex = parseAmount(required(values, 'settle-index'), '--settle-index');
-        const addIndex = values['add-index'] === undefined ? 0n : parseAmount(values['add-index'], '--add-index');
+        const settleIndex = amountArg(required(values, 'settle-index'), '--settle-index');
+        const addIndex = values['add-index'] === undefined ? 0n : amountArg(values['add-index'], '--add-index');
         const before = deps.store.cursor();
         deps.store.setCursor(settleIndex, addIndex);
         emit({ event: 'cursor-set', before, after: deps.store.cursor() });
@@ -285,7 +397,7 @@ async function analysis(command: string, args: string[]): Promise<number> {
   const read = readApi(lab, nodeName(required(values, 'node')));
   switch (command) {
     case 'payments': {
-      const result = await paymentsForHash(read, assertHash(required(values, 'payment-hash')));
+      const result = await paymentsForHash(read, hashArg(required(values, 'payment-hash'), '--payment-hash'));
       emit({ event: 'payments-for-hash', count: result.payments.length, scanned: result.scanned, complete: result.complete,
         payments: result.payments });
       return EXIT.ok;
@@ -314,7 +426,7 @@ const USAGE = `usage: node src/cli.ts <component> <command> [options]
   payer pay --as <customer-payer|merchant-refunds> --operation <id> --kind <order-payment|refund|payout>
             --invoice <bolt11> --fee-limit-msat <n> [--max-parts <n>] [--timeout-s <n>] [--budget <id>]
             [--wait-for-go] [--fault drop-stream-after-in-flight]
-  payer retry --as <profile> --operation <id>
+  payer retry --as <profile> --operation <id> [--timeout-s <n>]
   payer reconcile --as <profile> [--payment-hash <hex>] [--timeout-s <n>]
   payer show --as <profile> --operation <id>
   payer budget-set --as <profile> --budget <id> --limit-msat <n>
@@ -328,12 +440,12 @@ const USAGE = `usage: node src/cli.ts <component> <command> [options]
   analysis diagnose --node <node> --payer <profile> --operation <id>
 All commands accept --lab <dir> (default: the run named in runtime/current.json).`;
 
-async function main(argv: string[]): Promise<number> {
+export async function main(argv: string[], services: Services = LAB_SERVICES): Promise<number> {
   const [component, command, ...rest] = argv;
   try {
     if (component === undefined || command === undefined) throw new UsageError('component and command are required');
-    if (component === 'payer') return await payer(command, rest);
-    if (component === 'receiver') return await receiver(command, rest);
+    if (component === 'payer') return await payer(command, rest, services);
+    if (component === 'receiver') return await receiver(command, rest, services);
     if (component === 'analysis') return await analysis(command, rest);
     throw new UsageError(`unknown component ${component}`);
   } catch (error) {
@@ -346,4 +458,11 @@ async function main(argv: string[]): Promise<number> {
   }
 }
 
-process.exitCode = await main(process.argv.slice(2));
+/** True when this file is the program Node was started with (`node src/cli.ts`), not a module a test imports. */
+function isEntryPoint(): boolean {
+  const script = process.argv[1];
+  if (script === undefined) return false;
+  try { return pathToFileURL(realpathSync(script)).href === import.meta.url; } catch { return false; }
+}
+
+if (isEntryPoint()) process.exitCode = await main(process.argv.slice(2));

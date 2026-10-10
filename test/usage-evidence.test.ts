@@ -215,3 +215,23 @@ it('WATCH/usage-store a clock that steps back never writes a file the reader ref
   const covered = copy.coverageFor(node)!;
   expect(Date.parse(covered.firstStart)).toBeLessThanOrEqual(Date.parse(covered.lastEnd));
 });
+
+// 1.2.1 (owner finding): the covered-seconds counter starts where the span starts, so a clock that
+// stepped back between sessions cannot count time the spans already hold.
+it('USAGE/coverage-rollback a registration that begins before the last span ended counts no covered second twice', () => {
+  const store = new UsageStore();
+  const t = (seconds: number) => new Date(Date.parse('2026-10-01T00:00:00Z') + seconds * 1_000);
+  store.beginCoverage(PUBKEY, t(0));
+  store.extendCoverage(PUBKEY, t(600));
+  store.endCoverage(PUBKEY, t(600));
+  // The clock steps back 300 s, watch reconnects, then the clock is corrected.
+  store.beginCoverage(PUBKEY, t(300));
+  store.extendCoverage(PUBKEY, t(900));
+  store.endCoverage(PUBKEY, t(900));
+  const record = store.coverageFor(PUBKEY)!;
+  const spans = store.toText().includes('coverageSpans') ? (JSON.parse(store.toText()) as { coverageSpans: { spans: [string, string][] }[] }).coverageSpans[0].spans : [];
+  const spanSeconds = spans.reduce((total, [from, to]) => total + (Date.parse(to) - Date.parse(from)) / 1_000, 0);
+  expect(spanSeconds).toBe(900);
+  expect(record.coveredSeconds).toBe(900);
+  expect(record.sessions).toBe(2);
+});
