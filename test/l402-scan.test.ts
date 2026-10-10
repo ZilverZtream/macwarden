@@ -6,6 +6,7 @@ import { afterAll, expect, it } from 'vitest';
 import { run } from '../src/commands/scan.js';
 import { renderChunks, type OutputResult } from '../src/output/index.js';
 import { scan, type ScanFinding } from '../src/scan/index.js';
+import { compare, LINEAR_4X } from './helpers/growth.js';
 import { findLeaks } from './helpers/leak-check.js';
 import { expectDocumentValid } from './helpers/output-schema.js';
 import { encodings, fp, identifier, macaroon, sha256, token, tokenFile, type Token } from './helpers/l402-vectors.js';
@@ -228,27 +229,22 @@ it('L402-scan/linear time: hostile lines of open L402 prefixes and colon-hex run
     challengeRun: n => `L402 invoice="${'a'.repeat(n / 2)}", macaroon="${'A'.repeat(n / 2)}`,
     invoices: n => 'L402 invoice=x, '.repeat(Math.ceil(n / 16)).slice(0, n),
   };
-  const timings: Record<string, number[]> = {};
+  // Each shape is timed at both sizes alternately after a warm-up, keeping each size's fastest
+  // round (compare), so a loaded runner slows both alike: four times the input stays under
+  // LINEAR_4X, the bound every growth test shares, far below the sixteen of quadratic work.
+  const timings: Record<string, string> = {};
   for (const [name, shape] of Object.entries(shapes)) {
-    timings[name] = [];
-    for (const size of [1_000_000, 4_000_000]) {
+    const scanOf = (size: number) => {
       const path = join(scratch, `${name}-${size}.txt`);
       writeFileSync(path, shape(size));
-      // The fastest of three runs, so one scheduler or collector stall on a shared runner is not
-      // read as superlinear work; the bound below is unchanged.
-      let fastest = Infinity;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        const started = performance.now();
-        await scan([path], { clock });
-        fastest = Math.min(fastest, performance.now() - started);
-      }
-      timings[name].push(fastest);
-    }
+      return async () => { await scan([path], { clock }); };
+    };
+    const timing = await compare(scanOf(1_000_000), scanOf(4_000_000));
+    timings[name] = timing.summary;
+    expect(timing.ratio, `${name}: ${timing.summary}`).toBeLessThan(LINEAR_4X);
   }
-  console.log(`L402-scan linear timings ms [1 MB, 4 MB]: ${JSON.stringify(timings, (_, v: unknown) => typeof v === 'number' ? Math.round(v) : v)}`);
-  // Four times the input takes at most about four times as long (with headroom for noise).
-  for (const [name, [small, large]] of Object.entries(timings)) expect(large, name).toBeLessThan(8 * Math.max(small, 25));
-}, 180_000);
+  console.log(`L402-scan linear timings 1 MB and 4 MB: ${JSON.stringify(timings)}`);
+}, 300_000);
 
 it('L402-scan/real-world forms: several macaroons, challenge variants, curl, YAML, .env pairs and MCP agent configs', async () => {
   const dir = mkdtempSync(join(scratch, 'forms-'));

@@ -439,13 +439,23 @@ function sentinelSources({ sentinels, sentinelDir, root }) {
     const pattern = globPattern(glob);
     return filesUnder(base).filter(path => pattern.test(relative(projectRoot, path).split(sep).join('/')));
   });
-  if (sentinelDir) sourcePaths.push(...filesUnder(sentinelDir));
+  // Runtime sentinels are written and removed by tests in other workers while this check runs.
+  // filesUnder already skips one removed while the directory is listed; one removed between the
+  // listing and its read is skipped the same way (it holds no credential any more). A registered
+  // source that cannot be read still fails.
+  const runtime = new Set(sentinelDir ? filesUnder(sentinelDir) : []);
+  sourcePaths.push(...runtime);
   // Read every declared path, including duplicates, so unreadable sources
   // still fail validation. Recognition needs each exact credential only once;
   // source paths remain intact for independent artifact accounting.
   const distinct = new Map();
   for (const path of sourcePaths) {
-    const bytes = readFileSync(path);
+    let bytes;
+    try { bytes = readFileSync(path); }
+    catch (error) {
+      if (error?.code === 'ENOENT' && runtime.has(path)) continue;
+      throw error;
+    }
     if (bytes.length) distinct.set(bytes.toString('hex'), bytes);
     // An NWC URI sentinel also registers its 32-byte connection secret, so the
     // secret is found in every encoding even when it leaks without the URI.

@@ -11,7 +11,7 @@ import { addFirstPartyCaveat, decodeMacaroon } from '../src/decode/index.js';
 import { gradeFacts } from '../src/grade/index.js';
 import { CANDIDATE_LIMIT, scan, type ScanResult } from '../src/scan/index.js';
 import { Secret } from '../src/secret.js';
-import { compare } from './helpers/growth.js';
+import { compare, LINEAR_4X } from './helpers/growth.js';
 import { revealSecret } from './helpers/secret-bytes.js';
 
 const repo = resolve();
@@ -186,7 +186,7 @@ it('MW110-01 hostile 5 MB lines of open candidates scan in linear time', async (
   };
   // Each shape is timed at both sizes alternately, keeping each size's fastest round, so a
   // loaded runner slows both alike: four times the input takes at most about four times as
-  // long (with headroom for noise), far below the sixteen times of quadratic rescanning.
+  // long (LINEAR_4X, the bound every growth test shares), far below the sixteen times of quadratic rescanning.
   for (const [name, shape] of Object.entries(shapes)) {
     const scanOf = (size: number) => {
       const path = join(dir, `${name}-${size}.txt`);
@@ -199,6 +199,6 @@ it('MW110-01 hostile 5 MB lines of open candidates scan in linear time', async (
     };
     const timing = await compare(scanOf(1_250_000), scanOf(5_000_000));
     console.log(`MW110-01 ${name} scan 1.25 MB and 5 MB: ${timing.summary}`);
-    expect(timing.ratio, `${name}: ${timing.summary}`).toBeLessThan(8);
+    expect(timing.ratio, `${name}: ${timing.summary}`).toBeLessThan(LINEAR_4X);
   }
 }), 180_000);

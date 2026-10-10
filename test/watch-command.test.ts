@@ -601,7 +601,9 @@ it('WATCH/usage-validation an error for a call without a valid credential is not
   });
   expect(result).toMatchObject({ ok: true, result: { calls: 1, errors: 1 } });
   // A second watch reads the file it left behind.
-  const again = await watchUntil(s.args, fakeRegister({ registrations: [], decide: [], end: [] } as unknown as Script), async stop => { await settle(); stop(); });
+  // Stopped once registered: a stop while GetInfo still waits is an interrupt (WATCH/interrupted).
+  const second = { registrations: [], decide: [], end: [] } as unknown as Script;
+  const again = await watchUntil(s.args, fakeRegister(second), async stop => { await second.ready; await settle(); stop(); });
   expect(again.result).toMatchObject({ ok: true });
   expect(again.result.warnings).not.toContainEqual(expect.objectContaining({ code: 'usage-file-quarantined' }));
   const store = new UsageStore();
