@@ -22,6 +22,11 @@ export async function scratch<T>(work: (dir: string) => T | Promise<T>): Promise
   finally { cleanup(); }
 }
 export function declare(path: string): void { appendFileSync(join(root(), 'declared-out.txt'), path + '\n'); }
+/** Declares an output whose path holds a credential by the SHA-256 of its resolved path, so the
+ * declared-output manifest the leak check reads never contains it. */
+export function declareHashed(path: string): void {
+  appendFileSync(join(root(), 'declared-out.txt'), `sha256:${createHash('sha256').update(resolve(path), 'utf8').digest('hex')}\n`);
+}
 export function register(bytes: Buffer): string {
   const path = join(root('MACWARDEN_SENTINEL_DIR'), `cp039-${fingerprint(bytes).slice(3)}-${randomUUID()}.macaroon`);
   writeFileSync(path, bytes, { mode: 0o600, flag: 'wx' });

@@ -1,0 +1,108 @@
+# Regtest stack for the payment lab: bitcoind and three LND nodes,
+# customer -> router -> merchant. Images are pinned by digest to the versions
+# the macwarden test fixture uses (test/fixture/docker-compose.yml).
+#
+# Host ports, loopback only, apart from the test fixture (18009, 18080,
+# 18109-18480) and the agent payments example (19309, 19380, 19381):
+#   19501  customer LND REST
+#   19502  router LND REST
+#   19503  merchant LND REST
+# bitcoind and the peer-to-peer ports are reachable only inside the Compose network.
+#
+# The lab is started by setup.sh / setup.ps1 and removed by teardown.sh /
+# teardown.ps1 (docker compose down --volumes: this project's containers,
+# network and named volumes only).
+name: macwarden-payment-lab
+
+x-lnd: &lnd
+  image: lightninglabs/lnd:v0.21.4-beta@sha256:04d06edcc0f6e99a5e797ea34959f330add222226f840cd86afbc31f8f29627d
+  depends_on:
+    bitcoind:
+      condition: service_healthy
+  restart: "no"
+  # Healthy once LND's RPC server answers (RPC_ACTIVE, or SERVER_ACTIVE after chain sync).
+  healthcheck:
+    test: ["CMD-SHELL", "lncli --network=regtest state | grep -Eq '\"(RPC_ACTIVE|SERVER_ACTIVE)\"'"]
+    interval: 2s
+    timeout: 5s
+    retries: 60
+    start_period: 5s
+
+x-lnd-args: &lnd-args
+  - --bitcoin.active
+  - --bitcoin.regtest
+  - --bitcoin.node=bitcoind
+  - --bitcoind.rpchost=bitcoind:18443
+  - --bitcoind.rpcuser=lab
+  - --bitcoind.rpcpass=regtest-lab-only
+  - --bitcoind.zmqpubrawblock=tcp://bitcoind:28332
+  - --bitcoind.zmqpubrawtx=tcp://bitcoind:28333
+  - --noseedbackup
+  - --listen=0.0.0.0:9735
+  - --rpclisten=0.0.0.0:10009
+  - --restlisten=0.0.0.0:8080
+  - --tlsextradomain=localhost
+  # Gossip within about a second instead of the 90 s default, so setup's
+  # graph waits finish quickly; each wait still checks the real graph.
+  - --trickledelay=1000
+  # Two channels from the customer to the router are opened in one block.
+  - --maxpendingchannels=10
+
+services:
+  bitcoind:
+    image: lightninglabs/bitcoin-core:31.1@sha256:86e15e4348869a86343aacbbd1aff38e96cffddd87b61644694b1e1358d737cd
+    command:
+      - -regtest
+      - -server=1
+      - -txindex=1
+      - -fallbackfee=0.0002
+      - -rpcuser=lab
+      - -rpcpassword=regtest-lab-only
+      - -rpcbind=0.0.0.0
+      - -rpcallowip=0.0.0.0/0
+      - -zmqpubrawblock=tcp://0.0.0.0:28332
+      - -zmqpubrawtx=tcp://0.0.0.0:28333
+    healthcheck:
+      test: ["CMD", "bitcoin-cli", "-regtest", "-rpcuser=lab", "-rpcpassword=regtest-lab-only", "getblockchaininfo"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+      start_period: 3s
+    volumes:
+      - bitcoin-data:/home/bitcoin/.bitcoin
+
+  customer:
+    <<: *lnd
+    hostname: customer
+    entrypoint: ["lnd", "--alias=customer", "--tlsextradomain=customer"]
+    command: *lnd-args
+    ports:
+      - 127.0.0.1:19501:8080
+    volumes:
+      - customer-data:/root/.lnd
+
+  router:
+    <<: *lnd
+    hostname: router
+    entrypoint: ["lnd", "--alias=router", "--tlsextradomain=router"]
+    command: *lnd-args
+    ports:
+      - 127.0.0.1:19502:8080
+    volumes:
+      - router-data:/root/.lnd
+
+  merchant:
+    <<: *lnd
+    hostname: merchant
+    entrypoint: ["lnd", "--alias=merchant", "--tlsextradomain=merchant"]
+    command: *lnd-args
+    ports:
+      - 127.0.0.1:19503:8080
+    volumes:
+      - merchant-data:/root/.lnd
+
+volumes:
+  bitcoin-data:
+  customer-data:
+  router-data:
+  merchant-data:

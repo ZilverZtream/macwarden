@@ -12,7 +12,7 @@ const help = [
   '       macwarden --help | --version',
   '',
   'Commands:',
-  '  inspect    decode a macaroon or NWC URI offline and grade what it can do',
+  '  inspect    decode a macaroon, NWC URI, L402 token or Core Lightning rune offline and grade what it can do',
   '  scan       find credentials in files and, with --git-history, in git history (offline)',
   "  inventory  list the node's root key IDs against the registry",
   '  bake       issue a least-privilege macaroon on its own root key ID and record it',
@@ -23,13 +23,14 @@ const help = [
   '  recommend  suggest the least permissions a credential needs from observed usage',
   '  respond    after a suspected leak: stage replacements for every credential, then --finish with proof',
   '  verify     ask LND whether one credential file is still accepted (after a leak)',
+  "  reconcile  match watch's payment journal against LND's payment records, per credential",
   '',
 ].join('\n');
 
 describe('CP-001 CLI', () => {
   it('CP-001/B1 prints the package version', async () => {
     const actual = await captureMain(main, ['--version']);
-    expect(actual).toMatchObject({ code: 0, stdout: '1.1.1\n', stderr: '' });
+    expect(actual).toMatchObject({ code: 0, stdout: '1.2.0\n', stderr: '' });
   });
 
   it('CP-001/B2 prints help on stdout', async () => {
@@ -106,7 +107,7 @@ describe('CP-001 CLI', () => {
   });
 
   it('CP-001/B2 MW110-10 command help with --json is one JSON document carrying the synopsis, for every command', async () => {
-    const commands = ['inspect', 'scan', 'inventory', 'bake', 'revoke', 'rotate', 'attenuate', 'watch', 'recommend', 'respond', 'verify'];
+    const commands = ['inspect', 'scan', 'inventory', 'bake', 'revoke', 'rotate', 'attenuate', 'watch', 'recommend', 'respond', 'verify', 'reconcile'];
     for (const command of commands) {
       const text = await captureMain(main, [command, '--help']);
       const usage = text.stdout.trimEnd().split('\n').map(line => line.replace(/^(?:Usage: | {7})/, ''));

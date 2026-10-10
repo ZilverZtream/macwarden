@@ -13,7 +13,7 @@ import { childEnvironment } from './helpers/environment.js';
 
 const repo = resolve();
 const schemaFile = (name: string) => JSON.parse(readFileSync(join(repo, 'schemas/output', `${name}.schema.json`), 'utf8'));
-const commands = ['inventory', 'bake', 'revoke', 'rotate', 'attenuate', 'verify', 'watch', 'recommend'];
+const commands = ['inventory', 'bake', 'revoke', 'rotate', 'attenuate', 'verify', 'watch', 'recommend', 'reconcile'];
 const tmp = mkdtempSync(join(process.env.MACWARDEN_TEST_TMP ?? tmpdir(), 'output-schemas-'));
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 

@@ -5,7 +5,8 @@ import { types } from 'node:util';
 import { lndconnect } from '../scan/patterns.js';
 import { replaceNwc } from '../scan/nwc-match.js';
 import { redactEncodedCredentials } from '../credential-recognition.js';
-import { collectNwcSecrets, redactKnownSecrets } from '../scan/redact.js';
+import { collectNwcSecrets, redactKnownSecrets, redactL402Text } from '../scan/redact.js';
+import { redactRuneContexts } from '../scan/rune-context.js';
 import type { RegistryEntry } from '../registry/index.js';
 import { shellQuote } from '../online.js';
 import { dirname, join } from 'node:path';
@@ -18,11 +19,18 @@ export type InspectResult = {
   caveats: import('../decode/index.js').Caveat[]; grade: string; reasons: string[];
   warnings: string[]; unassessed: string[]; snapshot: string;
 };
+// Core Lightning rune facts (1.2.0); the authenticator and the decoded string are never part of it.
+export type RuneInspectResult = {
+  kind: 'rune'; fingerprint: string; grade: string; reasons: string[]; unassessed: string[];
+  rune: import('../rune-report.js').RuneReport;
+};
 // NIP-47 connection facts; the connection secret is never part of the result.
 export type NwcInspectResult = {
   kind: 'nwc'; fingerprint: string; walletPubkey: string; clientPubkey: string; relays: string[];
   lud16: string | null; grade: 'SPEND'; reasons: string[]; warnings: string[];
 };
+/** L402 credential facts; neither the preimage nor the macaroon bytes are part of the result. */
+export type L402InspectResult = { kind: 'l402'; fingerprint: string } & import('../l402.js').L402Report;
 export type InventoryResult = {
   node: { pubkey: string; alias: string; network: string; version: string };
   rootKeys: { rootKeyId: string; flags: string[]; verify: string;
@@ -65,14 +73,51 @@ export type WatchEvent =
       repeats?: number }
   | { event: 'status'; time: string; status: 'registered' | 'reconnecting'; canaries: number; readOnly: true }
   | { event: 'status'; time: string; status: 'output-dropped'; dropped: number }
-  | { event: 'status'; time: string; status: 'alert-failed'; rootKeyId: string; label: string | null };
+  | { event: 'status'; time: string; status: 'alert-failed'; rootKeyId: string; label: string | null }
+  /** The payment journal stopped before the run ended; payments after this are not journaled. */
+  | { event: 'status'; time: string; status: 'payment-journal-stopped'; reason: 'full' | 'write-failed' | 'stalled' };
 export type WatchResult = { node: string; startedAt: string; endedAt: string; calls: number; errors: number;
   credentials: number; canaryAlerts: number; canaryUses: number; alertFailures: number; reconnects: number; canaries: number; usageFile: string;
   droppedUsageRecords: number;
   /** Usage records evicted (least recently seen first) to stay within the store limit. */
   evictedUsageRecords: number; droppedEvents: number 
   /** Calls whose attribution was dropped because callers outpaced it (the RPCs themselves were answered). */
-  droppedAttributions?: number };
+  droppedAttributions?: number;
+  /** Present with --payment-journal: records written this run, calls not journaled, and why journaling stopped early. */
+  paymentJournal?: { path: string; payments: number; deletions: number; dropped: number; stopped: 'full' | 'write-failed' | 'stalled' | null } };
+/** One journaled payment request, as reconcile reports it (observation evidence). */
+export type ReconcileObservation = { time: string; run: string; requestId: string; method: string; credential: string; rootKeyId: string;
+  label: string | null; amountMsat: string | null; amountSource: 'request' | 'invoice' | 'route' | null; feeLimitMsat: string | null;
+  extraction: string };
+/** What LND reports for one payment hash (settlement evidence); amounts in millisatoshi as decimal strings. */
+export type ReconcileSettlement = { status: 'succeeded' | 'failed' | 'in-flight' | 'not-found' | 'unknown';
+  source: 'list-payments' | 'track-payment' | null; createdAt: string | null; settledMsat: string | null; feesMsat: string | null;
+  inFlightMsat: string | null; attempts: number | null; failureReason: string | null; predatesObservation: boolean };
+export type ReconcilePayment = { paymentHash: string; attribution: 'single' | 'ambiguous'; credentials: string[];
+  observation: { first: string; last: string; calls: number; requestedMsat: string | null; routeAttemptsMsat: string | null;
+    feeLimitMsat: string | null; observations: ReconcileObservation[] };
+  settlement: ReconcileSettlement; deletedBy: string[] };
+export type ReconcileCredential = { credential: string; rootKeyIds: string[]; label: string | null; payments: number; succeeded: number;
+  failed: number; inFlight: number; notFound: number; unknown: number; ambiguous: number; unmatched: number; deletions: number;
+  requestedMsat: string; settledMsat: string; feesMsat: string; inFlightMsat: string };
+export type ReconcileUnattributed = { paymentHash: string; createdAt: string; status: 'succeeded' | 'failed' | 'in-flight' | 'unknown';
+  settledMsat: string; feesMsat: string; inFlightMsat: string; attempts: number; failureReason: string | null;
+  coverage: 'covered' | 'boundary' | 'gap' };
+export type ReconcileResult = {
+  node: { pubkey: string; alias: string; network: string };
+  journal: { path: string; size: number; runs: number; records: number; firstRecord: string | null; lastRecord: string | null;
+    otherNodeRecords: number; tornTail: boolean; repairedLines: number };
+  window: { since: string; until: string };
+  coverage: { windowSeconds: number; coveredSeconds: number; complete: boolean; gapCount: number; gapSeconds: number;
+    gaps: { from: string; to: string; reason: string; dropped: number }[] };
+  credentials: ReconcileCredential[];
+  payments: ReconcilePayment[];
+  unmatched: ReconcileObservation[];
+  unattributed: ReconcileUnattributed[];
+  deletions: { time: string; run: string; requestId: string; method: string; credential: string; rootKeyId: string; label: string | null;
+    scope: string; paymentHash: string | null; extraction: string }[];
+  lookups: { listed: number; listTruncated: boolean; tracked: number; trackFailed: number; trackLimited: number; attributedOutsideWindow: number };
+};
 export type RecommendResult = { node: string; selector: string; label: string | null; rootKeyId: string | null;
   credentials: string[]; observed: { method: string; calls: number; lastUsed: string; permissions: string[] }[];
   unmapped: string[]; recommended: string[]; recommendedUris: string[]; current: string[] | null; unneeded: string[];
@@ -87,7 +132,7 @@ type Success<C extends string | null, R> = Envelope & { command: C; ok: true; re
 export type OutputResult =
   | (Envelope & { command: string | null; ok: false; result: null;
       error: { code: number; step: string | null; message: string } })
-  | Success<'inspect', InspectResult | NwcInspectResult>
+  | Success<'inspect', InspectResult | NwcInspectResult | L402InspectResult | RuneInspectResult>
   | Success<'scan', import('../scan/index.js').ScanResult>
   | (Success<'inventory', InventoryResult> & { display: { now: number } })
   | Success<'attenuate', AttenuateResult>
@@ -98,6 +143,7 @@ export type OutputResult =
   | Success<'recommend', RecommendResult>
   | Success<'respond', RespondResult>
   | Success<'verify', VerifyResult>
+  | Success<'reconcile', ReconcileResult>
   | Success<null, { text: string }>;
 
 import type { RevokePlan, RevokeResult, RotatePlan, RotateStagedResult, RotateFinishedResult, RespondResult } from '../command-result.js';
@@ -150,12 +196,13 @@ function redact(text: string): string {
 
 function redactUncached(text: string): string {
   lndconnectAll.lastIndex = 0;
-  const withLndconnectRedacted = text.replace(lndconnectAll, match => hasCredentialInLndconnect(match) ? '[redacted]' : match);
+  const withLndconnectRedacted = redactRuneContexts(text).replace(lndconnectAll, match => hasCredentialInLndconnect(match) ? '[redacted]' : match);
   // NWC URIs through the linear matcher: the published regex backtracks quadratically on
   // repeated prefixes. The match consumes one delimiter after the secret, which is kept.
   const withUrisRedacted = replaceNwc(withLndconnectRedacted,
     match => `[redacted]${/[^0-9a-f]$/i.test(match) ? match.slice(-1) : ''}`);
-  return redactEncodedCredentials(withUrisRedacted);
+  // L402 Authorization credentials and macaroon:preimage pairs, which carry a preimage.
+  return redactEncodedCredentials(redactL402Text(withUrisRedacted));
 }
 
 function assertPlain(value: unknown, seen = new WeakSet<object>()): void {
@@ -261,15 +308,40 @@ function* scanTextLines(result: import('../scan/index.js').ScanResult): Generato
       (finding.line === null ? '' : `:${finding.line}:${finding.column}`);
     const counted = finding.kind === 'nwc' ? ' (counted as SPEND)'
       : finding.kind === 'undecodable' || finding.kind === 'undecodable-candidate'
-        ? ' (counted as ADMIN)' : '';
+        ? ' (counted as ADMIN)'
+        : finding.l402 ? ` ${safeText(finding.l402.status)} ${finding.l402.countedAs ? `(counted as ${finding.l402.countedAs})` : '(not counted)'}` : '';
     const grade = finding.grade ? ` ${finding.grade === 'UNASSESSED'
       ? 'UNASSESSED (treat as SPEND or worse)' : finding.grade}` : '';
     const root = finding.rootKeyId === null ? '' : ` root key ${finding.rootKeyId}`;
     // Like inspect: a time-before caveat already in the past makes the credential unusable.
     const expired = finding.caveats?.some(caveat => caveat.type === 'time-before' && caveat.expired === true) ? ' (expired)' : '';
-    yield `${safeText(location)}  ${safeText(finding.kind)}  ${safeText(finding.fingerprint)}${grade}${root}${expired}${counted}${finding.context === 'mcp-config' ? ' (MCP server config)' : ''}${also}\n`;
+    const rune = finding.rune ? runeLineFacts(finding.rune) : '';
+    yield `${safeText(location)}  ${safeText(finding.kind)}  ${safeText(finding.fingerprint)}${grade}${root}${expired}${counted}${rune}${finding.context === 'mcp-config' ? ' (MCP server config)' : ''}${also}\n`;
   }
   yield* scanSummaryLines(result);
+}
+
+type RuneFacts = NonNullable<import('../scan/index.js').ScanFinding['rune']>;
+const runeInvalidText: Record<string, string> = {
+  'exceeds-bounds': 'longer than macwarden parses', 'not-base64url': 'not URL-safe base64', 'too-short': 'shorter than a rune',
+  'nul-byte': 'NUL byte in its restrictions', 'restriction-syntax': 'restriction syntax error',
+  'unique-id-placement': 'misplaced unique ID',
+  'no-unique-id': 'no unique ID, which checkrune requires', 'unique-id-not-numeric': 'unique ID is not a number checkrune accepts',
+};
+
+/** A scan text line's rune facts: unique ID, possible capabilities, method access, expiry; never node acceptance. */
+function runeLineFacts(rune: RuneFacts): string {
+  if (rune.recognition === 'invalid')
+    return ` (in rune context, does not parse as a rune: ${safeText(runeInvalidText[rune.reason] ?? rune.reason)})`;
+  const parts: string[] = [];
+  parts.push(rune.uniqueId === null ? 'no unique ID' : `unique ID ${safeText(rune.uniqueId)}`);
+  if (rune.methods === 'none') parts.push('no method can pass');
+  else parts.push(`may allow ${rune.capabilities.map(safeText).join(', ') || 'unreviewed methods'}`);
+  if (rune.methods === 'broad') parts.push('broad method access');
+  if (rune.warnings.includes('possibly-truncated')) parts.push('value may be cut');
+  if (rune.expiry.status === 'deadline-passed') parts.push('deadline passed according to local clock');
+  parts.push('not checked against the node');
+  return ` (${parts.join('; ')})`;
 }
 
 function* scanSummaryLines(result: import('../scan/index.js').ScanResult): Generator<string> {
@@ -307,6 +379,66 @@ function inspectText(result: InspectResult): string {
   return `${lines.join('\n')}\n`;
 }
 
+function runeTime(seconds: string): string {
+  const value = BigInt(seconds);
+  return value >= -8_640_000_000_000n && value <= 8_640_000_000_000n
+    ? `${seconds} (${new Date(Number(value) * 1000).toISOString().replace('.000Z', 'Z')})` : seconds;
+}
+
+const runeExpiryText: Record<string, (deadline: string | null) => string> = {
+  none: () => 'no time restriction',
+  'time-conditions': () => 'time restrictions present; they do not close every request',
+  'deadline-ahead': deadline => `every request is refused from ${runeTime(deadline ?? '0')} according to its restrictions`,
+  'deadline-passed': deadline => `deadline passed according to local clock (${runeTime(deadline ?? '0')}); node acceptance is not checked`,
+};
+
+function runeInspectText(result: RuneInspectResult): string {
+  const { rune } = result;
+  const grade = result.grade === 'UNASSESSED' ? 'UNASSESSED (treat as SPEND or worse)' : result.grade;
+  const lines = [
+    'kind         rune (Core Lightning)',
+    `fingerprint  ${safeText(result.fingerprint)}`,
+    `unique ID    ${rune.uniqueId === null ? 'none' : safeText(rune.uniqueId)}${rune.version === null ? '' : `  version ${safeText(rune.version)}`}`,
+    `grade        ${safeText(grade)}` + (result.reasons.length ? `   (${result.reasons.map(safeText).join(', ')})` : ''),
+    `methods      ${rune.methods === 'listed' ? `listed: ${rune.allowedMethods.map(safeText).join(' ')}`
+      : rune.methods === 'broad' ? 'broad: not limited to a list of exact method names' : 'none: no method can pass these restrictions'}`,
+    ...(rune.capabilities.length ? [`may allow    ${rune.capabilities.map(safeText).join(', ')}`] : []),
+    ...rune.restrictions.map((restriction, index) => `${index === 0 ? 'restriction ' : 'and         '} ${restriction
+      .map(alternative => `${safeText(alternative.field)}${safeText(alternative.condition)}${safeText(alternative.value)}`).join(' OR ')}`),
+    ...(rune.omittedAlternatives ? [`omitted      ${rune.omittedAlternatives} further alternatives`] : []),
+    ...(rune.conditions.length ? [`conditions   ${rune.conditions.map(safeText).join(', ')} (described, not assessed)`] : []),
+    `expiry       ${safeText(runeExpiryText[rune.expiry.status]?.(rune.expiry.deadline) ?? rune.expiry.status)}`,
+    ...result.unassessed.map(value => `unassessed   ${safeText(value)}`),
+    ...rune.sensitiveMethods.map(value => `sensitive    ${safeText(value)}`),
+    ...rune.warnings.map(code => `warning      ${safeText(code)}`),
+    'verified     no: authenticity, issuing node, blacklist and rate-limit state are not checked offline',
+    `methods from ${safeText(rune.methodTable)}`,
+  ];
+  return `${lines.join('\n')}\n`;
+}
+
+function stringList(items: unknown): boolean {
+  return Array.isArray(items) && items.every(item => typeof item === 'string');
+}
+
+function isRuneInspectResult(value: unknown): value is RuneInspectResult {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const fields = value as Record<string, unknown>;
+  if (fields.kind !== 'rune' || typeof fields.fingerprint !== 'string' || typeof fields.grade !== 'string'
+    || !stringList(fields.reasons) || !stringList(fields.unassessed)) return false;
+  const rune = fields.rune as Record<string, unknown> | null | undefined;
+  if (!rune || typeof rune !== 'object' || rune.recognition !== 'rune-syntax') return false;
+  const expiry = rune.expiry as Record<string, unknown> | null | undefined;
+  return Array.isArray(rune.restrictions) && rune.restrictions.every(restriction => Array.isArray(restriction)
+      && restriction.every((alternative: unknown) => !!alternative && typeof alternative === 'object'
+        && ['field', 'condition', 'value'].every(key => typeof (alternative as Record<string, unknown>)[key] === 'string')))
+    && [rune.allowedMethods, rune.capabilities, rune.sensitiveMethods, rune.conditions, rune.warnings].every(stringList)
+    && (rune.uniqueId === null || typeof rune.uniqueId === 'string') && (rune.version === null || typeof rune.version === 'string')
+    && typeof rune.methods === 'string' && typeof rune.methodTable === 'string' && typeof rune.omittedAlternatives === 'number'
+    && !!expiry && typeof expiry === 'object' && typeof expiry.status === 'string'
+    && (expiry.deadline === null || (typeof expiry.deadline === 'string' && /^-?[0-9]+$/.test(expiry.deadline)));
+}
+
 function nwcInspectText(result: NwcInspectResult): string {
   const lines = [
     'kind         nwc (Nostr Wallet Connect, NIP-47)',
@@ -319,6 +451,49 @@ function nwcInspectText(result: NwcInspectResult): string {
     ...result.warnings.map(code => `warning      ${safeText(code)}` +
       (code === 'relay-details-removed' ? ' (relay userinfo, query or fragment not shown)' : '')),
     'revocation   in the wallet service; NIP-47 defines no call to create or revoke a connection',
+  ];
+  return `${lines.join('\n')}\n`;
+}
+
+const L402_PREIMAGE_TEXT: Record<L402InspectResult['preimage'], string> = {
+  matches: 'present; hashes to the payment hash (proof of payment)',
+  mismatch: 'present; does NOT hash to the payment hash (the server rejects it)',
+  unverifiable: 'present; cannot be checked (identifier not recognised)',
+  absent: 'absent; the macaroon alone grants nothing until its invoice is paid and the preimage added',
+};
+
+function l402CaveatText(caveat: import('../l402.js').L402ReportCaveat): string {
+  if (caveat.type === 'withheld') return '(withheld: it carries the preimage)';
+  if (caveat.type === 'preimage') return 'preimage=(not shown)';
+  if (caveat.type === 'third-party') return `third-party ${safeText(caveat.value ?? '')}`;
+  const text = caveat.condition === null ? caveat.value ?? '' : `${caveat.condition}=${caveat.value ?? ''}`;
+  const state = typeof caveat.expired === 'boolean'
+    ? ` (${caveat.until ? `${caveat.until}, ` : ''}${caveat.expired ? 'expired' : 'valid'})` : '';
+  return `${safeText(text)}${state}`;
+}
+
+function l402InspectText(result: L402InspectResult): string {
+  const form = (result.form === 'authorization' || result.form === 'challenge' ? `${result.form} (${result.scheme ?? 'L402'} scheme)` : result.form)
+    + (result.macaroons > 1 ? `, ${result.macaroons} macaroons (facts of the primary one)` : '');
+  const lines = [
+    'kind         l402 (paid API access token; formerly LSAT)',
+    `fingerprint  ${safeText(result.fingerprint)}`,
+    ...(result.macaroonFingerprint === result.fingerprint ? [] : [`macaroon     ${safeText(result.macaroonFingerprint)}`]),
+    `form         ${safeText(form)}`,
+    ...(result.location === null ? [] : [`location     ${safeText(result.location)}`]),
+    ...(result.identifier === null ? ['identifier   not an L402 version 0 identifier'] : [
+      `version      ${result.identifier.version}`,
+      `payment hash ${safeText(result.identifier.paymentHash)}`,
+      `token ID     ${safeText(result.identifier.tokenId)}`]),
+    ...(result.services.length ? [`services     ${result.services.map(service =>
+      `${safeText(service.name)} (tier ${safeText(service.tier)})`).join(', ')}`] : []),
+    ...result.caveats.map(caveat => `caveats      ${l402CaveatText(caveat)}`),
+    `preimage     ${L402_PREIMAGE_TEXT[result.preimage]}${result.preimageSource === 'caveat' ? ' (from a preimage caveat)' : ''}`,
+    `status       ${safeText(result.status)}`,
+    'access       service-access: pays for access to a service; it gives no control of a Lightning node',
+    `counted as   ${result.countedAs === null ? 'not counted by scan --fail-on' : `${result.countedAs} by scan --fail-on`}`,
+    ...result.warnings.map(code => `warning      ${safeText(code)}`),
+    'revocation   by the service that issued it; the holder cannot revoke it',
   ];
   return `${lines.join('\n')}\n`;
 }
@@ -492,6 +667,8 @@ export function renderWatchEvent(event: WatchEvent, mode: Mode): string {
   if (mode === 'json') return `${JSON.stringify({ schema: 1, ...event }, jsonRedactor())}\n`;
   if (event.event === 'status' && event.status === 'output-dropped')
     return `${safeText(event.time)}  output fell behind: ${event.dropped} event lines dropped (counts and usage are unaffected)\n`;
+  if (event.event === 'status' && event.status === 'payment-journal-stopped')
+    return `${safeText(event.time)}  PAYMENT JOURNAL STOPPED (${safeText(event.reason)}): later payments are not journaled; reconcile reports the rest of this run as a gap\n`;
   if (event.event === 'status' && event.status === 'alert-failed')
     return `${safeText(event.time)}  ALERT COMMAND FAILED for canary ${safeText(event.label ?? 'unknown')} (root key ${safeText(event.rootKeyId)})\n`;
   if (event.event === 'status') return `${safeText(event.time)}  ${event.status === 'registered'
@@ -509,7 +686,55 @@ function watchText(result: WatchResult): string {
     `${result.reconnects} reconnects; usage saved to ${safeText(result.usageFile)}` +
     `${result.droppedUsageRecords ? `; ${result.droppedUsageRecords} usage records dropped` : ''}` +
     `${result.evictedUsageRecords ? `; ${result.evictedUsageRecords} usage records evicted at the limit` : ''}` +
-    `${result.droppedEvents ? `; ${result.droppedEvents} event lines dropped because output fell behind` : ''}\n`;
+    `${result.droppedEvents ? `; ${result.droppedEvents} event lines dropped because output fell behind` : ''}\n`
+    + (result.paymentJournal ? `payment journal ${safeText(result.paymentJournal.path)}: ${result.paymentJournal.payments} payments, `
+      + `${result.paymentJournal.deletions} deletions journaled${result.paymentJournal.dropped ? `; ${result.paymentJournal.dropped} not journaled` : ''}`
+      + `${result.paymentJournal.stopped ? `; stopped early (${safeText(result.paymentJournal.stopped)})` : ''}\n` : '');
+}
+
+/** "1500 msat", or "unknown" for evidence that is not there. */
+function msat(value: string | null): string { return value === null ? 'unknown' : `${safeText(value)} msat`; }
+
+function reconcileText(result: ReconcileResult): string {
+  const who = (credential: string, rootKeyId: string | null, label: string | null) =>
+    `${safeText(credential)}${rootKeyId ? ` root key ${safeText(rootKeyId)}` : ''}${label ? ` (${safeText(label)})` : ''}`;
+  const lines = [
+    `node         ${safeText(result.node.pubkey)} (${safeText(result.node.alias)}, ${safeText(result.node.network)})`,
+    `journal      ${safeText(result.journal.path)}: ${result.journal.records} records in ${result.journal.runs} watch runs`
+      + (result.journal.firstRecord ? `, ${safeText(result.journal.firstRecord)} to ${safeText(result.journal.lastRecord ?? '')}` : ''),
+    `window       ${safeText(result.window.since)} to ${safeText(result.window.until)}; covered ${formatDuration(result.coverage.coveredSeconds)} `
+      + `of ${formatDuration(result.coverage.windowSeconds)}${result.coverage.complete ? '' : ` (${result.coverage.gapCount} gaps)`}`,
+    ...result.coverage.gaps.slice(0, 20).map(gap => `gap          ${safeText(gap.from)} to ${safeText(gap.to)}  ${safeText(gap.reason)}`
+      + (gap.dropped ? `  ${gap.dropped} payment calls not journaled` : '')),
+    ...(result.coverage.gapCount > 20 ? [`gap          ... ${result.coverage.gapCount - 20} more (see --json)`] : []),
+    ...result.credentials.map(row => `credential   ${who(row.credential, row.rootKeyIds.join(',') || null, row.label)}: ${row.payments} payments `
+      + `(${row.succeeded} succeeded, ${row.failed} failed, ${row.inFlight + row.notFound + row.unknown} without a final outcome)`
+      + `; requested ${msat(row.requestedMsat)}; settled ${msat(row.settledMsat)}; fees ${msat(row.feesMsat)}`
+      + `${row.inFlightMsat !== '0' ? `; in flight ${msat(row.inFlightMsat)}` : ''}`
+      + `${row.ambiguous ? `; ${row.ambiguous} shared with other credentials` : ''}${row.unmatched ? `; ${row.unmatched} without a hash` : ''}`
+      + `${row.deletions ? `; ${row.deletions} payment record deletions` : ''}`),
+    ...result.payments.map(item => {
+      const observed = item.attribution === 'single' ? safeText(item.credentials[0]) : `ambiguous (${item.credentials.map(safeText).join(', ')})`;
+      const settled = item.settlement;
+      return `payment      ${safeText(item.paymentHash)}  observed: ${observed}, ${item.observation.calls} request${item.observation.calls === 1 ? '' : 's'}, `
+        + `requested ${msat(item.observation.requestedMsat ?? item.observation.routeAttemptsMsat)}, fee limit ${msat(item.observation.feeLimitMsat)}`
+        + `  |  LND: ${safeText(settled.status)}${settled.source ? `, settled ${msat(settled.settledMsat)}, fees ${msat(settled.feesMsat)}, `
+          + `${settled.attempts} attempt${settled.attempts === 1 ? '' : 's'}` : ''}`
+        + `${settled.failureReason ? `, ${safeText(settled.failureReason)}` : ''}`
+        + `${settled.predatesObservation ? '; LND record predates the observed request' : ''}`
+        + `${item.deletedBy.length ? `; deletions by ${item.deletedBy.map(safeText).join(', ')}` : ''}`;
+    }),
+    ...result.unmatched.map(item => `unmatched    ${safeText(item.time)}  ${who(item.credential, item.rootKeyId, item.label)}  `
+      + `${safeText(item.method)}  no payment hash (${safeText(item.extraction)})`),
+    ...result.unattributed.map(item => `unattributed ${safeText(item.paymentHash)}  created ${safeText(item.createdAt)}  ${safeText(item.status)}, `
+      + `settled ${msat(item.settledMsat)}, fees ${msat(item.feesMsat)}  (${item.coverage === 'covered' ? 'while watch was registered'
+        : item.coverage === 'boundary' ? 'at the edge of watch coverage' : 'in a journal gap'})`),
+    ...result.deletions.map(item => `deletion     ${safeText(item.time)}  ${who(item.credential, item.rootKeyId, item.label)}  `
+      + `${safeText(item.method)}  ${safeText(item.scope)}${item.paymentHash ? ` ${safeText(item.paymentHash)}` : ''}`),
+    'evidence     observed requests (journal) and settlement (LND) are separate; a request is not a payment, and a payment missing '
+      + 'from either is no proof that none was made',
+  ];
+  return `${lines.join('\n')}\n`;
 }
 
 /** "3d 4h", "2h 5m", "1m 30s", "45s". */
@@ -668,6 +893,20 @@ function isNwcInspectResult(value: unknown): value is NwcInspectResult {
       .every(items => Array.isArray(items) && items.every(item => typeof item === 'string'));
 }
 
+function isL402InspectResult(value: unknown): value is L402InspectResult {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const fields = value as Record<string, unknown>;
+  return fields.kind === 'l402' && ['fingerprint', 'macaroonFingerprint', 'form', 'preimage', 'status'].every(key => typeof fields[key] === 'string')
+    && typeof fields.macaroons === 'number'
+    && Array.isArray(fields.caveats) && Array.isArray(fields.services) && Array.isArray(fields.warnings)
+    && fields.caveats.every(caveat => caveat !== null && typeof caveat === 'object' && typeof caveat.type === 'string')
+    && fields.services.every(service => service !== null && typeof service === 'object'
+      && typeof service.name === 'string' && typeof service.tier === 'string')
+    && (fields.identifier === null || (typeof fields.identifier === 'object' && fields.identifier !== null
+      && typeof (fields.identifier as Record<string, unknown>).paymentHash === 'string'
+      && typeof (fields.identifier as Record<string, unknown>).tokenId === 'string'));
+}
+
 function isInspectResult(value: unknown): value is InspectResult {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const fields = value as Record<string, unknown>;
@@ -805,7 +1044,9 @@ export function* renderChunks(result: OutputResult, mode: Mode): Generator<strin
   else switch (result.command) {
     case 'inspect': rendered = isInspectResult(result.result)
       ? inspectText(result.result) : isNwcInspectResult(result.result)
-        ? nwcInspectText(result.result) : genericText(result); break;
+        ? nwcInspectText(result.result) : isL402InspectResult(result.result)
+          ? l402InspectText(result.result) : isRuneInspectResult(result.result)
+            ? runeInspectText(result.result) : genericText(result); break;
     case 'inventory': rendered = typeof result.display?.report === 'string' ? result.display.report
       : typeof result.display?.now === 'number' && Number.isFinite(result.display.now)
         ? inventoryText(result.result, result.display.now) + (result.result.report?.path
@@ -820,6 +1061,7 @@ export function* renderChunks(result: OutputResult, mode: Mode): Generator<strin
     case 'rotate': rendered = rotateText(result.result, result.display?.finish); break;
     case 'respond': rendered = respondText(result.result); break;
     case 'verify': rendered = isInspectResult(result.result) ? verifyText(result.result) : genericText(result); break;
+    case 'reconcile': rendered = reconcileText(result.result); break;
     default: rendered = genericText(result); break;
   }
   yield guardLines(redactKnownSecrets(rendered, secrets));

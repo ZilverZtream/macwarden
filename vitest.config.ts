@@ -1,3 +1,4 @@
+import { availableParallelism } from 'node:os';
 import { defineConfig } from 'vitest/config';
 import { platformVariants, requiredPlatformFiles } from './scripts/platform-variants.mjs';
 
@@ -16,7 +17,7 @@ const harness = [
   'test/cp037-reveal*.test.ts', 'test/cp037-scan-lint.test.ts',
 ];
 const privateScratch = ['test/.tmp/**', 'test/.sentinels/**'];
-const nonUnit = ['test/oracle/**', 'test/gitleaks/**', ...privateScratch];
+const nonUnit = ['test/oracle/**', 'test/cln-oracle/**', 'test/gitleaks/**', ...privateScratch];
 const platformPolicy = { platform: process.platform, excluded, required: requiredPlatformFiles(process.platform) };
 
 export default defineConfig({
@@ -24,8 +25,10 @@ export default defineConfig({
     allowOnly: false,
     passWithNoTests: false,
     // Harness files spawn their own build/Vitest processes. Bound the
-    // shared pool with the same worker limit for both concurrent projects.
-    maxWorkers: 6,
+    // shared pool with the same worker limit for both concurrent projects, and
+    // never run more workers than processors: on a two-core CI runner six workers
+    // made each test several times slower than its timeout allows.
+    maxWorkers: Math.max(1, Math.min(6, availableParallelism())),
     // Tests that import modules inside the test body wait on
     // the shared transform queue during a full run. Measured worst case was about 5 s for
     // tests that take under 200 ms alone, so 15 s keeps a 3x margin and still fails a hang.

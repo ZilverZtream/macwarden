@@ -1,7 +1,9 @@
 // Minimal protobuf codec for LND's RegisterRPCMiddleware stream (lnrpc/lightning.proto,
 // v0.21.4-beta): RPCMiddlewareRequest is decoded, RPCMiddlewareResponse is encoded.
-// Only the fields macwarden needs are read; every other field, including the full
-// serialized RPC payloads, is skipped by wire type and never copied.
+// Only the fields macwarden needs are read; every other field is skipped by wire type and
+// never copied. Serialized RPC payloads are skipped too, except the request payload of a
+// method the caller names in `payloadMethods` (watch --payment-journal: the payment and
+// payment-deletion requests), which is passed on as a view, never copied here.
 import { LndError } from '../errors.js';
 
 export type InterceptKind = 'stream_auth' | 'request' | 'response' | 'reg_complete' | 'none';
@@ -17,6 +19,13 @@ export type MiddlewareRequest = {
   isError: boolean;
   /** The call carried a macaroon larger than MAX_MACAROON_BYTES; it was not copied. */
   oversizedMacaroon: boolean;
+  /**
+   * A view of the serialized request message (RPCMessage.serialized) of a `request` intercept
+   * whose method is in `payloadMethods`, at most MAX_PAYLOAD_BYTES; empty otherwise.
+   */
+  payload: Buffer;
+  /** The request payload of a selected method was larger than MAX_PAYLOAD_BYTES; it is not passed on. */
+  oversizedPayload: boolean;
 };
 
 const MAX_UINT64 = (1n << 64n) - 1n;
@@ -27,6 +36,8 @@ export const MAX_MACAROON_BYTES = 64 * 1024;
 export const MAX_METHOD_BYTES = 256;
 export const MAX_CONDITION_BYTES = 256;
 export const UNKNOWN_METHOD = '/unknown/Unknown';
+/** Largest request payload passed on for a selected method (see payload). */
+export const MAX_PAYLOAD_BYTES = 64 * 1024;
 
 function protocolError(): never {
   throw new LndError(5, 'middleware-stream', 'invalid LND middleware message');
@@ -107,20 +118,33 @@ function text(bytes: Buffer | null): string {
 
 const exact = (value: number | bigint): bigint => (typeof value === 'bigint' ? value : BigInt(value));
 
-/** RPCMessage (fields 5 and 6) and StreamAuth (field 4): method URI and error flag only. */
-function rpcMessage(bytes: Buffer, result: MiddlewareRequest): void {
+/**
+ * RPCMessage (fields 5 and 6) and StreamAuth (field 4): method URI and error flag, and the
+ * serialized payload (field 4 of RPCMessage) as a view, returned only to the caller that
+ * asked for it (a request of a selected method).
+ */
+function rpcMessage(bytes: Buffer, result: MiddlewareRequest): Buffer | null {
   result.method = '';
   result.isError = false;
+  let serialized: Buffer | null = null;
   eachField(bytes, (number, wire, value, field) => {
     if (number === 1 && wire === 2)
       result.method = field!.length > MAX_METHOD_BYTES ? UNKNOWN_METHOD : text(field);
     else if (number === 5 && wire === 0) result.isError = value !== 0 && value !== 0n;
+    else if (number === 4 && wire === 2) serialized = field;
   });
+  return serialized;
 }
 
-export function decodeMiddlewareRequest(data: Buffer): MiddlewareRequest {
+/**
+ * Decodes one RPCMiddlewareRequest. `payloadMethods` names the methods whose request payload
+ * is passed on (as a view into `data`, at most MAX_PAYLOAD_BYTES); for every other method,
+ * and for responses and stream authentication, no payload is passed on.
+ */
+export function decodeMiddlewareRequest(data: Buffer, payloadMethods?: ReadonlySet<string>): MiddlewareRequest {
   const result: MiddlewareRequest = { requestId: 0n, msgId: 0n, rawMacaroon: EMPTY,
-    customCaveatCondition: '', kind: 'none', method: '', isError: false, oversizedMacaroon: false };
+    customCaveatCondition: '', kind: 'none', method: '', isError: false, oversizedMacaroon: false,
+    payload: EMPTY, oversizedPayload: false };
   eachField(data, (number, wire, value, bytes) => {
     switch (number) {
       case 1: if (wire === 0) result.requestId = exact(value); break;
@@ -134,9 +158,21 @@ export function decodeMiddlewareRequest(data: Buffer): MiddlewareRequest {
         break;
       // A longer condition cannot belong to a canary (16 hex characters): it is ignored.
       case 3: if (wire === 2 && bytes!.length <= MAX_CONDITION_BYTES) result.customCaveatCondition = text(bytes); break;
-      case 4: if (wire === 2) { result.kind = 'stream_auth'; const isError = result.isError; rpcMessage(bytes!, result); result.isError = isError; } break;
-      case 5: if (wire === 2) { result.kind = 'request'; rpcMessage(bytes!, result); } break;
-      case 6: if (wire === 2) { result.kind = 'response'; rpcMessage(bytes!, result); } break;
+      case 4: if (wire === 2) { result.kind = 'stream_auth'; const isError = result.isError; rpcMessage(bytes!, result); result.isError = isError; result.payload = EMPTY; result.oversizedPayload = false; } break;
+      case 5:
+        if (wire !== 2) break;
+        result.kind = 'request';
+        {
+          const serialized = rpcMessage(bytes!, result);
+          result.payload = EMPTY;
+          result.oversizedPayload = false;
+          if (serialized && payloadMethods?.has(result.method)) {
+            if (serialized.length > MAX_PAYLOAD_BYTES) result.oversizedPayload = true;
+            else result.payload = serialized;
+          }
+        }
+        break;
+      case 6: if (wire === 2) { result.kind = 'response'; rpcMessage(bytes!, result); result.payload = EMPTY; result.oversizedPayload = false; } break;
       case 8: if (wire === 0 && value !== 0 && value !== 0n) result.kind = 'reg_complete'; break;
       default: break;
     }

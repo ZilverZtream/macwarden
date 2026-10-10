@@ -44,7 +44,7 @@ it('CP-039/B8-ignore-bounds discloses suppressed fingerprints in text and JSON w
       expect.soft(parsed.result.ignoredFingerprints).toEqual(fingerprints);
       expect.soft(parsed).toMatchObject({ ok: true, error: null,
         result: { findings: [], summary: { ignored: 3, findings: 0, distinct: 0,
-          byGrade: { ADMIN: 0, SPEND: 0, OPERATE: 0, RECEIVE: 0, READ: 0, UNASSESSED: 0, NWC: 0, UNDECODABLE: 0 } },
+          byGrade: { ADMIN: 0, SPEND: 0, OPERATE: 0, RECEIVE: 0, READ: 0, UNASSESSED: 0, NWC: 0, UNDECODABLE: 0, L402: 0 } },
         failOn: { threshold: 'READ', count: 0 } } });
       expect.soft(parsed.result.summary.filesSkipped).toBe(parsed.result.skipped.length);
     }

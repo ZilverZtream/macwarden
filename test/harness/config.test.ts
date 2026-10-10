@@ -20,6 +20,9 @@ const scripts = {
   'test:gitleaks': 'vitest run --config vitest.gitleaks.config.ts',
   'fixture:up': 'node test/fixture/fixture.mjs up',
   'fixture:down': 'node test/fixture/fixture.mjs down',
+  'fixture:cln:up': 'node test/fixture/cln-fixture.mjs up',
+  'fixture:cln:down': 'node test/fixture/cln-fixture.mjs down',
+  'test:cln-oracle': 'vitest run --config vitest.cln.config.ts',
 };
 
 function listFor(yaml: string, key: string): string[] {
@@ -58,7 +61,7 @@ it('CP-001/B10 pins the package, lockfile, scripts and strict TypeScript', () =>
   const lock = JSON.parse(read('package-lock.json'));
   const tsconfig = JSON.parse(read('tsconfig.json'));
   expect(pkg).toMatchObject({
-    name: 'macwarden', version: '1.1.1', type: 'module', license: 'MIT',
+    name: 'macwarden', version: '1.2.0', type: 'module', license: 'MIT',
     engines: { node: '^22.23.2 || ^24.18.1 || >=26.5.1' },
   });
   expect(pkg.dependencies ?? {}).toEqual({});
@@ -67,7 +70,7 @@ it('CP-001/B10 pins the package, lockfile, scripts and strict TypeScript', () =>
   expect(pkg.devDependencies).toEqual(pinned);
   expect(pkg.scripts).toMatchObject(scripts);
   expect(lock.packages['']).toMatchObject({
-    name: 'macwarden', version: '1.1.1', devDependencies: pinned,
+    name: 'macwarden', version: '1.2.0', devDependencies: pinned,
   });
   expect(tsconfig.compilerOptions.strict).toBe(true);
 });
@@ -87,13 +90,15 @@ it('CP-001/B12 runs the pinned CI matrix and commands', () => {
   expect(triggers).toMatch(/^on:\n {2}push:\n {4}branches:/);
   expect(listFor(triggers, 'branches')).toEqual(['main']);
   expect(triggers).toMatch(/^ {2}pull_request:$/m);
+  expect(triggers).toMatch(/^ {2}workflow_dispatch:$/m);
   expect(blockFor(yaml, 'permissions', 0)).toBe('permissions:\n  contents: read');
 
   const jobs = blockFor(yaml, 'jobs', 0);
   expect([...jobs.matchAll(/^ {2}([\w-]+):\s*$/gm)].map(match => match[1]))
-    .toEqual(['test', 'oracle', 'gitleaks']);
+    .toEqual(['test', 'oracle', 'cln-oracle', 'gitleaks']);
   const testJob = blockFor(jobs, 'test', 2);
   const oracleJob = blockFor(jobs, 'oracle', 2);
+  const clnJob = blockFor(jobs, 'cln-oracle', 2);
   const gitleaksJob = blockFor(jobs, 'gitleaks', 2);
   expect(testJob).toMatch(/^ {4}runs-on: \$\{\{ matrix\.os \}\}$/m);
   // Every Node version on Linux; Windows on the minimum and the latest 22/24 line. macOS is not a
@@ -105,10 +110,12 @@ it('CP-001/B12 runs the pinned CI matrix and commands', () => {
   expect(testJob).toMatch(/^ {10}node-version: \$\{\{ matrix\.node \}\}$/m);
   expect(oracleJob).toMatch(/^ {4}runs-on: ubuntu-latest$/m);
   expect(gitleaksJob).toMatch(/^ {4}runs-on: ubuntu-latest$/m);
+  expect(clnJob).toMatch(/^ {4}runs-on: ubuntu-latest$/m);
   expect(oracleJob).toMatch(/^ {10}node-version: '22.23.2'$/m);
+  expect(clnJob).toMatch(/^ {10}node-version: '22.23.2'$/m);
   expect(gitleaksJob).toMatch(/^ {10}node-version: '22.23.2'$/m);
 
-  for (const job of [testJob, oracleJob, gitleaksJob]) {
+  for (const job of [testJob, oracleJob, clnJob, gitleaksJob]) {
     const uses = [...job.matchAll(/^\s*-?\s*uses:\s*(\S+)\s*$/gm)].map(match => match[1]);
     expect(uses).toEqual([
       'actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd',
@@ -123,6 +130,9 @@ it('CP-001/B12 runs the pinned CI matrix and commands', () => {
   expect(runsFor(testJob)).toEqual(['npm ci', 'npm run lint', 'npm run build', 'npm test']);
   expect(runsFor(oracleJob)).toEqual(['npm ci', 'npm run build', 'npm run fixture:up', 'npm run test:oracle', 'npm run fixture:down']);
   expect(oracleJob).toMatch(/^ {6}- if: always\(\)\n {8}run: npm run fixture:down$/m);
+  // The Core Lightning comparison is its own job: an LND oracle failure cannot skip it.
+  expect(runsFor(clnJob)).toEqual(['npm ci', 'npm run build', 'npm run fixture:cln:up', 'npm run test:cln-oracle', 'npm run fixture:cln:down']);
+  expect(clnJob).toMatch(/^ {6}- if: always\(\)\n {8}run: npm run fixture:cln:down$/m);
   expect(runsFor(gitleaksJob)).toEqual(['npm ci', 'npm run build', '|', 'npm run test:gitleaks']);
   // The gitleaks tests run with private scratch and sentinel directories created inside the checkout.
   expect(gitleaksJob).toMatch(/^ {10}umask 077$/m);

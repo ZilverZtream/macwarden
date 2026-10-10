@@ -28,3 +28,21 @@ id = 'macwarden-nwc'
 description = 'Nostr Wallet Connect (NIP-47) URI with a secret'
 regex = '''(?i)(?:nostr\+walletconnect|nostrwalletconnect):(?://)?[0-9a-f]{64}/?\?[^\s"'<>]*?secret=[0-9a-f]{64}(?:[^0-9a-f]|$)'''
 keywords = ['walletconnect']
+
+[[rules]]
+id = 'macwarden-l402'
+description = 'L402 (LSAT) Authorization credential: macaroon and payment preimage'
+regex = '''(?i)\b(?:l402|lsat)[ \t]+[A-Za-z0-9+/_=-]{40,}(?:,[A-Za-z0-9+/_=-]{40,})*:[0-9a-f]{64}\b'''
+keywords = ['l402', 'lsat']
+
+[[rules]]
+id = 'macwarden-l402-macaroon-hex'
+description = 'L402 (LSAT) macaroon (Aperture location lsat) in hex'
+regex = '''(?i)0201046c73617402420000[0-9a-f]{40,}'''
+keywords = ['0201046c73617402420000']
+
+[[rules]]
+id = 'macwarden-l402-macaroon-base64'
+description = 'L402 (LSAT) macaroon (Aperture location lsat) in base64 or base64url'
+regex = '''AgEEbHNhdAJCAA[A-Za-z0-9+/_-]{40,}={0,2}'''
+keywords = ['ageebhnhdajcaa']

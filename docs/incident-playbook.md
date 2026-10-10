@@ -125,6 +125,8 @@ Compare against the period since the vulnerable version was first exposed, not j
 
 To notice future use of a leaked location, put a canary where the old files were (`macwarden bake --canary --label <name> --out <file>`) and keep `macwarden watch` running: every use is denied and alerts.
 
+To be able to say which credential spent what next time, run `watch` with `--payment-journal <file>` from now on and check it with `macwarden reconcile --payment-journal <file> --since <time>`. It lists, per credential, the payments it asked LND to make and how LND settled them, and the payments LND made that the journal cannot attribute, with the periods `watch` was not watching. It cannot attribute payments made before the journal existed: for the period of this incident, `lncli listpayments` remains the evidence.
+
 ## 8. Afterwards
 
 - Record what was done: `macwarden inventory --report markdown --out incident-review.md` lists every credential, its owner, permissions, expiry and last use.

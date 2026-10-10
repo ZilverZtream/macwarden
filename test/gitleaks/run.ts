@@ -4,10 +4,10 @@ import { join, resolve } from 'node:path';
 import { findLeaks } from "../helpers/leak-check.js";
 import { image, repo } from './rules-support.js';
 
-const tree = resolve(repo, 'test/scan-fixtures/full');
+const fullTree = resolve(repo, 'test/scan-fixtures/full');
 const ruleDir = resolve(repo, 'rules');
 
-export function dockerArgs(reportDir: string): string[] {
+export function dockerArgs(reportDir: string, tree = fullTree): string[] {
   return ['run', '--rm', '--mount', `type=bind,src=${tree},dst=/tree,readonly`,
     '--mount', `type=bind,src=${ruleDir},dst=/rules,readonly`,
     '--mount', `type=bind,src=${reportDir},dst=/report`, image,
@@ -17,7 +17,8 @@ export function dockerArgs(reportDir: string): string[] {
 
 export type Hit = { RuleID: string; File: string; StartLine: number; Secret: string; Match: string };
 
-export function runGitleaks(): Hit[] {
+/** Runs the pinned gitleaks over a fixture tree; `sentinels` adds credential bytes the leak check must not find. */
+export function runGitleaks(tree = fullTree, sentinels: Buffer[] = []): Hit[] {
   const testTmp = process.env.MACWARDEN_TEST_TMP;
   const sentinelRoot = process.env.MACWARDEN_SENTINEL_DIR;
   if (!testTmp || !sentinelRoot) throw new Error('MACWARDEN_TEST_TMP and MACWARDEN_SENTINEL_DIR are required');
@@ -30,7 +31,8 @@ export function runGitleaks(): Hit[] {
       writeFileSync(join(sentinelDir, `${name}.macaroon`),
         readFileSync(resolve(repo, 'test/vectors', `${name}.macaroon`)));
     writeFileSync(join(sentinelDir, 'nwc.bin'), Buffer.alloc(32, 0x11));
-    const result = spawnSync('docker', dockerArgs(reportDir), { encoding: 'utf8', maxBuffer: 1024 * 1024 });
+    sentinels.forEach((bytes, index) => writeFileSync(join(sentinelDir, `extra-${index}.bin`), bytes));
+    const result = spawnSync('docker', dockerArgs(reportDir, tree), { encoding: 'utf8', maxBuffer: 1024 * 1024 });
     if (result.error || result.status !== 0)
       throw new Error(`redacted gitleaks Docker run failed (exit ${result.status ?? 'unavailable'})`);
     const report = readFileSync(join(reportDir, 'gitleaks-report.json'), 'utf8');

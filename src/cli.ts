@@ -1,4 +1,4 @@
-import { withCancellation } from './cancellation.js';
+import { Cancelled, withCancellation } from './cancellation.js';
 import { readFileSync } from 'node:fs';
 import { handlers } from './commands/handlers.js';
 import { error, render, renderChunks, warning, type Mode, type OutputResult } from './output/index.js';
@@ -9,7 +9,7 @@ import { internalErrorMessage, withProcessErrorContext, type ProcessErrorContext
 const online = ' [--lnd-rest <host:port>] [--tls-cert <path>] [--macaroon <path>]';
 const synopses: Record<string, string[]> = {
   inspect: ['inspect <file | -> [--json]',
-    'inspect <hex | base64 | lndconnect://... | nostr+walletconnect://...> --unsafe-arg [--json]'],
+    'inspect <hex | base64 | lndconnect://... | nostr+walletconnect://... | L402 <macaroon>:<preimage> | rune> --unsafe-arg [--json]'],
   scan: ['scan [paths...] [--fail-on ADMIN|SPEND|OPERATE|RECEIVE|READ] [--include-dirs] [--ignore-file <path>]'
     + ' [--git-history [--allow-shallow]] [--agent-configs] [--format text|json|sarif|github] [--json]'],
   inventory: [`inventory [--verify] [--expiring-within <n>(m|h|d)] [--report markdown|csv|json [--out <file>]] [--registry <path>] [--json]${online}`],
@@ -21,15 +21,16 @@ const synopses: Record<string, string[]> = {
   rotate: [`rotate <label> --out <file> [--allow-admin] [--registry <path>] [--break-lock] [--dry-run] [--json]${online}`,
     `rotate <label> --finish [--yes] [--registry <path>] [--break-lock] [--dry-run] [--json]${online}`],
   attenuate: ['attenuate <file | -> --out <file> [--expires <n>(m|h|d)] [--ip <address> | --ip-range <cidr>] [--dry-run] [--unsafe-arg] [--json]'],
-  watch: [`watch [--lnd-grpc <host:port>] [--registry <path>] [--middleware-name <name>] [--until <n>(s|m|h|d)] [--alert-command <path>] [--alerts-only] [--json]${online}`],
+  watch: [`watch [--lnd-grpc <host:port>] [--registry <path>] [--middleware-name <name>] [--until <n>(s|m|h|d)] [--alert-command <path>] [--alerts-only] [--payment-journal <path>] [--json]${online}`],
   recommend: [`recommend (<label> | <root-key-id> | id:<16 hex> | --target-file <file>) [--accept-short-observation] [--registry <path>] [--json]${online}`],
   respond: [`respond --out-dir <directory> [--allow-admin] [--yes] [--registry <path>] [--break-lock] [--dry-run] [--json]${online}`,
     `respond --finish [--yes] [--registry <path>] [--break-lock] [--dry-run] [--json]${online}`],
   verify: [`verify <file | -> [--registry <path>] [--json]${online}`,
     `verify <hex | base64 | lndconnect://...> --unsafe-arg [--registry <path>] [--json]${online}`],
+  reconcile: [`reconcile --payment-journal <path> [--since <time|n(m|h|d)>] [--until <time|n(m|h|d)>] [--registry <path>] [--json]${online}`],
 };
 const summaries: [string, string][] = [
-  ['inspect', 'decode a macaroon or NWC URI offline and grade what it can do'],
+  ['inspect', 'decode a macaroon, NWC URI, L402 token or Core Lightning rune offline and grade what it can do'],
   ['scan', 'find credentials in files and, with --git-history, in git history (offline)'],
   ['inventory', "list the node's root key IDs against the registry"],
   ['bake', 'issue a least-privilege macaroon on its own root key ID and record it'],
@@ -40,6 +41,7 @@ const summaries: [string, string][] = [
   ['recommend', 'suggest the least permissions a credential needs from observed usage'],
   ['respond', 'after a suspected leak: stage replacements for every credential, then --finish with proof'],
   ['verify', 'ask LND whether one credential file is still accepted (after a leak)'],
+  ['reconcile', "match watch's payment journal against LND's payment records, per credential"],
 ];
 const usage = ['Usage: macwarden <command> [options]', '       macwarden <command> --help', '       macwarden --help | --version',
   '', 'Commands:', ...summaries.map(([name, summary]) => `  ${name.padEnd(10)} ${summary}`)].join('\n');
@@ -233,7 +235,16 @@ export async function main(argv: string[]): Promise<number> {
       : argv[0].startsWith('-') ? 'unknown flag' : 'unknown command'), mode);
     if (mode === 'text') process.stderr.write(render(textResult(usage), 'text'));
     return 2;
-  } catch {
+  } catch (error) {
+    // An interrupt that a command did not turn into its own result (one that landed in its first LND
+    // calls) is still an interrupt, not an internal failure: exit 6, or 7 once a change may have reached LND.
+    if (error instanceof Cancelled) {
+      const interrupted = failure(context.mutationSent ? 7 : 6, 'cancelled', context.mutationSent
+        ? 'operation interrupted after mutation; completed state retained; run macwarden inventory to inspect state'
+        : 'interrupted', command);
+      await write(interrupted, mode);
+      return interrupted.error!.code;
+    }
     await write(failure(8, 'internal', internalErrorMessage(context), command), mode);
     return 8;
   } finally {

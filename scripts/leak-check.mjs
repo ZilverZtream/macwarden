@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync, lstatSync, existsSync } from 'node:fs';
 import { resolve, relative, dirname, basename, join, sep, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -504,10 +505,16 @@ export function findLeaks({ sentinels, sentinelDir, paths = [], commandOutput = 
   const candidates = paths.flatMap(scanPath => filesUnder(scanPath, true).map(path => ({
     path, name: lstatSync(scanPath).isDirectory() ? relative(scanPath, path) : basename(path),
   })));
+  // A declared output is named by its path, or by `sha256:<hex>` of its resolved path when the
+  // path itself holds a credential (a test of path redaction), so the manifest never carries it.
   const declared = new Set();
+  const declaredHashes = new Set();
+  const pathHash = path => createHash('sha256').update(path, 'utf8').digest('hex');
   if (testTmp && existsSync(join(testTmp, 'declared-out.txt'))) {
     for (const line of readFileSync(join(testTmp, 'declared-out.txt'), 'utf8').split(/\r?\n/)) {
-      if (line.trim()) declared.add(resolve(testTmp, line.trim()));
+      const entry = line.trim();
+      if (/^sha256:[0-9a-f]{64}$/.test(entry)) declaredHashes.add(entry.slice(7));
+      else if (entry) declared.add(resolve(testTmp, entry));
     }
   }
   const included = candidates.filter(({ path }) => {
@@ -516,7 +523,7 @@ export function findLeaks({ sentinels, sentinelDir, paths = [], commandOutput = 
     const fromEvidence = evidenceDir ? relative(resolve(evidenceDir), absolute) : null;
     const inEvidence = fromEvidence !== null && !isAbsolute(fromEvidence) &&
       fromEvidence !== '..' && !fromEvidence.startsWith(`..${sep}`);
-    return inEvidence || (!declared.has(absolute) &&
+    return inEvidence || (!declared.has(absolute) && !declaredHashes.has(pathHash(absolute)) &&
       !local.startsWith('test/vectors/') && !local.startsWith('test/scan-fixtures/'));
   });
   const haystacks = [['command output', Buffer.from(commandOutput), ''],

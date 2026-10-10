@@ -22,6 +22,10 @@ export function validDomain(value: unknown): value is ProcessDomain {
 const windowsQuery = String.raw`
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+# Load the Microsoft.PowerShell.Utility cmdlets used below from the pinned module
+# path by name. Autoloading them first analyses every module on the path, which took 18 to 33 s
+# on GitHub's Windows runners in this environment (no PSModuleAnalysisCachePath).
+Import-Module Microsoft.PowerShell.Utility
 try {
 Add-Type -TypeDefinition @'
 using System;
@@ -59,8 +63,10 @@ function windowsDomain(): Promise<ProcessDomain | null> {
   if (!root || !isAbsolute(root)) return Promise.resolve(null);
   const executable = join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
   return new Promise(resolve => {
+    // Asked once per process. A cold PowerShell start (2.5 to 3 s on GitHub's Windows runners)
+    // plus the Add-Type compile can pass 5 s; past the limit the domain stays unverifiable.
     execFile(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(windowsQuery, 'utf16le').toString('base64')],
-      { windowsHide: true, shell: false, timeout: 5000, maxBuffer: 4096, encoding: 'utf8',
+      { windowsHide: true, shell: false, timeout: 15_000, maxBuffer: 4096, encoding: 'utf8',
         // Add-Type compiles into the temp directory; a sterile service environment may define
         // neither TEMP nor TMP, so fall back to the system Temp folder rather than the Windows folder.
         env: { SystemRoot: root, WINDIR: root, TEMP: process.env.TEMP || process.env.TMP || join(root, "Temp"),

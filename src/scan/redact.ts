@@ -1,15 +1,40 @@
 import { redactEncodedCredentials } from '../credential-recognition.js';
 import { nwcMatches, replaceNwc } from './nwc-match.js';
-import { lndconnect } from './patterns.js';
+import { l402Header, lndconnect } from './patterns.js';
+import { l402PairMatches } from './l402-match.js';
+import { redactRuneContexts } from './rune-context.js';
 
 const lndconnectAll = new RegExp(lndconnect.source, `${lndconnect.flags}g`);
 
+const l402HeaderAll = new RegExp(l402Header.source, `${l402Header.flags}g`);
+
+/**
+ * L402 Authorization credentials and "<base64>:<64 hex>" pairs. Both shapes are redacted
+ * whether or not they decode: text of that shape that reaches output is treated as a
+ * credential. The pair matcher is linear (src/scan/l402-match.ts).
+ */
+export function redactL402Text(text: string): string {
+  if (!text.includes(':')) return text;
+  l402HeaderAll.lastIndex = 0;
+  const withoutHeaders = text.replace(l402HeaderAll, '[redacted]');
+  const pairs = l402PairMatches(withoutHeaders);
+  if (!pairs.length) return withoutHeaders;
+  let output = '';
+  let cursor = 0;
+  for (const pair of pairs) {
+    output += `${withoutHeaders.slice(cursor, pair.index)}[redacted]`;
+    cursor = pair.index + pair.text.length;
+  }
+  return output + withoutHeaders.slice(cursor);
+}
+
 // The published nwc regex backtracks quadratically on repeated prefixes; the linear matcher
 // returns exactly its matches (src/scan/nwc-match.ts).
+// Rune values in rune context (rune=…, "rune": "…", Rune: …) are redacted too (1.2.0).
 function redactStructured(text: string): string {
   lndconnectAll.lastIndex = 0;
-  return replaceNwc(text.replace(lndconnectAll, '[redacted]'),
-    match => `[redacted]${/[^0-9a-f]$/i.test(match) ? match.slice(-1) : ''}`);
+  return redactL402Text(replaceNwc(redactRuneContexts(text).replace(lndconnectAll, '[redacted]'),
+    match => `[redacted]${/[^0-9a-f]$/i.test(match) ? match.slice(-1) : ''}`));
 }
 
 // Same rule as the output renderer: a complete macaroon is at least 36 bytes and every

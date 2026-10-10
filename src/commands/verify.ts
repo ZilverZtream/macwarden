@@ -5,7 +5,7 @@ import { connectionProblem, drift, endpoint, failureDetails, flagProblem, nodeIn
   readBoundedFile, readOnlineCredential, connectionSettings } from '../online.js';
 import { unsafeNodeDiagnostics } from '../environment.js';
 import { isProtectedPath } from '../protected-path.js';
-import { decodeMacaroon, DecodeError, isNwcContainer, type MacaroonFacts } from '../decode/index.js';
+import { decodeMacaroon, DecodeError, isL402Container, isL402Macaroon, isNwcContainer, type MacaroonFacts } from '../decode/index.js';
 import { readCredential, InputError, UsageError, type InputIO } from '../input/index.js';
 import { canBake } from '../grade/index.js';
 import { createLndAdapter, type LndAdapter } from '../lnd/index.js';
@@ -170,10 +170,12 @@ async function runSteps(args: string[], deps: Deps, warnings: OutputWarning[]): 
   let facts: MacaroonFacts;
   try {
     const read = await readCredential(request.input, { stdin: deps.stdin ?? process.stdin, fs: deps.fs },
-      { unsafeArg: request.unsafeArg, nwc: true });
+      { unsafeArg: request.unsafeArg, nwc: true, l402: true });
     if (read.literal) warnings.push('unsafe-arg');
     if (isNwcContainer(read.secret))
       return fail(3, 'input-form', 'a Nostr Wallet Connect URI is not an LND credential; revoke NWC connections in the wallet service', warnings);
+    if (isL402Container(read.secret) || isL402Macaroon(read.secret))
+      return fail(3, 'input-form', 'an L402 token is not an LND credential: it pays for access to a service, which alone can revoke it', warnings);
     target = read.secret;
     facts = decodeMacaroon(target);
   } catch (error) {

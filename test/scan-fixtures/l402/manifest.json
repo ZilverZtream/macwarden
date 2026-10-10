@@ -1,0 +1,110 @@
+{
+  "source": "test/scan-fixtures/generate-l402.mjs: synthetic L402 tokens, fixed root key, fingerprints computed independently of src/",
+  "files": [
+    {
+      "path": "access.log",
+      "findings": [
+        {
+          "line": 3,
+          "kind": "l402",
+          "form": "authorization",
+          "status": "live",
+          "fingerprint": "fp:e0b4c38f680f08ed",
+          "column": 16
+        }
+      ]
+    },
+    {
+      "path": "auth.env",
+      "findings": [
+        {
+          "line": 2,
+          "kind": "l402",
+          "form": "authorization",
+          "status": "live",
+          "fingerprint": "fp:fed0a4cc51674b57",
+          "column": 12
+        }
+      ]
+    },
+    {
+      "path": "client.json",
+      "findings": [
+        {
+          "line": 2,
+          "kind": "l402",
+          "form": "pair",
+          "status": "live",
+          "fingerprint": "fp:f7548f36b0dec9cf",
+          "column": 18
+        }
+      ]
+    },
+    {
+      "path": "grpc.txt",
+      "findings": [
+        {
+          "line": 1,
+          "kind": "l402",
+          "form": "macaroon",
+          "status": "live",
+          "fingerprint": "fp:e99140e3e83a9af9",
+          "column": 11
+        }
+      ]
+    },
+    {
+      "path": "lnget/tokens/api.example.com/l402.token",
+      "findings": [
+        {
+          "line": null,
+          "kind": "l402-file",
+          "form": "token-file",
+          "status": "live",
+          "fingerprint": "fp:fef92ffeeeda4c1c",
+          "column": null
+        }
+      ]
+    }
+  ],
+  "gitleaks": [
+    {
+      "path": "access.log",
+      "line": 3,
+      "rule": "macwarden-l402"
+    },
+    {
+      "path": "access.log",
+      "line": 3,
+      "rule": "macwarden-l402-macaroon-base64"
+    },
+    {
+      "path": "auth.env",
+      "line": 2,
+      "rule": "macwarden-l402"
+    },
+    {
+      "path": "auth.env",
+      "line": 2,
+      "rule": "macwarden-l402-macaroon-base64"
+    },
+    {
+      "path": "client.json",
+      "line": 2,
+      "rule": "macwarden-l402-macaroon-base64"
+    },
+    {
+      "path": "grpc.txt",
+      "line": 1,
+      "rule": "macwarden-l402-macaroon-hex"
+    }
+  ],
+  "summary": {
+    "findings": 5,
+    "distinct": 5,
+    "countedAtRead": 5,
+    "byGrade": {
+      "L402": 5
+    }
+  }
+}

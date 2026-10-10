@@ -91,7 +91,9 @@ export async function run(args: string[], deps: ScanDeps = { fs }): Promise<Outp
       const count = result.findings.filter(finding => {
         if (finding.grade === 'UNASSESSED' || finding.kind === 'undecodable' ||
           finding.kind === 'undecodable-candidate') return true;
-        const grade = finding.kind === 'nwc' ? 'SPEND' : finding.grade;
+        // An L402 token with a usable preimage is a live service-access secret, counted as READ;
+        // one without (a challenge, a pending token, a wrong preimage) grants nothing alone.
+        const grade = finding.kind === 'nwc' ? 'SPEND' : finding.l402 ? finding.l402.countedAs : finding.grade;
         return grade !== null && ladder.indexOf(grade) <= rung;
       }).length;
       result.failOn = { threshold, count };

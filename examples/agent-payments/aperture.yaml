@@ -1,0 +1,31 @@
+# Aperture v0.5.0 configuration for the regtest example. See
+# https://github.com/lightninglabs/aperture/blob/v0.5.0/sample-conf.yaml
+listenaddr: "0.0.0.0:8081"
+# Plain HTTP on the loopback-only port 19381. Use TLS (or a TLS-terminating
+# proxy) for anything that is not a local demo.
+insecure: true
+basedir: "/root/.aperture"
+debuglevel: "info"
+
+authenticator:
+  network: "regtest"
+  lndhost: "bob:10009"
+  tlspath: "/lnd/tls.cert"
+  # Aperture loads invoice.macaroon from this directory: it only creates and
+  # watches invoices.
+  macdir: "/lnd/data/chain/bitcoin/regtest"
+
+dbbackend: "sqlite"
+sqlite:
+  dbfile: "/root/.aperture/aperture.db"
+
+services:
+  - name: "forecast"
+    hostregexp: '.*'
+    pathregexp: '^/api/.*$'
+    address: "api:8000"
+    protocol: http
+    # Price of one L402 token in satoshis.
+    price: 250
+    # The token expires one hour after it is issued.
+    timeout: 3600

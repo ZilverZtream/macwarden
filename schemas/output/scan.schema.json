@@ -134,7 +134,11 @@
             "lndconnect",
             "nwc",
             "undecodable",
-            "undecodable-candidate"
+            "undecodable-candidate",
+            "l402",
+            "l402-file",
+            "rune",
+            "rune-invalid"
           ]
         },
         "fingerprint": { "$ref": "#/$defs/fingerprint" },
@@ -149,7 +153,12 @@
           "type": "string",
           "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"
         },
+        "l402": {
+          "description": "Only on l402 and l402-file findings: the facts inspect reports for the credential (docs/spec.md, Commands > 1. inspect, L402 input). Never the preimage or the macaroon bytes.",
+          "$ref": "#/$defs/l402"
+        },
         "context": { "description": "Only when the credential is a string value inside an MCP server entry of a JSON config (an AI agent configuration).", "const": "mcp-config" },
+        "rune": { "description": "Only on kind rune (runeReport) or rune-invalid (runeInvalidReport): the sanitised facts of a Core Lightning rune found in rune context.", "oneOf": [{ "$ref": "#/$defs/runeReport" }, { "$ref": "#/$defs/runeInvalidReport" }] },
         "alsoAt": {
           "description": "With --git-history (a finding with commit): the same file content was also added at other paths. On a work-tree finding (no commit): the same file is also reachable under other hard-link names within the same path argument. One finding stands for all of them: count is how many other paths, paths lists up to five.",
           "type": "object",
@@ -163,7 +172,7 @@
       },
       "allOf": [
         {
-          "if": { "properties": { "kind": { "enum": ["macaroon-file", "undecodable"] } } },
+          "if": { "properties": { "kind": { "enum": ["macaroon-file", "undecodable", "l402-file"] } } },
           "then": { "properties": { "line": { "type": "null" }, "column": { "type": "null" } } },
           "else": {
             "properties": {
@@ -173,7 +182,7 @@
           }
         },
         {
-          "if": { "properties": { "kind": { "enum": ["nwc", "undecodable", "undecodable-candidate"] } } },
+          "if": { "properties": { "kind": { "enum": ["nwc", "undecodable", "undecodable-candidate", "l402", "l402-file"] } } },
           "then": {
             "properties": {
               "grade": { "type": "null" },
@@ -185,15 +194,120 @@
             }
           },
           "else": {
-            "properties": {
-              "grade": { "$ref": "#/$defs/grade" },
-              "rootKeyId": { "$ref": "#/$defs/rootKeyId" },
-              "permissions": { "type": "array" },
-              "caveats": { "type": "array" }
+            "if": { "properties": { "kind": { "enum": ["rune", "rune-invalid"] } } },
+            "then": {
+              "required": ["rune"],
+              "properties": {
+                "grade": { "$ref": "#/$defs/grade" },
+                "rootKeyId": { "type": "null" },
+                "permissions": { "type": "null" },
+                "caveats": { "type": "null" },
+                "warnings": { "type": "array", "maxItems": 0 }
+              }
+            },
+            "else": {
+              "properties": {
+                "grade": { "$ref": "#/$defs/grade" },
+                "rootKeyId": { "$ref": "#/$defs/rootKeyId" },
+                "permissions": { "type": "array" },
+                "caveats": { "type": "array" }
+              }
             }
           }
+        },
+        {
+          "if": { "properties": { "kind": { "enum": ["l402", "l402-file"] } } },
+          "then": { "required": ["l402"] },
+          "else": { "properties": { "l402": false } }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "rune" } } },
+          "then": { "properties": { "rune": { "$ref": "#/$defs/runeReport" } } }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "rune-invalid" } } },
+          "then": { "properties": { "grade": { "const": "UNASSESSED" }, "unassessed": { "type": "array", "maxItems": 0 }, "rune": { "$ref": "#/$defs/runeInvalidReport" } } }
+        },
+        {
+          "if": { "properties": { "kind": { "not": { "enum": ["rune", "rune-invalid"] } } } },
+          "then": { "properties": { "rune": false } }
         }
       ]
+    },
+    "l402Caveat": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "An L402 caveat as Aperture reads it: condition=value, split at the first '='. A preimage caveat's value is never reported, and a caveat that carries the preimage is withheld.",
+      "required": ["type", "condition", "value"],
+      "properties": {
+        "type": { "enum": ["services", "capabilities", "valid-until", "preimage", "constraint", "third-party", "unknown", "withheld"] },
+        "condition": { "type": ["string", "null"] },
+        "value": { "type": ["string", "null"] },
+        "service": { "type": "string" },
+        "until": { "type": "string", "description": "The valid-until instant as RFC 3339 UTC, when it is representable." },
+        "expired": { "type": "boolean" }
+      },
+      "allOf": [
+        { "if": { "properties": { "type": { "enum": ["capabilities", "valid-until"] } } }, "then": { "required": ["service"] }, "else": { "properties": { "service": false } } },
+        { "if": { "properties": { "type": { "const": "valid-until" } } }, "else": { "properties": { "expired": false, "until": false } } },
+        { "if": { "properties": { "type": { "enum": ["preimage", "withheld"] } } }, "then": { "properties": { "value": { "type": "null" } } }, "else": { "properties": { "value": { "type": "string" } } } },
+        { "if": { "properties": { "type": { "enum": ["unknown", "third-party", "withheld"] } } }, "then": { "properties": { "condition": { "type": "null" } } }, "else": { "properties": { "condition": { "type": "string" } } } }
+      ]
+    },
+    "l402Facts": {
+      "type": "object",
+      "description": "The facts of an L402 credential (docs/spec.md, Commands > 1. inspect, L402 input). access is always service-access: an L402 token pays for access to a service and gives no control of a Lightning node.",
+      "required": ["macaroonFingerprint", "macaroons", "form", "scheme", "location", "identifier", "services", "caveats", "preimage", "preimageSource", "status", "expired", "access", "countedAs", "warnings"],
+      "properties": {
+        "macaroonFingerprint": { "$ref": "#/$defs/fingerprint" },
+        "macaroons": { "type": "integer", "minimum": 1, "maximum": 16, "description": "Macaroons the credential carries; the other facts describe the primary one (the first with an L402 identifier, else the first)." },
+        "form": { "enum": ["authorization", "challenge", "pair", "macaroon", "token-file"] },
+        "scheme": { "enum": ["L402", "LSAT", null] },
+        "location": { "type": ["string", "null"] },
+        "identifier": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object", "additionalProperties": false, "required": ["version", "paymentHash", "tokenId"],
+              "properties": {
+                "version": { "const": 0 },
+                "paymentHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                "tokenId": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+              }
+            }
+          ]
+        },
+        "services": {
+          "type": "array",
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["name", "tier"],
+            "properties": { "name": { "type": "string", "minLength": 1 }, "tier": { "type": "string", "pattern": "^[+-]?[0-9]+$" } }
+          }
+        },
+        "caveats": { "type": "array", "items": { "$ref": "#/$defs/l402Caveat" } },
+        "preimage": { "enum": ["absent", "matches", "mismatch", "unverifiable"] },
+        "preimageSource": { "enum": ["credential", "caveat", null] },
+        "status": { "enum": ["live", "expired", "preimage-mismatch", "unpaid"] },
+        "expired": { "type": "boolean" },
+        "access": { "const": "service-access" },
+        "countedAs": { "enum": ["READ", null], "description": "How scan --fail-on counts it: READ when a preimage is present that matches the payment hash or cannot be checked; null otherwise." },
+        "warnings": {
+          "type": "array", "uniqueItems": true,
+          "items": { "enum": ["trailing-bytes", "caveats-exceed-bounds", "l402-identifier-unrecognized", "l402-bad-services", "l402-bad-valid-until", "l402-bad-preimage-caveat", "l402-caveat-withheld", "l402-token-hash-differs", "l402-several-macaroons"] }
+        }
+      },
+      "allOf": [
+        { "if": { "properties": { "form": { "enum": ["authorization", "challenge"] } } }, "then": { "properties": { "scheme": { "enum": ["L402", "LSAT"] } } }, "else": { "properties": { "scheme": { "const": null } } } },
+        { "if": { "properties": { "preimage": { "const": "absent" } } }, "then": { "properties": { "preimageSource": { "const": null }, "status": { "const": "unpaid" }, "countedAs": { "const": null } } }, "else": { "properties": { "preimageSource": { "enum": ["credential", "caveat"] } } } },
+        { "if": { "properties": { "preimage": { "const": "mismatch" } } }, "then": { "properties": { "status": { "const": "preimage-mismatch" }, "countedAs": { "const": null } } } },
+        { "if": { "properties": { "preimage": { "enum": ["matches", "unverifiable"] } } }, "then": { "properties": { "status": { "enum": ["live", "expired"] }, "countedAs": { "const": "READ" } } } },
+        { "if": { "properties": { "identifier": { "type": "null" } } }, "then": { "properties": { "preimage": { "enum": ["absent", "unverifiable"] } } }, "else": { "properties": { "preimage": { "enum": ["absent", "matches", "mismatch"] } } } }
+      ]
+    },
+    "l402": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/l402Facts" }],
+      "unevaluatedProperties": false
     },
     "skipped": {
       "type": "object",
@@ -232,7 +346,7 @@
         "byGrade": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["ADMIN", "SPEND", "OPERATE", "RECEIVE", "READ", "UNASSESSED", "NWC", "UNDECODABLE"],
+          "required": ["ADMIN", "SPEND", "OPERATE", "RECEIVE", "READ", "UNASSESSED", "NWC", "UNDECODABLE", "L402"],
           "properties": {
             "ADMIN": { "$ref": "#/$defs/count" },
             "SPEND": { "$ref": "#/$defs/count" },
@@ -241,7 +355,8 @@
             "READ": { "$ref": "#/$defs/count" },
             "UNASSESSED": { "$ref": "#/$defs/count" },
             "NWC": { "$ref": "#/$defs/count" },
-            "UNDECODABLE": { "$ref": "#/$defs/count" }
+            "UNDECODABLE": { "$ref": "#/$defs/count" },
+            "L402": { "$ref": "#/$defs/count", "description": "l402 and l402-file findings, counted or not." }
           }
         }
       }
@@ -271,6 +386,240 @@
         },
         "summary": { "$ref": "#/$defs/summary" },
         "failOn": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/failOn" }] }
+      }
+    },
+    "runeText": {
+      "description": "A rune field, value, unique ID or method name from the credential: UTF-8 (invalid bytes as \\xNN), long opaque tokens and recognised credentials replaced by [redacted], at most 128 code points followed by …[+N].",
+      "type": "string"
+    },
+    "runeWarning": {
+      "enum": [
+        "broad-method-access",
+        "unreviewed-method",
+        "sensitive-method",
+        "no-matching-method",
+        "unknown-field",
+        "parameter-limits-not-a-budget",
+        "no-unique-id",
+        "unique-id-not-numeric",
+        "unique-id-out-of-range",
+        "version-suffix",
+        "non-canonical-encoding",
+        "possibly-truncated"
+      ]
+    },
+    "runeReport": {
+      "description": "Core Lightning rune facts (docs/spec.md, Core Lightning runes). Recognition, assessment and verification are separate: recognition says the text parses as a rune, the assessment says what its encoded restrictions may allow, and verification (authenticity, issuing node, blacklist, rate-limit state) is never done offline. Never contains the authenticator or Core Lightning's decoded string.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recognition",
+        "methodTable",
+        "uniqueId",
+        "version",
+        "restrictions",
+        "omittedAlternatives",
+        "methods",
+        "allowedMethods",
+        "capabilities",
+        "sensitiveMethods",
+        "conditions",
+        "expiry",
+        "verification",
+        "warnings"
+      ],
+      "properties": {
+        "recognition": {
+          "const": "rune-syntax"
+        },
+        "methodTable": {
+          "description": "The Core Lightning release the method table is pinned to.",
+          "type": "string",
+          "pattern": "^cln-v[0-9][0-9.]*$"
+        },
+        "uniqueId": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/runeText"
+            }
+          ]
+        },
+        "version": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/runeText"
+            }
+          ]
+        },
+        "restrictions": {
+          "description": "Every restriction after the unique ID, all of which must pass (AND); each lists its alternatives, any of which may pass (OR).",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "field",
+                "condition",
+                "value"
+              ],
+              "properties": {
+                "field": {
+                  "$ref": "#/$defs/runeText"
+                },
+                "condition": {
+                  "enum": [
+                    "!",
+                    "=",
+                    "/",
+                    "^",
+                    "$",
+                    "~",
+                    "<",
+                    ">",
+                    "{",
+                    "}",
+                    "#"
+                  ]
+                },
+                "value": {
+                  "$ref": "#/$defs/runeText"
+                }
+              }
+            }
+          }
+        },
+        "omittedAlternatives": {
+          "description": "Alternatives beyond the 64 listed.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "methods": {
+          "enum": [
+            "listed",
+            "broad",
+            "none"
+          ]
+        },
+        "allowedMethods": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        },
+        "capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "ADMIN",
+              "SPEND",
+              "OPERATE",
+              "RECEIVE",
+              "READ",
+              "UNASSESSED"
+            ]
+          }
+        },
+        "sensitiveMethods": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        },
+        "conditions": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "peer",
+              "parameter",
+              "rate",
+              "time",
+              "unknown-field"
+            ]
+          }
+        },
+        "expiry": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "deadline"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "none",
+                "time-conditions",
+                "deadline-ahead",
+                "deadline-passed"
+              ]
+            },
+            "deadline": {
+              "description": "UNIX seconds from which every request is refused, as a decimal string.",
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "string",
+                  "pattern": "^-?[0-9]+$"
+                }
+              ]
+            }
+          }
+        },
+        "verification": {
+          "const": "unchecked"
+        },
+        "warnings": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/runeWarning"
+          }
+        }
+      }
+    },
+    "runeInvalidReport": {
+      "description": "A value in rune context that does not parse as a Core Lightning rune, or exceeds macwarden's parser bounds.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recognition",
+        "reason",
+        "verification"
+      ],
+      "properties": {
+        "recognition": {
+          "const": "invalid"
+        },
+        "reason": {
+          "enum": [
+            "exceeds-bounds",
+            "not-base64url",
+            "too-short",
+            "nul-byte",
+            "restriction-syntax",
+            "unique-id-placement",
+            "no-unique-id",
+            "unique-id-not-numeric"
+          ]
+        },
+        "verification": {
+          "const": "unchecked"
+        }
       }
     }
   }

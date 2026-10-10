@@ -3,13 +3,17 @@ import { createHash } from 'node:crypto';
 import { constants, type BigIntStats, type Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import { basename, dirname, join, parse, posix, relative, sep } from 'node:path';
-import { decodeMacaroon, DecodeError, parseTimeBefore, type Caveat, type MacaroonFacts } from '../decode/index.js';
+import { decodeL402, decodeL402Macaroon, decodeL402Macaroons, decodeMacaroon, DecodeError, isL402Macaroon, L402_MAX_MACAROONS,
+  l402RedactionSecret, parseTimeBefore,
+  type Caveat, type L402Facts, type MacaroonFacts } from '../decode/index.js';
+import { assessL402, type L402Report } from '../l402.js';
+import { l402PairMatches } from './l402-match.js';
 import { describe, gradeFacts, type Grade } from '../grade/index.js';
 import { InputError } from '../input/index.js';
 import { parseLndconnect } from '../input/lndconnect.js';
 import { Secret } from '../secret.js';
 import { isProtectedPath } from '../protected-path.js';
-import { lndconnect, macaroonBase64, macaroonHex, nwc } from './patterns.js';
+import { l402Challenge, l402Header, l402MacaroonBase64, l402MacaroonHex, lndconnect, macaroonBase64, macaroonHex, nwc } from './patterns.js';
 import { collectNwcSecrets, knownSecretRedactor, redactDecoded, redactPath } from './redact.js';
 import { nwcMatches, nwcUnescaped } from './nwc-match.js';
 import { IgnoreFileError, parseIgnoreFile, type IgnoreEntry } from './ignore.js';
@@ -17,10 +21,19 @@ import { assertWorkTree, blobSizes, GitHistoryError, historyEntries, isShallowRe
   readBlobs } from './git-history.js';
 import { Cancelled, cancellable, checkCancellation } from '../cancellation.js';
 import { readBounded } from '../bounded-file.js';
+import { runeFindings } from './runes.js';
+import type { RuneInvalidReport, RuneReport } from '../rune-report.js';
+
+/** An unexpected exception while analysing a file's bytes: a bug, reported as exit 8 (internal). */
+class ScanAnalysisFailure extends Error {
+  constructor(cause: unknown) { super('internal error while analysing a scanned file', { cause }); }
+}
+
 export { IgnoreFileError } from './ignore.js';
 export { GitHistoryError } from './git-history.js';
 
-export type FindingKind = 'macaroon-file' | 'undecodable' | 'macaroon-hex' | 'macaroon-base64' | 'lndconnect' | 'nwc' | 'undecodable-candidate';
+export type FindingKind = 'macaroon-file' | 'undecodable' | 'macaroon-hex' | 'macaroon-base64' | 'lndconnect' | 'nwc' | 'undecodable-candidate'
+  | 'l402' | 'l402-file' | 'rune' | 'rune-invalid';
 export type ScanFinding = {
   path: string;
   line: number | null;
@@ -37,12 +50,16 @@ export type ScanFinding = {
   commit?: string;
   /** Present only when the credential is a string value inside an MCP server entry of a JSON config. */
   context?: 'mcp-config';
+  /** Present only on a Core Lightning rune finding (kind rune or rune-invalid): its sanitised facts. */
+  rune?: RuneReport | RuneInvalidReport;
   /**
    * On a --git-history finding whose file content was also added at other paths, and on a
    * work-tree finding whose file has other hard-link names under the same path argument:
    * how many, and up to ALSO_AT_EXAMPLES of them. One finding stands for all of them.
    */
   alsoAt?: { count: number; paths: string[] };
+  /** Present only on l402 and l402-file findings: the facts inspect reports (docs/spec.md, L402). */
+  l402?: L402Report;
 };
 export type ScanResult = {
   findings: ScanFinding[];
@@ -61,7 +78,7 @@ export type ScanResult = {
     shallowHistory?: true;
     /** Present only with --agent-configs: well-known agent and MCP client locations found and absent. */
     agentConfigs?: { found: { client: string; path: string }[]; absent: { client: string; path: string }[] };
-    byGrade: Record<Grade | 'NWC' | 'UNDECODABLE', number>;
+    byGrade: Record<Grade | 'NWC' | 'UNDECODABLE' | 'L402', number>;
   };
   failOn: { threshold: 'ADMIN' | 'SPEND' | 'OPERATE' | 'RECEIVE' | 'READ'; count: number } | null;
 };
@@ -100,16 +117,27 @@ function fileIdentity(stat: FileStat, target: string): string {
 }
 
 /** `truncated`: the match was cut by its window's end and may continue in the line (fail closed). */
+type HitKind = 'lndconnect' | 'nwc' | 'macaroon-hex' | 'macaroon-base64' | 'l402-header' | 'l402-challenge' | 'l402-pair' | 'l402-hex'
+  | 'l402-base64';
 type Hit = {
-  start: number; text: string; kind: Exclude<FindingKind, 'undecodable-candidate'>; truncated?: true;
+  start: number; text: string; kind: HitKind; truncated?: true;
   /** Code points the match covers in the line, when matched on an unescaped copy of it. */
   extent?: number;
 };
 const detectors = [
   { kind: 'lndconnect', pattern: lndconnect },
+  { kind: 'l402-header', pattern: l402Header },
+  // Scan only: a WWW-Authenticate challenge (L402 section 5.1): the scheme, an optional invoice
+  // parameter, then macaroon= or token= with the base64 macaroon, quoted, JSON-escaped or bare.
+  { kind: 'l402-challenge', pattern: l402Challenge },
+  // Scan only: a scheme-less "<base64 macaroon>:<hex preimage>" pair, found by a linear matcher
+  // (src/scan/l402-match.ts); this regex only names the shape.
+  { kind: 'l402-pair', pattern: /[A-Za-z0-9+/_-]{40,}={0,2}:[0-9a-f]{64}/i },
   { kind: 'nwc', pattern: nwc },
   { kind: 'macaroon-hex', pattern: macaroonHex },
   { kind: 'macaroon-base64', pattern: macaroonBase64 },
+  { kind: 'l402-hex', pattern: l402MacaroonHex },
+  { kind: 'l402-base64', pattern: l402MacaroonBase64 },
   // RR-10, scan only (not part of the published patterns): hex with a separator between every
   // byte (colon hex, xxd -g1, spaced bytes) is decoded; the prefix of an xxd default dump
   // (two-byte groups, either alignment) is a candidate, since a dump spans several lines.
@@ -128,7 +156,7 @@ const detectorRegexes = detectors.map(({ kind, pattern }) =>
 // Every detector match contains one of these (case-insensitive superset), so a line
 // without any of them cannot produce a hit and is not split into code points.
 // "walletconnect%3a" covers percent-encoded NWC URIs, which are matched on a normalised copy.
-const PLAIN_MAY_MATCH = /lndconnect:\/\/|walletconnect:|walletconnect%3a|0201036c6e6402|AgEDbG5kA|02[: -]01[: -]03[: -]6c|0201 036c 6e64 02|02 0103 6c6e 6402/i;
+const PLAIN_MAY_MATCH = /lndconnect:\/\/|walletconnect:|walletconnect%3a|0201036c6e6402|AgEDbG5kA|02[: -]01[: -]03[: -]6c|0201 036c 6e64 02|02 0103 6c6e 6402|l402[ \t]|lsat[ \t]|0201046c73617402420000|AgEEbHNhdAJCAA|:[0-9a-f]{64}/i;
 
 /**
  * The part of base64(prefix) that does not depend on the bytes before or after the prefix,
@@ -147,7 +175,8 @@ function encodedCores(prefix: string): string[] {
     return best;
   });
 }
-const ENCODED_PREFIXES = ['0201036c6e6402', '0201036C6E6402', 'AgEDbG5kA', 'lndconnect://'];
+const ENCODED_PREFIXES = ['0201036c6e6402', '0201036C6E6402', 'AgEDbG5kA', 'lndconnect://',
+  'L402 ', 'LSAT ', 'l402 ', 'lsat ', '0201046c73617402420000', 'AgEEbHNhdAJCAA'];
 // Base64 that may hold a text credential. Case matters: it is matched on the encoded text.
 const ENCODED_CANDIDATE = new RegExp(ENCODED_PREFIXES.flatMap(encodedCores)
   .map(core => core.replace(/[+/]/g, match => `\\${match}`)).join('|'));
@@ -181,7 +210,32 @@ function nullFinding(path: string, line: number | null, column: number | null, k
 
 type FactFields = Pick<ScanFinding, 'fingerprint' | 'grade' | 'rootKeyId' | 'permissions' | 'caveats' | 'warnings' | 'unassessed'>;
 /** Per-scan state shared by every file and blob: known NWC secrets and decoded facts by fingerprint. */
-type ScanContext = { secrets: Set<string>; facts: Map<string, FactFields> };
+type ScanContext = { secrets: Set<string>; facts: Map<string, FactFields>; l402: Map<string, L402Report> };
+
+function redactL402(report: L402Report, redact: (text: string) => string): L402Report {
+  const text = (value: string | null) => value === null ? null : redact(value);
+  return { ...report, location: text(report.location),
+    services: report.services.map(service => ({ ...service, name: redact(service.name) })),
+    caveats: report.caveats.map(caveat => ({ ...caveat, condition: text(caveat.condition), value: text(caveat.value),
+      ...(caveat.service === undefined ? {} : { service: redact(caveat.service) }) })) };
+}
+
+// An L402 credential's facts, shared like withFacts by fingerprint and form. Its preimage
+// joins the known secrets, so no reported string can carry it.
+function withL402Facts(path: string, line: number | null, column: number | null, kind: 'l402' | 'l402-file',
+  facts: L402Facts, now: Date, ctx: ScanContext): ScanFinding {
+  const key = `${facts.fingerprint}\0${facts.form}\0${facts.scheme ?? ''}`;
+  let report = ctx.l402.get(key);
+  if (!report) {
+    const preimage = l402RedactionSecret(facts);
+    if (preimage !== null) ctx.secrets.add(preimage);
+    for (const value of [facts.location, ...facts.caveats.flatMap(caveat => [caveat.condition, caveat.value])])
+      if (value !== null) collectNwcSecrets(value, ctx.secrets);
+    report = redactL402(assessL402(facts, now), redactDecoded);
+    ctx.l402.set(key, report);
+  }
+  return { ...nullFinding(path, line, column, kind, facts.fingerprint), l402: report };
+}
 
 // The same credential (same fingerprint, hence the same canonical bytes) has the same
 // facts wherever it is found, so they are computed and redacted once per scan.
@@ -237,14 +291,66 @@ function decoded(bytes: Buffer): MacaroonFacts | null {
 }
 
 function credentialBytes(hit: Hit): Buffer | null {
-  if (hit.kind === 'macaroon-hex') {
+  if (hit.kind === 'macaroon-hex' || hit.kind === 'l402-hex') {
     // Byte separators (RR-10) carry no data.
     const digits = hit.text.replace(/[: -]/g, '');
     if (digits.length % 2 !== 0) return null;
     return Buffer.from(digits, 'hex');
   }
-  if (hit.kind === 'macaroon-base64') return decodeBase64(hit.text);
+  if (hit.kind === 'macaroon-base64' || hit.kind === 'l402-base64') return decodeBase64(hit.text);
   return null;
+}
+
+/**
+ * The credential an L402 Authorization, challenge or pair match carries: an L402 finding, the
+ * LND macaroon it holds (reported as macaroon-base64 at the macaroon), or null when it does not
+ * decode. Pairs are confirmed only with an L402 identifier: the shape alone is too common.
+ */
+function l402Credential(hit: Hit, path: string, line: number, column: (start: number) => number, now: Date,
+  ctx: ScanContext): ScanFinding | null {
+  let macaroons: string[];
+  let preimage: Buffer | null = null;
+  let offset: number;
+  const scheme = /^(l402|lsat)[ \t]+/i.exec(hit.text);
+  const schemeName = scheme ? scheme[1].toUpperCase() as 'L402' | 'LSAT' : null;
+  if (hit.kind === 'l402-challenge') {
+    const parameter = /(?:macaroon|token)[ \t]*=[ \t]*\\?"?/i.exec(hit.text)!;
+    offset = parameter.index + parameter[0].length;
+    macaroons = [hit.text.slice(offset)];
+  } else {
+    const body = scheme ? hit.text.slice(scheme[0].length) : hit.text;
+    offset = scheme ? scheme[0].length : 0;
+    const colon = body.lastIndexOf(':');
+    macaroons = body.slice(0, colon).split(',');
+    preimage = Buffer.from(body.slice(colon + 1), 'hex');
+  }
+  if (macaroons.length > L402_MAX_MACAROONS) return null;
+  const bytes = macaroons.map(decodeBase64);
+  if (bytes.some(item => item === null)) return null;
+  const form = hit.kind === 'l402-challenge' ? 'challenge' : hit.kind === 'l402-header' ? 'authorization' : 'pair';
+  try {
+    const result = decodeL402Macaroons(bytes.map(item => new Secret(item!)), preimage && new Secret(preimage), form, schemeName);
+    if ('lnd' in result) {
+      return withFacts(path, line, column(hit.start + offset), 'macaroon-base64', decodeMacaroon(result.lnd), now, ctx);
+    }
+    if (form === 'pair' && result.l402.identifier === null) return null;
+    return withL402Facts(path, line, column(hit.start), 'l402', result.l402, now, ctx);
+  } catch (error) {
+    if (!(error instanceof DecodeError)) throw error;
+    return null;
+  }
+}
+
+/** A bare L402 macaroon (hex or base64 with Aperture's location and identifier), or null. */
+function l402Macaroon(bytes: Buffer | null): L402Facts | null {
+  if (bytes === null) return null;
+  try {
+    const result = decodeL402Macaroon(new Secret(bytes), null, 'macaroon');
+    return 'l402' in result && result.l402.identifier !== null ? result.l402 : null;
+  } catch (error) {
+    if (!(error instanceof DecodeError)) throw error;
+    return null;
+  }
 }
 
 /**
@@ -252,7 +358,7 @@ function credentialBytes(hit: Hit): Buffer | null {
  * detector, anchored at the match, matches more of the match followed by the next code point.
  */
 function continues(kind: Hit['kind'], text: string, next: string, regex: RegExp): boolean {
-  if (kind === 'nwc') return false;
+  if (kind === 'nwc' || kind === 'l402-pair') return false;
   const sticky = new RegExp(regex.source, `${regex.flags.replace('g', '')}y`);
   const longer = sticky.exec(text + next);
   return longer !== null && longer[0].length > text.length;
@@ -280,7 +386,11 @@ function collectHits(points: string[], only?: readonly Hit['kind'][]): Hit[] {
       const open: number[] = [];
       const found: { index: number; 0: string; truncated?: true }[] = kind === 'nwc'
         ? nwcMatches(window, cut === null ? undefined : open).map(item => ({ index: item.index, 0: item.text }))
-        : [...window.matchAll(regex)];
+        // L402 pairs use a linear matcher too (src/scan/l402-match.ts); a pair is never a candidate.
+        : kind === 'l402-pair'
+          ? l402PairMatches(window, { previous: offset > 0 ? points[offset - 1] : null, next: cut })
+            .map(item => ({ index: item.index, 0: item.text }))
+          : [...window.matchAll(regex)];
       for (const index of open) found.push({ index, 0: window.slice(index), truncated: true });
       found.sort((a, b) => a.index - b.index);
       for (const match of found) {
@@ -377,7 +487,7 @@ function scanLine(path: string, line: number, text: string, now: Date, ctx: Scan
   if (slashes) {
     const byKey = new Map(hits.map(hit => [`${hit.kind}:${hit.start}`, hit]));
     const replaced = new Set<Hit>();
-    for (const hit of collectHits(slashes.points, ['lndconnect', 'macaroon-base64'])) {
+    for (const hit of collectHits(slashes.points, ['lndconnect', 'macaroon-base64', 'l402-header', 'l402-challenge', 'l402-pair', 'l402-base64'])) {
       const start = slashes.origin[hit.start];
       const last = hit.start + Array.from(hit.text).length - 1;
       const extent = slashes.origin[last] + (slashes.escaped[last] ? 2 : 1) - start;
@@ -405,6 +515,28 @@ function scanLine(path: string, line: number, text: string, now: Date, ctx: Scan
     spans.push({ start: hit.start, end: hit.start + (hit.extent ?? length) - (length - confirmed.length) });
     lineFindings.push({ hit, finding: withFacts(path, line, column(hit.start), 'lndconnect', facts, now, ctx) });
   }
+  // L402 Authorization credentials and pairs are confirmed next, in line order; a confirmed one
+  // hides the matches inside it (its macaroon as a bare L402 or LND macaroon, a pair inside a
+  // header). One that does not decode hides nothing.
+  const confirmedL402 = new Set<Hit>();
+  if (hits.some(hit => hit.kind === 'l402-header' || hit.kind === 'l402-challenge' || hit.kind === 'l402-pair')) {
+    const l402Spans: { start: number; end: number }[] = [];
+    let lndIndex = 0;
+    let covered = 0;
+    for (const hit of hits) {
+      while (lndIndex < spans.length && spans[lndIndex].start <= hit.start) covered = Math.max(covered, spans[lndIndex++].end);
+      if ((hit.kind !== 'l402-header' && hit.kind !== 'l402-challenge' && hit.kind !== 'l402-pair') || hit.truncated || hit.start < covered) continue;
+      const finding = l402Credential(hit, path, line, column, now, ctx);
+      if (!finding) continue;
+      const end = hit.start + (hit.extent ?? Array.from(hit.text).length);
+      l402Spans.push({ start: hit.start, end });
+      covered = Math.max(covered, end);
+      confirmedL402.add(hit);
+      lineFindings.push({ hit, finding });
+    }
+    spans.push(...l402Spans);
+    spans.sort((a, b) => a.start - b.start);
+  }
   let spanIndex = 0;
   let coveredUntil = 0;
   for (const hit of hits) {
@@ -418,7 +550,21 @@ function scanLine(path: string, line: number, text: string, now: Date, ctx: Scan
       lineFindings.push({ hit, finding: nullFinding(path, line, at, 'undecodable-candidate', fingerprint(hit.text)) });
       continue;
     }
-    if (hit.kind === 'lndconnect' || hit.start < coveredUntil) continue;
+    // A challenge carries no preimage: one that does not decode is not reported (the bare macaroon
+    // detectors still see an L402 macaroon inside it). A pair shape alone is not reported.
+    if (hit.kind === 'lndconnect' || hit.kind === 'l402-pair' || hit.kind === 'l402-challenge' || confirmedL402.has(hit)
+      || hit.start < coveredUntil) continue;
+    if (hit.kind === 'l402-header') {
+      // An Authorization credential that does not decode fails closed, like a macaroon prefix.
+      lineFindings.push({ hit, finding: nullFinding(path, line, at, 'undecodable-candidate', fingerprint(hit.text)) });
+      continue;
+    }
+    if (hit.kind === 'l402-hex' || hit.kind === 'l402-base64') {
+      const l402 = l402Macaroon(credentialBytes(hit));
+      lineFindings.push({ hit, finding: l402 ? withL402Facts(path, line, at, 'l402', l402, now, ctx)
+        : nullFinding(path, line, at, 'undecodable-candidate', fingerprint(hit.text)) });
+      continue;
+    }
     if (hit.kind === 'nwc') {
       // The matcher ends every match with secret=<64 hex> and at most one delimiter. Any
       // match is reported (fail closed): "&amp;secret=" and other separators included.
@@ -588,6 +734,11 @@ export const SCAN_CONCURRENCY = 16;
 const SCAN_QUEUE = SCAN_CONCURRENCY * 4;
 const MACAROON_LIMIT = 65_536;
 
+/** Files read whole as one credential: *.macaroon, and the L402 token store files of Aperture-based clients. */
+function isCredentialFileName(name: string): boolean {
+  return /\.macaroon$/i.test(name) || /^(?:l402|lsat)\.token(?:\.pending)?$/i.test(name);
+}
+
 function fileCredential(bytes: Buffer): Buffer | null {
   if (bytes[0] === 0x02) return bytes;
   let text: string;
@@ -621,11 +772,19 @@ type BytesOutcome = { findings: ScanFinding[]; dropped: number } | { skip: 'size
 // `name` is the file's base name, used only to recognise MCP JSON configs; history blobs pass ''.
 function scanBytes(safePath: string, bytes: Buffer, macaroonFile: boolean, now: Date, ctx: ScanContext, name = ''): BytesOutcome {
   if (macaroonFile) {
-    const credential = bytes.length <= MACAROON_LIMIT ? fileCredential(bytes) : null;
-    if (credential) {
+    // A credential file: *.macaroon, or an L402 token store file (l402.token, lsat.token and
+    // their .pending forms). Its content decides the kind: Aperture's token store framing or
+    // a bare L402 macaroon gives l402-file, an LND macaroon macaroon-file.
+    const tokenStore = bytes.length <= MACAROON_LIMIT && bytes[0] === 0x00;
+    const credential = bytes.length <= MACAROON_LIMIT && !tokenStore ? fileCredential(bytes) : null;
+    if (tokenStore || credential) {
       try {
+        const secret = new Secret(tokenStore ? bytes : credential!);
+        const l402 = tokenStore ? decodeL402(secret) : isL402Macaroon(secret)
+          ? decodeL402Macaroon(secret, null, 'macaroon') : null;
+        if (l402 && 'l402' in l402) return { findings: [withL402Facts(safePath, null, null, 'l402-file', l402.l402, now, ctx)], dropped: 0 };
         return { findings: [withFacts(safePath, null, null, 'macaroon-file',
-          decodeMacaroon(new Secret(credential)), now, ctx)], dropped: 0 };
+          decodeMacaroon(l402 && 'lnd' in l402 ? l402.lnd : secret), now, ctx)], dropped: 0 };
       } catch (error) {
         if (!(error instanceof DecodeError)) throw error;
       }
@@ -638,6 +797,7 @@ function scanBytes(safePath: string, bytes: Buffer, macaroonFile: boolean, now: 
     !(bytes[0] === 0xfe && bytes[1] === 0xff) && bytes.subarray(0, 8192).includes(0)) return { skip: 'binary' };
   const text = decodeText(bytes);
   const outcome = scanText(safePath, text, now, ctx);
+  for (const finding of runeFindings(text, now, ctx)) outcome.findings.push({ ...finding, path: safePath });
   if (outcome.findings.length && /\.jsonc?$/i.test(name)) tagMcpContext(name, text, outcome.findings);
   return outcome;
 }
@@ -707,7 +867,7 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
   const owners = new Map<string, { arg: number; findings: ScanFinding[] }>();
   let currentArg = -1;
   const secrets = new Set<string>();
-  const ctx: ScanContext = { secrets, facts: new Map() };
+  const ctx: ScanContext = { secrets, facts: new Map(), l402: new Map() };
   let filesScanned = 0;
   let dropped = 0;
   let ignored = 0;
@@ -796,7 +956,7 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
         }
         if (!await unchanged(parent)) throw new InputError('input-read');
       }
-      const macaroonFile = /\.macaroon$/i.test(basename(path));
+      const macaroonFile = isCredentialFileName(basename(path));
       if (!macaroonFile && BigInt(sourceStat.size) > BigInt(TEXT_LIMIT)) return { type: 'skip', path, reason: 'size' };
       let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
       let bytes: Buffer;
@@ -821,7 +981,11 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
       } finally {
         if (handle) await handle.close();
       }
-      const outcome = scanBytes('', bytes, macaroonFile, now, ctx, basename(path));
+      // An exception from analysing bytes that were read is a bug, not an unreadable file: it must
+      // stop the scan (exit 8) rather than look like a clean scan of a skipped file.
+      let outcome: ReturnType<typeof scanBytes>;
+      try { outcome = scanBytes('', bytes, macaroonFile, now, ctx, basename(path)); }
+      catch (failure) { throw new ScanAnalysisFailure(failure); }
       if ('skip' in outcome) return { type: 'skip', path, reason: outcome.skip, identity };
       if (outcome.findings.length) {
         const safePath = redactPath(reportedPath(path));
@@ -829,7 +993,7 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
       }
       return { type: 'file', path, identity, findings: outcome.findings, dropped: outcome.dropped };
     } catch (error) {
-      if (error instanceof Cancelled) throw error;
+      if (error instanceof Cancelled || error instanceof ScanAnalysisFailure) throw error;
       if (explicit) return { type: 'error', error: new InputError('input-read', 'cannot read scan path') };
       return { type: 'skip', path, reason: 'unreadable', identity };
     }
@@ -1050,7 +1214,7 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
         if (isProtectedPath(joined(p))) { skip(joined(p), 'never-open'); pathState[p] |= EXCLUDED; }
         else if (!opts.includeDirs && excluded !== -1) {
           skip(join(directory, ...parents.slice(0, excluded + 1)), 'excluded-dir'); pathState[p] |= EXCLUDED;
-        } else if (/\.macaroon$/i.test(basename(relativePath))) pathState[p] |= MACAROON;
+        } else if (isCredentialFileName(basename(relativePath))) pathState[p] |= MACAROON;
       }
       if (pathState[p] & EXCLUDED) continue;
       if (table.mode[at] !== MODE_REGULAR) {
@@ -1261,6 +1425,7 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
         finding.caveats = caveats.every((caveat, i) => caveat === finding.caveats![i]) ? finding.caveats : caveats;
       }
       finding.unassessed = array(finding.unassessed);
+      if (finding.l402) finding.l402 = redactL402(finding.l402, redact);
     }
     for (const item of skipped) item.path = redact(item.path);
   }
@@ -1268,10 +1433,11 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
     (a.column ?? -1) - (b.column ?? -1) || byteCompare(a.commit ?? '', b.commit ?? ''));
   skipped.sort((a, b) => byteCompare(a.path, b.path));
   const byGrade: ScanResult['summary']['byGrade'] = {
-    ADMIN: 0, SPEND: 0, OPERATE: 0, RECEIVE: 0, READ: 0, UNASSESSED: 0, NWC: 0, UNDECODABLE: 0,
+    ADMIN: 0, SPEND: 0, OPERATE: 0, RECEIVE: 0, READ: 0, UNASSESSED: 0, NWC: 0, UNDECODABLE: 0, L402: 0,
   };
   for (const finding of findings) {
-    const key = finding.grade ?? (finding.kind === 'nwc' ? 'NWC' : 'UNDECODABLE');
+    const key = finding.grade ?? (finding.kind === 'nwc' ? 'NWC' : finding.kind === 'l402' || finding.kind === 'l402-file'
+      ? 'L402' : 'UNDECODABLE');
     byGrade[key]++;
   }
   const filesSkipped = skipped.length;

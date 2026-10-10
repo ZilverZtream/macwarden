@@ -13,7 +13,7 @@ body:
     attributes:
       label: MacWarden version
       description: Output of `macwarden --version`.
-      placeholder: 1.1.1
+      placeholder: 1.2.0
     validations:
       required: true
   - type: input

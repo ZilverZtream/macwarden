@@ -22,6 +22,6 @@
     "ignored": 0,
     "findings": 6,
     "distinct": 4,
-    "byGrade": { "ADMIN": 1, "SPEND": 0, "OPERATE": 0, "RECEIVE": 2, "READ": 2, "UNASSESSED": 0, "NWC": 0, "UNDECODABLE": 1 }
+    "byGrade": { "ADMIN": 1, "SPEND": 0, "OPERATE": 0, "RECEIVE": 2, "READ": 2, "UNASSESSED": 0, "NWC": 0, "UNDECODABLE": 1, "L402": 0 }
   }
 }

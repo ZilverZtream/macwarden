@@ -1,6 +1,6 @@
 {
   "name": "macwarden",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "Lightning credential hygiene for LND: inspect, scan (incl. git history), inventory, bake, revoke, rotate and attenuate macaroons",
   "keywords": [
     "lightning",
@@ -55,7 +55,12 @@
     "test:oracle": "vitest run --config vitest.oracle.config.ts",
     "test:gitleaks": "vitest run --config vitest.gitleaks.config.ts",
     "fixture:up": "node test/fixture/fixture.mjs up",
-    "fixture:down": "node test/fixture/fixture.mjs down"
+    "fixture:down": "node test/fixture/fixture.mjs down",
+    "fixture:cln:up": "node test/fixture/cln-fixture.mjs up",
+    "fixture:cln:down": "node test/fixture/cln-fixture.mjs down",
+    "test:cln-oracle": "vitest run --config vitest.cln.config.ts",
+    "prefuzz:runes": "npm run build",
+    "fuzz:runes": "node scripts/fuzz-runes.mjs"
   },
   "devDependencies": {
     "typescript": "6.0.3",

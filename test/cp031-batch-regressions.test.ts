@@ -10,6 +10,10 @@ import { directory, entry, ownId, register, wireFixture } from './helpers/cp026-
 import { fixture as bakeFixture } from './helpers/cp025-bake-support.mjs';
 import { failure, invoke, scratch } from './helpers/cp029-rotate-support.js';
 import { safe } from './helpers/cp028-rotate-support.js';
+import { isolateLeakSuite } from './helpers/leak-suite.js';
+
+// Leak checks scan this file's own sentinels, not every credential the whole run registered.
+isolateLeakSuite('cp031-batch');
 
 function cleanup(dir: string, root: string) {
   if (!resolve(dir).startsWith(root + sep)) throw new Error('Unsafe scratch cleanup');

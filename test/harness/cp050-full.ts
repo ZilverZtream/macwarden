@@ -18,6 +18,11 @@ function files(root: string): string[] {
     entry.isDirectory() ? files(join(root, entry.name)) : [join(root, entry.name)]);
 }
 
+// Bounds one synthetic full validation (about a dozen npm and Vitest processes): 5 to 30 s
+// depending on the machine. The limit only stops a hung run; every check failure ends the run
+// with exit 1 long before it, and a timeout is reported as such.
+export const FULL_CONTROL_TIMEOUT_MS = 150_000;
+
 export function fullControl(variant: 'complete' | 'changed-candidate' | 'selective-as-full' | 'metadata-leak' | 'oracle-config-exclusion', producerRoot = resolve()) {
   prepareFullControl(variant, producerRoot)();
 }
@@ -41,11 +46,14 @@ export function prepareFullControl(variant: 'complete' | 'changed-candidate' | '
     'test:harness': run('vitest.harness.config.ts'), 'test:gitleaks': run('vitest.harness.config.ts'),
     lint: 'node scripts/phase.mjs lint', build: 'node scripts/phase.mjs build',
     'fixture:up': 'node scripts/phase.mjs fixture-up', 'fixture:down': 'node scripts/phase.mjs fixture-down',
+    'test:cln-oracle': run('vitest.cln.config.ts'),
+    'fixture:cln:up': 'node scripts/phase.mjs fixture-cln-up', 'fixture:cln:down': 'node scripts/phase.mjs fixture-cln-down',
   } }));
   put('package-lock.json', JSON.stringify({ name: 'cp050-full-fixture', version: '1.0.0', lockfileVersion: 3,
     packages: { '': { name: 'cp050-full-fixture', version: '1.0.0' } } }));
   for (const [config, include] of [['vitest.config.ts', 'test/unit/**/*.test.ts'],
-    ['vitest.oracle.config.ts', 'test/oracle/**/*.test.ts'], ['vitest.harness.config.ts', 'test/harness/**/*.test.ts']])
+    ['vitest.oracle.config.ts', 'test/oracle/**/*.test.ts'], ['vitest.harness.config.ts', 'test/harness/**/*.test.ts'],
+    ['vitest.cln.config.ts', 'test/cln-oracle/**/*.test.ts']])
     put(config!, `export default {test:{include:[${JSON.stringify(include)}],${variant === 'oracle-config-exclusion' && config === 'vitest.oracle.config.ts' ? "exclude:['test/oracle/c.test.ts']," : ''}fileParallelism:false,maxWorkers:1}};\n`);
   const test = (title: string) => `import {it,expect} from ${JSON.stringify(api)};\nit(${JSON.stringify(title)},()=>expect(1).toBe(1));\n`;
   let firstProductTitle = 'CP-950/B1 first independent product case';
@@ -64,6 +72,7 @@ export function prepareFullControl(variant: 'complete' | 'changed-candidate' | '
   put('test/oracle/b.test.ts', test('CP-951/probe second independent reference'));
   if (variant === 'oracle-config-exclusion') put('test/oracle/c.test.ts', test('CP-950/probe third original reference'));
   put('test/harness/a.test.ts', test('CP-950/B1 independent harness case'));
+  put('test/cln-oracle/a.test.ts', test('CP-952/cln-probe independent Core Lightning reference'));
   put('src/input.ts', 'export const input = 1;\n');
   put('scripts/phase.mjs', `import {writeFileSync} from 'node:fs';import {spawnSync} from 'node:child_process';
 if(process.argv[2]==='build'&&${JSON.stringify(variant)}==='changed-candidate'){
@@ -85,7 +94,7 @@ for(const args of [['add','src/input.ts'],['commit','-m','Private input mutation
   const inputs = new Map(git('ls-files').split(/\r?\n/).map(file => [file, digest(join(root, file))]));
   expect(git('status', '--porcelain'), 'Private inputs including selected metadata must be committed before validation').toBe('');
   const result = spawnSync(process.execPath, [resolve(producerRoot, 'scripts/full-validation.mjs'), '--root', root, '--evidence-dir', evidence],
-    { cwd: resolve(), env: childEnvironment(), encoding: 'utf8', timeout: 30_000, maxBuffer: 2_000_000 });
+    { cwd: resolve(), env: childEnvironment(), encoding: 'utf8', timeout: FULL_CONTROL_TIMEOUT_MS, maxBuffer: 2_000_000 });
   writeFileSync(join(scratch, 'captured-output.txt'), result.stdout + result.stderr);
   // The selected-case metadata is a private input. Remove the planted source
   // after execution so the caller's standing scan examines retained output.
@@ -97,9 +106,10 @@ for(const args of [['add','src/input.ts'],['commit','-m','Private input mutation
   expect(findLeaks({ root: process.cwd(), sentinels: 'test/sentinels.json', sentinelDir: process.env.MACWARDEN_SENTINEL_DIR,
     paths: variant === 'metadata-leak' ? [join(scratch, 'captured-output.txt'), ...(existsSync(evidence) ? [evidence] : [])] : [scratch],
     testTmp: variant === 'metadata-leak' ? undefined : scratch, commandOutput: result.stdout + result.stderr })).toBeNull();
-  expect(result.error).toBeUndefined();
+  expect(result.error, `${variant} public full validation did not finish (${result.error?.message}); output tail:
+${(result.stdout + result.stderr).slice(-1500)}`).toBeUndefined();
   if (variant !== 'oracle-config-exclusion') expect(result.status, `${variant} public full validation exit; output tail:
-${(result.stdout + result.stderr).slice(-1500)}`).toBe(variant === 'complete' ? 0 : 1);
+${(result.stdout + result.stderr).slice(-4000)}`).toBe(variant === 'complete' ? 0 : 1);
   expect(existsSync(evidence), 'Public CLI must retain its original attempt evidence').toBe(true);
   const artifacts = files(evidence).filter(path => path.endsWith('full-validation.json'));
   expect(artifacts).toHaveLength(1);
@@ -143,7 +153,8 @@ ${(result.stdout + result.stderr).slice(-1500)}`).toBe(variant === 'complete' ? 
     expect(record.inputs.length).toBeGreaterThan(0);
     const recordedFiles = record.inputs.map(input => (isAbsolute(input.file) ? relative(root, input.file) : input.file).replaceAll('\\', '/'));
     for (const required of ['package.json', 'src/input.ts', 'scripts/phase.mjs', 'vitest.config.ts', 'vitest.oracle.config.ts',
-      'test/unit/a.test.ts', 'test/unit/b.test.ts', 'test/oracle/a.test.ts', 'test/oracle/b.test.ts']) expect(recordedFiles).toContain(required);
+      'vitest.cln.config.ts', 'test/unit/a.test.ts', 'test/unit/b.test.ts', 'test/oracle/a.test.ts', 'test/oracle/b.test.ts',
+      'test/cln-oracle/a.test.ts']) expect(recordedFiles).toContain(required);
     for (const input of record.inputs) {
       const file = (isAbsolute(input.file) ? relative(root, input.file) : input.file).replaceAll('\\', '/');
       expect(input.sha256, input.file).toBe(inputs.get(file));
@@ -156,7 +167,8 @@ ${(result.stdout + result.stderr).slice(-1500)}`).toBe(variant === 'complete' ? 
       return readFileSync(report.originalPath, 'utf8');
     }).join('\n');
     for (const title of ['CP-950/B1 first independent product case', 'CP-951/B1 second independent product case',
-      'CP-950/probe first independent reference', 'CP-951/probe second independent reference']) expect(originals).toContain(title);
+      'CP-950/probe first independent reference', 'CP-951/probe second independent reference',
+      'CP-952/cln-probe independent Core Lightning reference']) expect(originals).toContain(title);
   } else {
     expect(result.status).toBe(1); expect(record.status).toBe('FAIL');
     if (variant === 'metadata-leak') expect(record.checks.some(check => /^leak-check(?::|$)/.test(check.name) && check.status === 'FAIL'),

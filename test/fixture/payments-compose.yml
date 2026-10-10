@@ -1,0 +1,26 @@
+# A second regtest LND, used only by test/oracle/payment-forensics.test.ts: the fixture node
+# pays it through a direct channel so payments really settle, fail and stay in flight. It is
+# added to the fixture's own Compose project (sharing its bitcoind) and removed again by that
+# test; `npm run fixture:down` (down --remove-orphans) removes it too. Same pinned image.
+services:
+  lnd-payee:
+    image: lightninglabs/lnd:v0.21.4-beta@sha256:04d06edcc0f6e99a5e797ea34959f330add222226f840cd86afbc31f8f29627d
+    depends_on:
+      - bitcoind
+    command:
+      - --bitcoin.active
+      - --bitcoin.regtest
+      - --bitcoin.node=bitcoind
+      - --bitcoind.rpchost=bitcoind:18443
+      - --bitcoind.rpcuser=fixture
+      - --bitcoind.rpcpass=fixture-only-disposable
+      - --bitcoind.zmqpubrawblock=tcp://bitcoind:28332
+      - --bitcoind.zmqpubrawtx=tcp://bitcoind:28333
+      - --noseedbackup
+      - --listen=0.0.0.0:9735
+      - --tlsextradomain=lnd-payee
+      - --accept-keysend
+    volumes:
+      - lnd-payee-data:/root/.lnd
+volumes:
+  lnd-payee-data:

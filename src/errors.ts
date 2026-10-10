@@ -1,6 +1,7 @@
 export type InputStage = 'input-read' | 'input-form';
 export type DecodeStage = 'v2-header' | 'packet' | 'identifier-version' |
-  'identifier-proto' | 'identifier-limits' | 'identifier-root-key-id' | NwcStage;
+  'identifier-proto' | 'identifier-limits' | 'identifier-root-key-id' | NwcStage | L402Stage | 'rune-syntax';
+export type L402Stage = 'l402-form' | 'l402-preimage';
 export type NwcStage = 'nwc-uri' | 'nwc-wallet-pubkey' | 'nwc-relay' | 'nwc-secret' | 'nwc-lud16';
 
 export class UsageError extends Error {

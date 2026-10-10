@@ -758,16 +758,32 @@ it('WATCH/unreachable a gRPC endpoint that never registers fails with exit 4 aft
 
 it('WATCH/unreachable a run stopped before any session registered does not report success', async () => {
   const s = setup();
+  // Stop once watch is waiting on its first registration, not after a fixed delay: a slow
+  // runner could otherwise still be in GetInfo, which is a different case (WATCH/interrupted).
+  let opened!: () => void;
+  const registering = new Promise<void>(resolve => { opened = resolve; });
   const silent: Register = (() => {
     let end!: (value: MiddlewareEnd) => void;
     const ended = new Promise<MiddlewareEnd>(resolve => { end = resolve; });
+    opened();
     return { ended, close: () => end({ registered: false, code: 4, stage: 'middleware-stream', message: 'closed', disabled: false }) };
   }) as Register;
   const { result } = await watchUntil([...s.args, '--lnd-grpc', 'localhost:10001'], silent, async stop => {
-    await new Promise(resolve => setTimeout(resolve, 50)); stop();
+    await registering; await settle(); stop();
   });
   expect(result).toMatchObject({ ok: false, error: { code: 4, step: 'W7' } });
   expect(result.error!.message).toContain('localhost:10001 (from --lnd-grpc)');
+});
+
+it('WATCH/interrupted an interrupt while GetInfo waits on the node exits 6 cancelled, not an internal failure', async () => {
+  const s = setup();
+  let asked!: () => void;
+  const waiting = new Promise<void>(resolve => { asked = resolve; });
+  const lnd = { getInfo: () => { asked(); return new Promise(() => undefined); } } as never;
+  const { result } = await watchUntil(s.args, (() => { throw new Error('must not register'); }) as unknown as Register, async stop => {
+    await waiting; stop();
+  }, { deps: { lnd } });
+  expect(result).toMatchObject({ ok: false, result: null, error: { code: 6, step: 'cancelled', message: 'interrupted' } });
 });
 
 it('WATCH/canary-usage denied canary uses and the registered time are written to the usage file', async () => {
