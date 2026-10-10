@@ -89,8 +89,9 @@ export class InvoiceApi {
     await this.#client.call('POST', '/v2/invoices/cancel', { payment_hash: hexToBase64(assertHash(paymentHash)) });
   }
 
-  async lookupInvoice(paymentHash: string): Promise<Invoice> {
-    return parseInvoice(await this.#client.call('GET', `/v2/invoices/lookup?payment_hash=${hexToUrlParam(assertHash(paymentHash))}`));
+  async lookupInvoice(paymentHash: string, signal?: AbortSignal): Promise<Invoice> {
+    return parseInvoice(await this.#client.call('GET', `/v2/invoices/lookup?payment_hash=${hexToUrlParam(assertHash(paymentHash))}`,
+      undefined, { signal }));
   }
 
   /**

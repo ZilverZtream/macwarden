@@ -1,5 +1,5 @@
 import type { PayerApi } from '../lnd/api.ts';
-import { LndError, TransportError, describeError } from '../lnd/errors.ts';
+import { LndError, TransportError, definiteRefusal, describeError } from '../lnd/errors.ts';
 import type { StreamDecision } from '../lnd/rest.ts';
 import { isTerminal, type DecodedPayReq, type Payment } from '../lnd/types.ts';
 import type { IntentResult, OperationKind, PayerStore, PaymentState, UpdateResult } from './store.ts';
@@ -13,6 +13,8 @@ import type { IntentResult, OperationKind, PayerStore, PaymentState, UpdateResul
  * 3. SendPaymentV2 is called only for a record in `intent`, claimed by
  *    compare-and-set, so a restart or a second worker never pays again.
  * 4. Only LND's terminal answer completes or fails the business operation.
+ * 5. Every update is applied with the submission its stream was started for, so a
+ *    late answer about an earlier submission never decides the current one.
  */
 
 export type Emit = (event: Record<string, unknown>) => void;
@@ -104,6 +106,8 @@ export async function submit(deps: PayerDeps, paymentHash: string, options: { ti
   if (!deps.store.claimForSubmission(paymentHash)) {
     return { kind: 'refused', paymentHash, reason: `payment is ${record.state}, not intent; it is reconciled, never submitted again` };
   }
+  // The submission this call is: the claim counted it.
+  const submission = deps.store.payment(paymentHash)?.submissions;
   deps.emit({ event: 'submitted', paymentHash, rpc: 'SendPaymentV2' });
   let updates = 0;
   let lastState: PaymentState = 'submitting';
@@ -111,7 +115,7 @@ export async function submit(deps: PayerDeps, paymentHash: string, options: { ti
   const onUpdate = (payment: Payment): StreamDecision => {
     if (payment.paymentHash !== paymentHash) throw new Error('SendPaymentV2 returned an update for another payment hash');
     updates += 1;
-    const result = deps.store.applyUpdate(payment, 'SendPaymentV2');
+    const result = deps.store.applyUpdate(payment, 'SendPaymentV2', submission);
     reportConflicts(deps, paymentHash, result);
     lastState = result.state;
     deps.emit({ event: 'payment-update', source: 'SendPaymentV2', ...summary(payment), recordState: result.state,
@@ -129,7 +133,7 @@ export async function submit(deps: PayerDeps, paymentHash: string, options: { ti
     await deps.api.sendPaymentV2({ paymentRequest: record.paymentRequest, feeLimitMsat: record.feeLimitMsat,
       timeoutSeconds: options.timeoutSeconds, maxParts: record.maxParts }, onUpdate, options.signal);
   } catch (error) {
-    return await afterSubmitError(deps, paymentHash, error, updates);
+    return await afterSubmitError(deps, paymentHash, error, updates, submission, options.signal);
   }
   const final = deps.store.payment(paymentHash);
   if (final?.state === 'succeeded') return { kind: 'succeeded', paymentHash, feeMsat: final.feeMsat ?? 0n };
@@ -141,7 +145,17 @@ export async function submit(deps: PayerDeps, paymentHash: string, options: { ti
   return { kind: 'unresolved', paymentHash, state: 'uncertain', reason };
 }
 
-async function afterSubmitError(deps: PayerDeps, paymentHash: string, error: unknown, updates: number): Promise<PayOutcome> {
+/**
+ * SendPaymentV2 ended with an error. Only two answers end the payment here: the
+ * connection was never established (back to intent), or LND definitely refused the
+ * call (definiteRefusal) and TrackPaymentV2 then has no payment for the hash
+ * (failed, reservation released). An ambiguous error (DeadlineExceeded,
+ * Unavailable, a gateway's 502, 503 or 504, ...) followed by NotFound proves
+ * nothing: the request may still reach LND after the lookup. The payment stays
+ * `uncertain`, its reservation held, for reconciliation to decide.
+ */
+async function afterSubmitError(deps: PayerDeps, paymentHash: string, error: unknown, updates: number, submission: number | undefined,
+  signal: AbortSignal | undefined): Promise<PayOutcome> {
   if (error instanceof TransportError && error.notDelivered && updates === 0) {
     // No connection was ever established: LND never saw the request.
     deps.store.markNotInitiated(paymentHash, `connection not established: ${error.message}`);
@@ -152,11 +166,13 @@ async function afterSubmitError(deps: PayerDeps, paymentHash: string, error: unk
     // LND answered with an error before any update. Whether it initiated a
     // payment (for example "payment is in transition" for a hash it already
     // holds) is settled by asking it, not by reading the message.
-    deps.emit({ event: 'send-refused-by-lnd', paymentHash, message: error.message, grpcCode: error.grpcCode });
-    const settled = await trackOnce(deps, paymentHash);
+    const definite = definiteRefusal(error);
+    deps.emit({ event: definite ? 'send-refused-by-lnd' : 'send-error-ambiguous', paymentHash, message: error.message,
+      grpcCode: error.grpcCode, httpStatus: error.httpStatus });
+    const settled = await trackOnce(deps, paymentHash, submission, signal);
     // The lookup is asynchronous: another tracker may have recorded a terminal state
     // meanwhile. markRejected leaves a terminal record alone; the record below answers.
-    if (settled === 'not-found' && deps.store.markRejected(paymentHash, error.message)) {
+    if (settled === 'not-found' && definite && deps.store.markRejected(paymentHash, error.message)) {
       deps.emit({ event: 'failed', paymentHash, reason: `rejected before initiation: ${error.message}` });
       return { kind: 'failed', paymentHash, reason: `rejected before initiation: ${error.message}` };
     }
@@ -171,14 +187,15 @@ async function afterSubmitError(deps: PayerDeps, paymentHash: string, error: unk
 }
 
 /** One TrackPaymentV2 read of the current state, without waiting for a terminal one. */
-async function trackOnce(deps: PayerDeps, paymentHash: string): Promise<'not-found' | 'found' | 'unknown'> {
+async function trackOnce(deps: PayerDeps, paymentHash: string, submission: number | undefined,
+  signal: AbortSignal | undefined): Promise<'not-found' | 'found' | 'unknown'> {
   try {
     let found = false;
     await deps.api.trackPaymentV2(paymentHash, payment => {
       found = true;
-      reportConflicts(deps, paymentHash, deps.store.applyUpdate(payment, 'TrackPaymentV2'));
+      reportConflicts(deps, paymentHash, deps.store.applyUpdate(payment, 'TrackPaymentV2', submission));
       return 'stop';
-    });
+    }, signal);
     return found ? 'found' : 'unknown';
   } catch (error) {
     if (error instanceof LndError && error.notFound) return 'not-found';
@@ -213,9 +230,11 @@ export async function reconcile(deps: PayerDeps, paymentHash: string, signal?: A
     if (signal?.aborted) return { kind: 'unresolved', paymentHash, state: record.state, reason: 'reconciliation deadline reached' };
     deps.emit({ event: 'track-started', paymentHash, recordState: record.state });
     let terminal = false;
+    // This stream reads for the submission the record is at now; a retry started meanwhile is not its business.
+    const submission = record.submissions;
     try {
       await deps.api.trackPaymentV2(paymentHash, payment => {
-        const result = deps.store.applyUpdate(payment, 'TrackPaymentV2');
+        const result = deps.store.applyUpdate(payment, 'TrackPaymentV2', submission);
         reportConflicts(deps, paymentHash, result);
         deps.emit({ event: 'payment-update', source: 'TrackPaymentV2', ...summary(payment), recordState: result.state,
           operationCompleted: result.completed });

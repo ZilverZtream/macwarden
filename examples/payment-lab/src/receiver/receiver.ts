@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import type { InvoiceApi } from '../lnd/api.ts';
-import { LndError, TransportError, describeError } from '../lnd/errors.ts';
+import { LndError, TransportError, definiteRefusal, describeError } from '../lnd/errors.ts';
 import type { Invoice } from '../lnd/types.ts';
 import { sha256Hex } from '../util/encoding.ts';
 import type { DeliveryOutcome, DeliverySource, InvoiceRecord, ReceiverStore } from './store.ts';
@@ -38,9 +38,9 @@ function apply(deps: ReceiverDeps, invoice: Invoice, source: DeliverySource): De
 }
 
 /** Looks the invoice up; NotFound is a definite answer, anything else leaves the question open. */
-async function lookup(deps: ReceiverDeps, paymentHash: string): Promise<Invoice | 'not-found' | 'unknown'> {
+async function lookup(deps: ReceiverDeps, paymentHash: string, signal?: AbortSignal): Promise<Invoice | 'not-found' | 'unknown'> {
   try {
-    return await deps.api.lookupInvoice(paymentHash);
+    return await deps.api.lookupInvoice(paymentHash, signal);
   } catch (error) {
     if (error instanceof LndError && error.notFound) return 'not-found';
     deps.emit({ event: 'lookup-failed', paymentHash, error: describeError(error) });
@@ -54,7 +54,7 @@ async function lookup(deps: ReceiverDeps, paymentHash: string): Promise<Invoice 
  * nothing: LND can still create the invoice a moment later. So NotFound is
  * conclusive only when the call is known to be over:
  *
- * - LND itself refused the create call (definiteRefusal below; the creator saw the
+ * - LND itself refused the create call (definiteRefusal in lnd/errors.ts; the creator saw the
  *   answer), or
  * - the intent was recorded longer ago than CREATION_WINDOW_MS. AddInvoice and
  *   AddHoldInvoice use the REST client's default unary timeout (30 s), so a call
@@ -68,6 +68,9 @@ async function lookup(deps: ReceiverDeps, paymentHash: string): Promise<Invoice 
  */
 export const CREATION_WINDOW_MS = 120_000;
 
+/** The classification of create-call errors; it lives with the error types because the payer uses it too. */
+export { definiteRefusal };
+
 /**
  * How long after its intent a not-created invoice is still looked up by
  * reconciliation in case LND created it late. The subscription sees a late
@@ -78,53 +81,6 @@ export const LATE_RECHECK_MS = 24 * 60 * 60 * 1000;
 
 function creationCutoff(): string {
   return new Date(Date.now() - CREATION_WINDOW_MS).toISOString();
-}
-
-/**
- * gRPC status codes with which LND itself refuses a create call: the request was
- * handled and nothing was created. 2 Unknown is how LND returns most of its own
- * application errors (HTTP 500 from its gateway, for example "invoice with payment
- * hash already exists").
- */
-const DEFINITE_REFUSAL_CODES: ReadonlySet<number> = new Set([
-  2, // Unknown: an LND application error
-  3, // InvalidArgument
-  5, // NotFound
-  6, // AlreadyExists
-  7, // PermissionDenied
-  8, // ResourceExhausted (request too large, rate limit inside LND)
-  9, // FailedPrecondition
-  11, // OutOfRange
-  12, // Unimplemented
-  16, // Unauthenticated
-]);
-
-/** HTTP statuses that a gateway or proxy in front of LND produces when the call was cut off, whatever the body says. */
-const AMBIGUOUS_HTTP: ReadonlySet<number> = new Set([408, 499, 502, 503, 504]);
-
-/**
- * Whether an error from the create call is a definite refusal, which lets a NotFound
- * lookup decide the invoice at once. The classes:
- *
- * - not delivered: a TransportError in phase `connect`; the request never left
- *   (handled before this is asked, without a lookup).
- * - definite refusal: an LndError with one of DEFINITE_REFUSAL_CODES from LND's
- *   gateway, or a 400-class response (other than 408 and 499) whose body carries a
- *   message, and in neither case an HTTP status from AMBIGUOUS_HTTP.
- * - ambiguous, everything else: gRPC 1 Cancelled, 4 DeadlineExceeded, 10 Aborted,
- *   13 Internal, 14 Unavailable, 15 DataLoss (the call may have been cut off after
- *   LND began creating the invoice); HTTP 408, 499, 502, 503 or 504 from a gateway
- *   or proxy; a 5xx without an LND body; a TransportError after the connection was
- *   established; a ProtocolError (an unreadable answer); any other error. The
- *   invoice stays `creating` until CREATION_WINDOW_MS has passed.
- */
-export function definiteRefusal(error: unknown): boolean {
-  if (!(error instanceof LndError)) return false;
-  const status = error.httpStatus;
-  if (status !== undefined && AMBIGUOUS_HTTP.has(status)) return false;
-  if (error.grpcCode !== undefined) return DEFINITE_REFUSAL_CODES.has(error.grpcCode);
-  // No gRPC code: only a 400-class answer with a message from the body (not the client's "HTTP <status>" stand-in).
-  return status !== undefined && status >= 400 && status < 500 && error.message !== `HTTP ${status}`;
 }
 
 export type CreateOutcome =
@@ -215,9 +171,11 @@ async function supersededOnCreation(deps: ReceiverDeps, paymentHash: string, fou
 
 /**
  * One reconciliation pass: the invoices whose superseded cancel was already tried in
- * it (one CancelInvoice per invoice per pass), and how many of those failed.
+ * it (one CancelInvoice per invoice per pass), how many of those failed, and the
+ * caller's cancellation: once it aborts, the pass starts no further call and its
+ * lookups are cut off (what was already recorded stays recorded).
  */
-interface Pass { handled: Set<string>; failed: number }
+interface Pass { handled: Set<string>; failed: number; signal?: AbortSignal }
 
 /**
  * A superseded invoice: its order was fulfilled by another invoice (an invoice recorded
@@ -246,7 +204,8 @@ async function supersede(deps: ReceiverDeps, record: InvoiceRecord, found: Invoi
   };
   let current = found;
   if (current === undefined) {
-    const looked = await lookup(deps, paymentHash);
+    if (pass?.signal?.aborted) return failed('stopped before its lookup');
+    const looked = await lookup(deps, paymentHash, pass?.signal);
     if (looked === 'not-found' && record.state === 'creating') return 'waiting'; // the create call may still be in flight
     if (looked === 'not-found' || looked === 'unknown') return failed(`lookup ${looked}`);
     if (record.state === 'creating') deps.store.markCreated(paymentHash, looked.paymentRequest, looked.addIndex);
@@ -255,6 +214,7 @@ async function supersede(deps: ReceiverDeps, record: InvoiceRecord, found: Invoi
   }
   if (current.state === 'SETTLED') return 'paid';
   if (current.state !== 'CANCELED') {
+    if (pass?.signal?.aborted) return failed('stopped before CancelInvoice');
     let callError: unknown;
     try {
       await deps.api.cancelInvoice(paymentHash);
@@ -262,7 +222,7 @@ async function supersede(deps: ReceiverDeps, record: InvoiceRecord, found: Invoi
     } catch (error) {
       callError = error;
     }
-    const after = await lookup(deps, paymentHash);
+    const after = await lookup(deps, paymentHash, pass?.signal);
     if (after !== 'not-found' && after !== 'unknown') apply(deps, after, 'lookup');
     if (after !== 'not-found' && after !== 'unknown' && after.state === 'SETTLED') return 'paid';
     if (after === 'not-found' || after === 'unknown' || after.state !== 'CANCELED') {
@@ -316,6 +276,7 @@ export async function resolveLateInvoice(deps: ReceiverDeps, record: InvoiceReco
     return { kind: 'adopted', reason };
   }
   if (outcome !== 'late-invoice') return { kind: 'recorded', reason: `${what}; recorded (${outcome})` };
+  if (pass?.signal?.aborted) return { kind: 'unresolved', reason: `${what}; stopped before CancelInvoice; the next reconciliation tries again` };
   let callError: unknown;
   try {
     await deps.api.cancelInvoice(paymentHash);
@@ -323,7 +284,7 @@ export async function resolveLateInvoice(deps: ReceiverDeps, record: InvoiceReco
   } catch (error) {
     callError = error;
   }
-  const after = await lookup(deps, paymentHash);
+  const after = await lookup(deps, paymentHash, pass?.signal);
   // Paid before the cancel reached LND, and first: it fulfilled the order, so the replacement is canceled now.
   if (after !== 'not-found' && after !== 'unknown') await supersedeOthers(deps, apply(deps, after, 'lookup'), paymentHash, pass);
   if (after !== 'not-found' && after !== 'unknown' && after.state === 'CANCELED') {
@@ -366,6 +327,13 @@ export async function settleHoldInvoice(deps: ReceiverDeps, orderId: string): Pr
   const beforeOutcome = apply(deps, before, 'lookup');
   if (before.state === 'SETTLED') return { kind: 'settled', outcome: beforeOutcome };
   if (before.state !== 'ACCEPTED') return { kind: 'refused', reason: `invoice is ${before.state}; settle only after LND accepted the HTLCs` };
+  // The lookup was awaited: meanwhile another invoice's settlement may have fulfilled the order. Checked again in one
+  // transaction, with nothing awaited between this check and the SettleInvoice request below.
+  const refusal = deps.store.settleRefusal(invoice.paymentHash);
+  if (refusal !== undefined) {
+    return { kind: 'refused', reason: `${refusal}; invoice ${invoice.paymentHash} is to be canceled ("receiver reconcile" or "receiver cancel"), `
+      + 'not settled' };
+  }
   let callError: unknown;
   try {
     await deps.api.settleInvoice(invoice.preimage);
@@ -401,8 +369,13 @@ export async function cancelHoldInvoice(deps: ReceiverDeps, orderId: string): Pr
   return { kind: 'refused', reason: `invoice is ${after.state}${callError === undefined ? '' : `: ${describeError(callError)}`}` };
 }
 
-/** Resolves every invoice that is not final by looking it up: the receiver's reconciliation. */
-export async function reconcileInvoices(deps: ReceiverDeps, onlyOrder?: string): Promise<{ resolved: number; open: number; unknown: number }> {
+/**
+ * Resolves every invoice that is not final by looking it up: the receiver's reconciliation.
+ * Once `signal` aborts, no further invoice is looked up and the lookup in progress is cut
+ * off; invoices not decided in this pass count as unknown. Recorded outcomes stay recorded.
+ */
+export async function reconcileInvoices(deps: ReceiverDeps, onlyOrder?: string, signal?: AbortSignal):
+  Promise<{ resolved: number; open: number; unknown: number }> {
   let resolved = 0;
   let open = 0;
   let unknown = 0;
@@ -410,22 +383,26 @@ export async function reconcileInvoices(deps: ReceiverDeps, onlyOrder?: string):
   const targets = onlyOrder === undefined
     ? [...deps.store.unresolvedInvoices(), ...deps.store.lateInvoiceCandidates(recheckSince)]
     : deps.store.invoicesForOrder(onlyOrder);
-  const pass: Pass = { handled: new Set(), failed: 0 };
-  for (const invoice of targets) {
+  const pass: Pass = { handled: new Set(), failed: 0, signal };
+  for (const [index, invoice] of targets.entries()) {
+    if (signal?.aborted) {
+      unknown += targets.slice(index).filter(item => item.state !== 'canceled' && !pass.handled.has(item.paymentHash)).length;
+      break;
+    }
     if (invoice.state === 'canceled') continue;
     // Already canceled (or tried) in this pass, as a superseded invoice of an order fulfilled earlier in it.
     if (pass.handled.has(invoice.paymentHash)) continue;
     if (invoice.state === 'not-created') {
       // LND may have created it after all (a create call that stalled past the window): cancel or adopt it.
       if (invoice.lateLndState === 'CANCELED' || invoice.lateLndState === 'SETTLED') continue;
-      const late = await lookup(deps, invoice.paymentHash);
+      const late = await lookup(deps, invoice.paymentHash, signal);
       if (late === 'unknown') { unknown += 1; continue; }
       if (late === 'not-found') continue;
       const result = await resolveLateInvoice(deps, invoice, late, 'lookup', pass);
       if (result.kind === 'unresolved') unknown += 1; else if (result.kind === 'adopted' && late.state !== 'SETTLED') open += 1; else resolved += 1;
       continue;
     }
-    const found = await lookup(deps, invoice.paymentHash);
+    const found = await lookup(deps, invoice.paymentHash, signal);
     if (found === 'unknown') { unknown += 1; continue; }
     if (found === 'not-found') {
       // A creating invoice is decided only after the creation window: its create call may still be in flight.
@@ -469,7 +446,7 @@ export async function listen(deps: ReceiverDeps, options: { reconcileIntervalMs:
   const { signal } = options;
   const reconcileTick = async (): Promise<void> => {
     try {
-      const result = await reconcileInvoices(deps);
+      const result = await reconcileInvoices(deps, undefined, signal);
       deps.emit({ event: 'reconcile-pass', ...result });
     } catch (error) {
       deps.emit({ event: 'reconcile-pass-failed', error: describeError(error) });
@@ -496,11 +473,13 @@ export async function listen(deps: ReceiverDeps, options: { reconcileIntervalMs:
         const outcome = apply(deps, invoice, 'subscription');
         if (outcome === 'late-invoice') reconciling ??= reconcileTick().finally(() => { reconciling = undefined; });
         // A fulfillment cancels the order's superseded invoices at once; so does a superseded invoice turning up in LND.
-        if (outcome === 'fulfilled') supersedeLater(() => supersedeOthers(deps, outcome, invoice.paymentHash));
+        if (outcome === 'fulfilled') supersedeLater(() => supersedeOthers(deps, outcome, invoice.paymentHash, { handled: new Set(), failed: 0, signal }));
         else if ((invoice.state === 'OPEN' || invoice.state === 'ACCEPTED') && deps.store.isSuperseded(invoice.paymentHash)) {
           supersedeLater(async () => {
             const record = deps.store.invoice(invoice.paymentHash);
-            if (record !== undefined && deps.store.isSuperseded(record.paymentHash)) await supersede(deps, record, undefined);
+            if (record !== undefined && deps.store.isSuperseded(record.paymentHash)) {
+              await supersede(deps, record, undefined, { handled: new Set(), failed: 0, signal });
+            }
           });
         }
         return 'continue';

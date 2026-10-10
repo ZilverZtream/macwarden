@@ -137,6 +137,11 @@ UPDATE htlc_attempts SET submission = (SELECT submissions FROM payments WHERE pa
 DROP INDEX payments_one_live_per_operation;
 CREATE UNIQUE INDEX payments_one_pending_per_operation ON payments (operation_id)
   WHERE state IN ('intent', 'submitting', 'in_flight', 'uncertain');
+`, `
+-- Budget admission sums a budget's reservations inside BEGIN IMMEDIATE, under the write lock;
+-- without this index every admission scanned the reservations of every budget. Creating the
+-- index builds it over the existing rows.
+CREATE INDEX reservations_by_budget ON reservations (budget_id);
 `];
 
 export type PaymentState = 'intent' | 'submitting' | 'in_flight' | 'uncertain' | 'succeeded' | 'failed';
@@ -496,18 +501,19 @@ export class PayerStore {
     return true;
   }
 
-  #upsertAttempts(payment: Payment): void {
-    // A new attempt is tagged with the current submission; an update to a known attempt keeps its tag.
+  #upsertAttempts(payment: Payment, submission: number | undefined): void {
+    // A new attempt is tagged with the submission the update was read for (else the current one);
+    // an update to a known attempt keeps its tag.
     const statement = this.db.prepare(`INSERT INTO htlc_attempts (payment_hash, attempt_id, status, principal_msat, fee_msat, hops, route,
         failure_code, failure_source_index, attempt_time_ns, resolve_time_ns, submission)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT submissions FROM payments WHERE payment_hash = ?))
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, (SELECT submissions FROM payments WHERE payment_hash = ?)))
       ON CONFLICT (payment_hash, attempt_id) DO UPDATE SET status = excluded.status, failure_code = excluded.failure_code,
         failure_source_index = excluded.failure_source_index, resolve_time_ns = excluded.resolve_time_ns
         WHERE htlc_attempts.status NOT IN ('SUCCEEDED', 'FAILED')`);
     for (const attempt of payment.htlcs) {
       statement.run(payment.paymentHash, attempt.attemptId, attempt.status, attempt.principalMsat, attempt.route.totalFeesMsat,
         attempt.route.hops.length, attempt.route.hops.map(hop => hop.chanId).join('>'), attempt.failureCode ?? null,
-        attempt.failureSourceIndex ?? null, attempt.attemptTimeNs, attempt.resolveTimeNs, payment.paymentHash);
+        attempt.failureSourceIndex ?? null, attempt.attemptTimeNs, attempt.resolveTimeNs, submission ?? null, payment.paymentHash);
     }
   }
 
@@ -515,13 +521,28 @@ export class PayerStore {
    * Applies one update from SendPaymentV2 or TrackPaymentV2. LND is the
    * authority on the outcome; this method only refuses an update that
    * contradicts a terminal state already recorded.
+   *
+   * `submission` is the submission (payments.submissions) the caller's stream was
+   * started for. An update read for an earlier submission is stale once the record
+   * has been reopened since (prepareRetry, or a revert to intent): a FAILED or
+   * IN_FLIGHT snapshot of the previous submission says nothing about the current
+   * one, so it changes neither the state nor the reservation (it is logged as
+   * `stale-update`). A SUCCEEDED update is always applied, whatever submission it
+   * was read for: the money left.
    */
-  applyUpdate(payment: Payment, source: 'SendPaymentV2' | 'TrackPaymentV2'): UpdateResult {
+  applyUpdate(payment: Payment, source: 'SendPaymentV2' | 'TrackPaymentV2', submission?: number): UpdateResult {
     return immediate(this.db, (): UpdateResult => {
       const record = this.payment(payment.paymentHash);
       if (record === undefined) throw new Error(`update for unknown payment ${payment.paymentHash}`);
-      this.#upsertAttempts(payment);
+      this.#upsertAttempts(payment, submission);
       const now = nowIso();
+      const stale = submission !== undefined && payment.status !== 'SUCCEEDED'
+        && (submission < record.submissions || (submission === record.submissions && record.state === 'intent'));
+      if (stale) {
+        this.#event(payment.paymentHash, 'stale-update', { source, status: payment.status, readForSubmission: submission,
+          currentSubmission: record.submissions, recordState: record.state });
+        return { state: record.state, completed: false, failed: false, conflicts: [] };
+      }
       if (payment.status === 'SUCCEEDED') {
         const preimage = payment.preimage;
         if (preimage === undefined || sha256Hex(preimage) !== payment.paymentHash) {

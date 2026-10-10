@@ -1,5 +1,6 @@
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, realpathSync } from 'node:fs';
 import { createInterface } from 'node:readline';
+import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { diagnose } from './analysis/diagnose.ts';
 import { paymentsForHash } from './analysis/payments.ts';
@@ -24,6 +25,12 @@ import { parseAmount } from './util/money.ts';
  * 1 payment definitely failed; 2 usage error; 3 refused (budget, conflicting
  * operation, wrong state); 4 configuration or node error; 75 unresolved: the
  * outcome is not known yet and the record stays open for reconciliation.
+ * A payment's outcome maps to the same code whichever command learned it (pay,
+ * retry, reconcile); for several payments (payer reconcile) the first of 75, 3,
+ * 1 that applies to any of them, else 0.
+ *
+ * Arguments are validated before anything is recorded: a usage error never
+ * leaves a durable change behind.
  */
 
 const EXIT = { ok: 0, failed: 1, usage: 2, refused: 3, error: 4, unresolved: 75 } as const;
@@ -87,8 +94,18 @@ function openReceiver(lab: Lab, profile: ReceiverProfile): ReceiverDeps {
   return { api: invoiceApi(lab, profile), store: new ReceiverStore(databasePath(lab, RECEIVER_PROFILES[profile].database)), emit };
 }
 
-function exitFor(outcome: PayOutcome): number {
-  emit({ event: 'outcome', ...outcome });
+/** How main opens a profile's records and node API; the regression tests pass in-memory stand-ins. */
+export interface Services {
+  payer(labDir: string | undefined, profile: PayerProfile): PayerDeps;
+  receiver(labDir: string | undefined, profile: ReceiverProfile): ReceiverDeps;
+}
+
+const LAB_SERVICES: Services = {
+  payer: (labDir, profile) => openPayer(loadLab(labDir), profile),
+  receiver: (labDir, profile) => openReceiver(loadLab(labDir), profile),
+};
+
+function codeFor(outcome: PayOutcome): number {
   switch (outcome.kind) {
     case 'succeeded': return EXIT.ok;
     case 'failed': return EXIT.failed;
@@ -96,6 +113,18 @@ function exitFor(outcome: PayOutcome): number {
     case 'not-submitted': return EXIT.unresolved;
     case 'unresolved': return EXIT.unresolved;
   }
+}
+
+function exitFor(outcome: PayOutcome): number {
+  emit({ event: 'outcome', ...outcome });
+  return codeFor(outcome);
+}
+
+/** Several payments' outcomes (payer reconcile): unresolved before refused before failed before done. */
+function exitForAll(outcomes: PayOutcome[]): number {
+  for (const outcome of outcomes) emit({ event: 'outcome', ...outcome });
+  const codes = new Set(outcomes.map(codeFor));
+  return [EXIT.unresolved, EXIT.refused, EXIT.failed].find(code => codes.has(code)) ?? EXIT.ok;
 }
 
 async function waitForGo(): Promise<void> {
@@ -123,15 +152,14 @@ function showPayment(deps: PayerDeps, operationId: string): void {
   });
 }
 
-async function payer(command: string, args: string[]): Promise<number> {
+async function payer(command: string, args: string[], services: Services): Promise<number> {
   const { values } = parseArgs({ args, options: {
     as: { type: 'string' }, operation: { type: 'string' }, kind: { type: 'string' }, invoice: { type: 'string' },
     'fee-limit-msat': { type: 'string' }, 'max-parts': { type: 'string' }, 'timeout-s': { type: 'string' }, budget: { type: 'string' },
     'limit-msat': { type: 'string' }, 'payment-hash': { type: 'string' }, fault: { type: 'string' }, 'wait-for-go': { type: 'boolean' },
     lab: { type: 'string' },
   }, strict: true });
-  const lab = loadLab(values.lab);
-  const deps = openPayer(lab, payerProfile(required(values, 'as')));
+  const deps = services.payer(values.lab, payerProfile(required(values, 'as')));
   try {
     switch (command) {
       case 'pay': {
@@ -144,6 +172,7 @@ async function payer(command: string, args: string[]): Promise<number> {
         const fault = (values.fault ?? 'none') as Fault;
         if (fault !== 'none' && fault !== 'drop-stream-after-in-flight') throw new UsageError('--fault must be drop-stream-after-in-flight');
         const budgetId = values.budget === undefined ? undefined : identifier(values.budget, '--budget');
+        const timeoutSeconds = seconds(values, 'timeout-s', 60);
         const paymentRequest = required(values, 'invoice');
         const replayed = await answerFromRecord(deps, operationId, paymentRequest);
         if (replayed !== undefined) return replayed;
@@ -159,30 +188,27 @@ async function payer(command: string, args: string[]): Promise<number> {
           return exitFor(await reconcileOrReport(deps, intent.payment.paymentHash, intent.payment.state));
         }
         const signal = stopSignal();
-        return exitFor(await submit(deps, intent.payment.paymentHash, { timeoutSeconds: seconds(values, 'timeout-s', 60), fault, signal }));
+        return exitFor(await submit(deps, intent.payment.paymentHash, { timeoutSeconds, fault, signal }));
       }
       case 'retry': {
         const operationId = identifier(required(values, 'operation'), '--operation');
+        const timeoutSeconds = seconds(values, 'timeout-s', 60);
         const prepared = deps.store.prepareRetry(operationId);
         if (prepared.outcome !== 'recorded') {
           emit({ event: 'retry-refused', operationId, reason: prepared.outcome === 'refused' ? prepared.reason : 'unexpected' });
           return EXIT.refused;
         }
         emit({ event: 'retry-prepared', operationId, paymentHash: prepared.payment.paymentHash });
-        return exitFor(await submit(deps, prepared.payment.paymentHash, { timeoutSeconds: seconds(values, 'timeout-s', 60), fault: 'none',
-          signal: stopSignal() }));
+        return exitFor(await submit(deps, prepared.payment.paymentHash, { timeoutSeconds, fault: 'none', signal: stopSignal() }));
       }
       case 'reconcile': {
-        const signal = stopSignal(values['timeout-s'] === undefined ? undefined : seconds(values, 'timeout-s', 60));
+        const timeoutSeconds = values['timeout-s'] === undefined ? undefined : seconds(values, 'timeout-s', 60);
         const targets = values['payment-hash'] === undefined
           ? deps.store.unresolvedPayments().map(item => item.paymentHash)
           : [assertHash(values['payment-hash'])];
+        const signal = stopSignal(timeoutSeconds);
         emit({ event: 'reconcile-started', payments: targets.length });
-        const outcomes = await Promise.all(targets.map(hash => reconcile(deps, hash, signal)));
-        for (const outcome of outcomes) emit({ event: 'outcome', ...outcome });
-        if (outcomes.some(item => item.kind === 'unresolved' || item.kind === 'not-submitted')) return EXIT.unresolved;
-        if (outcomes.some(item => item.kind === 'refused')) return EXIT.refused;
-        return EXIT.ok;
+        return exitForAll(await Promise.all(targets.map(hash => reconcile(deps, hash, signal))));
       }
       case 'show':
         showPayment(deps, identifier(required(values, 'operation'), '--operation'));
@@ -282,14 +308,13 @@ async function reconcileOrReport(deps: PayerDeps, paymentHash: string, state: st
   return reconcile(deps, paymentHash, AbortSignal.timeout(30_000));
 }
 
-async function receiver(command: string, args: string[]): Promise<number> {
+async function receiver(command: string, args: string[], services: Services): Promise<number> {
   const { values } = parseArgs({ args, options: {
     as: { type: 'string' }, order: { type: 'string' }, 'amount-msat': { type: 'string' }, hold: { type: 'boolean' },
     memo: { type: 'string' }, 'expiry-s': { type: 'string' }, 'settle-index': { type: 'string' }, 'add-index': { type: 'string' },
     'reconcile-interval-s': { type: 'string' }, lab: { type: 'string' },
   }, strict: true });
-  const lab = loadLab(values.lab);
-  const deps = openReceiver(lab, receiverProfile(required(values, 'as')));
+  const deps = services.receiver(values.lab, receiverProfile(required(values, 'as')));
   try {
     switch (command) {
       case 'create-invoice': {
@@ -312,7 +337,8 @@ async function receiver(command: string, args: string[]): Promise<number> {
         return outcome.kind === 'canceled' ? EXIT.ok : outcome.kind === 'unresolved' ? EXIT.unresolved : EXIT.refused;
       }
       case 'reconcile': {
-        const result = await reconcileInvoices(deps, values.order === undefined ? undefined : identifier(values.order, '--order'));
+        const result = await reconcileInvoices(deps, values.order === undefined ? undefined : identifier(values.order, '--order'),
+          stopSignal());
         emit({ event: 'outcome', ...result });
         return result.unknown > 0 ? EXIT.unresolved : EXIT.ok;
       }
@@ -387,7 +413,7 @@ const USAGE = `usage: node src/cli.ts <component> <command> [options]
   payer pay --as <customer-payer|merchant-refunds> --operation <id> --kind <order-payment|refund|payout>
             --invoice <bolt11> --fee-limit-msat <n> [--max-parts <n>] [--timeout-s <n>] [--budget <id>]
             [--wait-for-go] [--fault drop-stream-after-in-flight]
-  payer retry --as <profile> --operation <id>
+  payer retry --as <profile> --operation <id> [--timeout-s <n>]
   payer reconcile --as <profile> [--payment-hash <hex>] [--timeout-s <n>]
   payer show --as <profile> --operation <id>
   payer budget-set --as <profile> --budget <id> --limit-msat <n>
@@ -401,12 +427,12 @@ const USAGE = `usage: node src/cli.ts <component> <command> [options]
   analysis diagnose --node <node> --payer <profile> --operation <id>
 All commands accept --lab <dir> (default: the run named in runtime/current.json).`;
 
-async function main(argv: string[]): Promise<number> {
+export async function main(argv: string[], services: Services = LAB_SERVICES): Promise<number> {
   const [component, command, ...rest] = argv;
   try {
     if (component === undefined || command === undefined) throw new UsageError('component and command are required');
-    if (component === 'payer') return await payer(command, rest);
-    if (component === 'receiver') return await receiver(command, rest);
+    if (component === 'payer') return await payer(command, rest, services);
+    if (component === 'receiver') return await receiver(command, rest, services);
     if (component === 'analysis') return await analysis(command, rest);
     throw new UsageError(`unknown component ${component}`);
   } catch (error) {
@@ -419,4 +445,11 @@ async function main(argv: string[]): Promise<number> {
   }
 }
 
-process.exitCode = await main(process.argv.slice(2));
+/** True when this file is the program Node was started with (`node src/cli.ts`), not a module a test imports. */
+function isEntryPoint(): boolean {
+  const script = process.argv[1];
+  if (script === undefined) return false;
+  try { return pathToFileURL(realpathSync(script)).href === import.meta.url; } catch { return false; }
+}
+
+if (isEntryPoint()) process.exitCode = await main(process.argv.slice(2));

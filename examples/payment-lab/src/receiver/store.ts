@@ -204,6 +204,23 @@ export class ReceiverStore {
       AND NOT EXISTS (SELECT 1 FROM fulfillments WHERE fulfillments.payment_hash = invoices.payment_hash)`).get(paymentHash) !== undefined;
   }
 
+  /**
+   * Why this invoice may not be settled now, read in one transaction: its order was
+   * fulfilled by another invoice (settling would take a second payment for it), so
+   * it is superseded and to be canceled. Undefined when it may be settled.
+   */
+  settleRefusal(paymentHash: string): string | undefined {
+    return immediate(this.db, () => {
+      const record = this.invoice(paymentHash);
+      if (record === undefined) return `no invoice ${paymentHash}`;
+      const other = this.db.prepare('SELECT payment_hash FROM fulfillments WHERE order_id = ? AND payment_hash <> ? LIMIT 1')
+        .get(record.orderId, paymentHash);
+      if (other !== undefined) return `order ${record.orderId} was fulfilled by invoice ${text(other, 'payment_hash')}`;
+      if (this.isSuperseded(paymentHash)) return `order ${record.orderId} was fulfilled by another invoice`;
+      return undefined;
+    });
+  }
+
   deliveries(paymentHash: string): { source: string; lndState: string; settleIndex: bigint; outcome: string; receivedAt: string }[] {
     return this.db.prepare('SELECT * FROM deliveries WHERE payment_hash = ? ORDER BY delivery_id').all(paymentHash)
       .map(row => ({ source: text(row, 'source'), lndState: text(row, 'lnd_state'), settleIndex: int(row, 'settle_index'),
