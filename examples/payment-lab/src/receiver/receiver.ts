@@ -24,6 +24,16 @@ function apply(deps: ReceiverDeps, invoice: Invoice, source: DeliverySource): De
   const outcome = deps.store.applyInvoice(invoice, source);
   deps.emit({ event: 'invoice-delivery', source, paymentHash: invoice.paymentHash, lndState: invoice.state,
     settleIndex: invoice.settleIndex.toString(), amtPaidMsat: invoice.amtPaidMsat.toString(), outcome });
+  if (outcome === 'late-invoice' || outcome === 'second-payment') {
+    const orderId = deps.store.invoice(invoice.paymentHash)?.orderId;
+    deps.emit(outcome === 'late-invoice'
+      ? { event: 'late-invoice', orderId, paymentHash: invoice.paymentHash, lndState: invoice.state,
+        reason: `LND holds invoice ${invoice.paymentHash} after it was recorded as not created, and order ${orderId} may not adopt it; `
+          + 'reconciliation cancels it in LND' }
+      : { event: 'second-payment', orderId, paymentHash: invoice.paymentHash, amtPaidMsat: invoice.amtPaidMsat.toString(),
+        reason: `order ${orderId} was already fulfilled by another invoice; this payment was posted and did not fulfill the order again; `
+          + 'return it to the payer' });
+  }
   return outcome;
 }
 
@@ -44,21 +54,77 @@ async function lookup(deps: ReceiverDeps, paymentHash: string): Promise<Invoice 
  * nothing: LND can still create the invoice a moment later. So NotFound is
  * conclusive only when the call is known to be over:
  *
- * - LND answered the create call with an error (the creator saw the answer), or
+ * - LND itself refused the create call (definiteRefusal below; the creator saw the
+ *   answer), or
  * - the intent was recorded longer ago than CREATION_WINDOW_MS. AddInvoice and
  *   AddHoldInvoice use the REST client's default unary timeout (30 s), so a call
  *   still pending after the window has been abandoned by its caller.
  *
  * Anything else (another process reconciling, the creator's own call timing out
- * or losing its connection after the request was sent) leaves the invoice
- * `creating`: the order keeps it as its live invoice, no replacement is issued,
- * and a later pass decides. If LND's created answer still arrives after a
- * not-created decision, markCreated records it.
+ * or losing its connection after the request was sent, an ambiguous error) leaves
+ * the invoice `creating`: the order keeps it as its live invoice, no replacement
+ * is issued, and a later pass decides. LND can still create an invoice after the
+ * window (a stalled call); resolveLateInvoice handles one that turns up.
  */
 export const CREATION_WINDOW_MS = 120_000;
 
+/**
+ * How long after its intent a not-created invoice is still looked up by
+ * reconciliation in case LND created it late. The subscription sees a late
+ * creation at any age (LND replays invoice additions after the stored add index);
+ * this lookup is the backstop for a listener that was not running.
+ */
+export const LATE_RECHECK_MS = 24 * 60 * 60 * 1000;
+
 function creationCutoff(): string {
   return new Date(Date.now() - CREATION_WINDOW_MS).toISOString();
+}
+
+/**
+ * gRPC status codes with which LND itself refuses a create call: the request was
+ * handled and nothing was created. 2 Unknown is how LND returns most of its own
+ * application errors (HTTP 500 from its gateway, for example "invoice with payment
+ * hash already exists").
+ */
+const DEFINITE_REFUSAL_CODES: ReadonlySet<number> = new Set([
+  2, // Unknown: an LND application error
+  3, // InvalidArgument
+  5, // NotFound
+  6, // AlreadyExists
+  7, // PermissionDenied
+  8, // ResourceExhausted (request too large, rate limit inside LND)
+  9, // FailedPrecondition
+  11, // OutOfRange
+  12, // Unimplemented
+  16, // Unauthenticated
+]);
+
+/** HTTP statuses that a gateway or proxy in front of LND produces when the call was cut off, whatever the body says. */
+const AMBIGUOUS_HTTP: ReadonlySet<number> = new Set([408, 499, 502, 503, 504]);
+
+/**
+ * Whether an error from the create call is a definite refusal, which lets a NotFound
+ * lookup decide the invoice at once. The classes:
+ *
+ * - not delivered: a TransportError in phase `connect`; the request never left
+ *   (handled before this is asked, without a lookup).
+ * - definite refusal: an LndError with one of DEFINITE_REFUSAL_CODES from LND's
+ *   gateway, or a 400-class response (other than 408 and 499) whose body carries a
+ *   message, and in neither case an HTTP status from AMBIGUOUS_HTTP.
+ * - ambiguous, everything else: gRPC 1 Cancelled, 4 DeadlineExceeded, 10 Aborted,
+ *   13 Internal, 14 Unavailable, 15 DataLoss (the call may have been cut off after
+ *   LND began creating the invoice); HTTP 408, 499, 502, 503 or 504 from a gateway
+ *   or proxy; a 5xx without an LND body; a TransportError after the connection was
+ *   established; a ProtocolError (an unreadable answer); any other error. The
+ *   invoice stays `creating` until CREATION_WINDOW_MS has passed.
+ */
+export function definiteRefusal(error: unknown): boolean {
+  if (!(error instanceof LndError)) return false;
+  const status = error.httpStatus;
+  if (status !== undefined && AMBIGUOUS_HTTP.has(status)) return false;
+  if (error.grpcCode !== undefined) return DEFINITE_REFUSAL_CODES.has(error.grpcCode);
+  // No gRPC code: only a 400-class answer with a message from the body (not the client's "HTTP <status>" stand-in).
+  return status !== undefined && status >= 400 && status < 500 && error.message !== `HTTP ${status}`;
 }
 
 export type CreateOutcome =
@@ -89,7 +155,7 @@ export async function createInvoice(deps: ReceiverDeps, input: { orderId: string
       throw new Error('LND created an invoice for a different payment hash');
     }
     const state = deps.store.markCreated(paymentHash, created.paymentRequest, created.addIndex);
-    if (state === 'not-created') return supersededCreation(paymentHash, input.orderId);
+    if (state === 'not-created') return await lateCreation(deps, paymentHash, undefined);
     deps.emit({ event: 'invoice-created', orderId: input.orderId, paymentHash, rpc: input.hold ? 'AddHoldInvoice' : 'AddInvoice' });
     return { kind: 'created', paymentHash, paymentRequest: created.paymentRequest };
   } catch (error) {
@@ -97,10 +163,18 @@ export async function createInvoice(deps: ReceiverDeps, input: { orderId: string
   }
 }
 
-/** LND created the invoice after it had been recorded not-created and the order got another live invoice. */
-function supersededCreation(paymentHash: string, orderId: string): CreateOutcome {
-  return { kind: 'unresolved', paymentHash, reason: `LND created invoice ${paymentHash} after it was recorded as not created, and order ${orderId} `
-    + 'already has another live invoice; cancel one of them (a settlement of either is still fulfilled and posted)' };
+/** The create call's answer (or its lookup) shows LND created an invoice already recorded not-created. */
+async function lateCreation(deps: ReceiverDeps, paymentHash: string, found: Invoice | undefined): Promise<CreateOutcome> {
+  const record = deps.store.invoice(paymentHash);
+  const current = found ?? await lookup(deps, paymentHash);
+  if (record === undefined || current === 'not-found' || current === 'unknown') {
+    return { kind: 'unresolved', paymentHash, reason: `LND created invoice ${paymentHash} after it was recorded as not created; `
+      + 'run "receiver reconcile" to cancel or adopt it' };
+  }
+  const late = await resolveLateInvoice(deps, record, current, 'create-call');
+  if (late.kind === 'adopted') return { kind: 'created', paymentHash, paymentRequest: current.paymentRequest };
+  if (late.kind === 'canceled') return { kind: 'not-created', paymentHash, reason: late.reason };
+  return { kind: 'unresolved', paymentHash, reason: late.reason };
 }
 
 async function resolveCreation(deps: ReceiverDeps, paymentHash: string, error: unknown): Promise<CreateOutcome> {
@@ -110,8 +184,8 @@ async function resolveCreation(deps: ReceiverDeps, paymentHash: string, error: u
   }
   const found = await lookup(deps, paymentHash);
   if (found === 'not-found') {
-    // Conclusive only if the call is over (see CREATION_WINDOW_MS): LND answered it with an error.
-    if (deps.store.markNotCreated(paymentHash, error instanceof LndError ? undefined : creationCutoff())) {
+    // Conclusive at once only if LND itself refused the call; otherwise after the window (see CREATION_WINDOW_MS).
+    if (deps.store.markNotCreated(paymentHash, definiteRefusal(error) ? undefined : creationCutoff())) {
       return { kind: 'not-created', paymentHash, reason: describeError(error) };
     }
     return { kind: 'unresolved', paymentHash, reason: `${describeError(error)}; LND has no invoice for the hash yet, but the create call may still `
@@ -120,13 +194,65 @@ async function resolveCreation(deps: ReceiverDeps, paymentHash: string, error: u
   if (found === 'unknown') {
     return { kind: 'unresolved', paymentHash, reason: `${describeError(error)}; run "receiver reconcile" to resolve it` };
   }
-  const order = deps.store.invoice(paymentHash)?.orderId ?? '';
   if (deps.store.markCreated(paymentHash, found.paymentRequest, found.addIndex) === 'not-created') {
-    apply(deps, found, 'create-call');
-    return supersededCreation(paymentHash, order);
+    return await lateCreation(deps, paymentHash, found);
   }
   apply(deps, found, 'create-call');
   return { kind: 'created', paymentHash, paymentRequest: found.paymentRequest };
+}
+
+export type LateOutcome =
+  | { kind: 'adopted' | 'canceled' | 'recorded'; reason: string }
+  | { kind: 'unresolved'; reason: string };
+
+/**
+ * An invoice recorded `not-created` that LND holds after all: its create call
+ * reached LND after the creation window, or a not-created decision was followed by
+ * LND's late answer. The rule, applied however it is learned (the create call's
+ * answer, the subscription, a reconciliation lookup):
+ *
+ * - The order still awaits payment and has no other live invoice: the invoice is
+ *   adopted and becomes the order's live invoice.
+ * - Otherwise (another live invoice, or the order is fulfilled or canceled) and
+ *   LND holds it OPEN or ACCEPTED: it is canceled in LND with CancelInvoice, so the
+ *   order never has two payable invoices; an accepted HTLC returns to the payer.
+ *   Until LND reports it canceled, every reconciliation pass tries again.
+ * - LND reports it settled (paid before the cancel reached LND): the payment is
+ *   recorded and posted, because the money arrived. If the order was already
+ *   fulfilled by another invoice it is not fulfilled again; the delivery is
+ *   `second-payment` and the operator is told to return the money.
+ */
+export async function resolveLateInvoice(deps: ReceiverDeps, record: InvoiceRecord, found: Invoice, source: DeliverySource): Promise<LateOutcome> {
+  const { paymentHash, orderId } = record;
+  const what = `LND holds invoice ${paymentHash} (${found.state}) for order ${orderId} after it was recorded as not created`;
+  const outcome = apply(deps, found, source);
+  if (deps.store.invoice(paymentHash)?.state !== 'not-created') {
+    const reason = `${what}; the order had no other live invoice, so it was adopted`;
+    deps.emit({ event: 'late-invoice-adopted', orderId, paymentHash, lndState: found.state, reason });
+    return { kind: 'adopted', reason };
+  }
+  if (outcome !== 'late-invoice') return { kind: 'recorded', reason: `${what}; recorded (${outcome})` };
+  let callError: unknown;
+  try {
+    await deps.api.cancelInvoice(paymentHash);
+    deps.emit({ event: 'cancel-called', orderId, paymentHash, rpc: 'CancelInvoice', reason: what });
+  } catch (error) {
+    callError = error;
+  }
+  const after = await lookup(deps, paymentHash);
+  if (after !== 'not-found' && after !== 'unknown') apply(deps, after, 'lookup');
+  if (after !== 'not-found' && after !== 'unknown' && after.state === 'CANCELED') {
+    const reason = `${what}; order ${orderId} has another live invoice or no longer awaits payment, so it was canceled in LND`;
+    deps.emit({ event: 'late-invoice-canceled', orderId, paymentHash, reason });
+    return { kind: 'canceled', reason };
+  }
+  if (after !== 'not-found' && after !== 'unknown' && after.state === 'SETTLED') {
+    return { kind: 'recorded', reason: `${what}; it was paid before it could be canceled, and the payment was recorded` };
+  }
+  const reason = `${what}; CancelInvoice ${callError === undefined ? 'sent' : `failed: ${describeError(callError)}`}, `
+    + `invoice ${after === 'not-found' || after === 'unknown' ? `lookup ${after}` : after.state}; the next reconciliation tries again`;
+  deps.emit({ event: 'late-invoice-cancel-failed', orderId, paymentHash, reason });
+  return { kind: 'unresolved', reason };
 }
 
 export type SettleOutcome =
@@ -190,9 +316,22 @@ export async function reconcileInvoices(deps: ReceiverDeps, onlyOrder?: string):
   let resolved = 0;
   let open = 0;
   let unknown = 0;
-  const targets = onlyOrder === undefined ? deps.store.unresolvedInvoices() : deps.store.invoicesForOrder(onlyOrder);
+  const recheckSince = new Date(Date.now() - LATE_RECHECK_MS).toISOString();
+  const targets = onlyOrder === undefined
+    ? [...deps.store.unresolvedInvoices(), ...deps.store.lateInvoiceCandidates(recheckSince)]
+    : deps.store.invoicesForOrder(onlyOrder);
   for (const invoice of targets) {
-    if (invoice.state === 'not-created' || invoice.state === 'canceled') continue;
+    if (invoice.state === 'canceled') continue;
+    if (invoice.state === 'not-created') {
+      // LND may have created it after all (a create call that stalled past the window): cancel or adopt it.
+      if (invoice.lateLndState === 'CANCELED' || invoice.lateLndState === 'SETTLED') continue;
+      const late = await lookup(deps, invoice.paymentHash);
+      if (late === 'unknown') { unknown += 1; continue; }
+      if (late === 'not-found') continue;
+      const result = await resolveLateInvoice(deps, invoice, late, 'lookup');
+      if (result.kind === 'unresolved') unknown += 1; else if (result.kind === 'adopted' && late.state !== 'SETTLED') open += 1; else resolved += 1;
+      continue;
+    }
     const found = await lookup(deps, invoice.paymentHash);
     if (found === 'unknown') { unknown += 1; continue; }
     if (found === 'not-found') {
@@ -245,7 +384,8 @@ export async function listen(deps: ReceiverDeps, options: { reconcileIntervalMs:
       deps.emit({ event: 'subscribing', rpc: 'SubscribeInvoices', settleIndex: cursor.settleIndex.toString(), addIndex: cursor.addIndex.toString() });
       const subscription = deps.api.subscribeInvoices(cursor, invoice => {
         backoff = BACKOFF_START_MS;
-        apply(deps, invoice, 'subscription');
+        // A late invoice (recorded not-created, now open in LND) is canceled by the next reconciliation pass; start one now.
+        if (apply(deps, invoice, 'subscription') === 'late-invoice') reconciling ??= reconcileTick().finally(() => { reconciling = undefined; });
         return 'continue';
       }, signal);
       if (first) {

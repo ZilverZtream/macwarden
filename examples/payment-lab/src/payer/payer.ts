@@ -2,7 +2,7 @@ import type { PayerApi } from '../lnd/api.ts';
 import { LndError, TransportError, describeError } from '../lnd/errors.ts';
 import type { StreamDecision } from '../lnd/rest.ts';
 import { isTerminal, type DecodedPayReq, type Payment } from '../lnd/types.ts';
-import type { IntentResult, OperationKind, PayerStore, PaymentState } from './store.ts';
+import type { IntentResult, OperationKind, PayerStore, PaymentState, UpdateResult } from './store.ts';
 
 /**
  * The payment workflow. Rules it never breaks:
@@ -45,6 +45,21 @@ function summary(payment: Payment): Record<string, unknown> {
     attemptsFailed: payment.htlcs.filter(item => item.status === 'FAILED').length,
     failureReason: payment.failureReason,
   };
+}
+
+const CONFLICT_REASON = {
+  'withdrawn': 'it was never sent and is withdrawn; its reservation is released',
+  'possible-double-payment': 'it may have been sent and is still unresolved; if LND reports it succeeded the operation was paid twice; '
+    + 'it is reconciled with TrackPaymentV2 and must be watched',
+  'double-payment': 'LND reported it succeeded too: the operation was paid twice; recover the second payment from the payee',
+} as const;
+
+/** Tells the operator about the operation's other payments when LND reports one succeeded (see PayerStore.applyUpdate). */
+function reportConflicts(deps: PayerDeps, paymentHash: string, result: UpdateResult): void {
+  for (const conflict of result.conflicts) {
+    deps.emit({ event: conflict.action, paymentHash: conflict.paymentHash, state: conflict.state, succeeded: paymentHash,
+      reason: `payment ${paymentHash} of the same operation succeeded; ${CONFLICT_REASON[conflict.action]}` });
+  }
 }
 
 /** Validates the decoded invoice against what the business expects to pay. */
@@ -97,6 +112,7 @@ export async function submit(deps: PayerDeps, paymentHash: string, options: { ti
     if (payment.paymentHash !== paymentHash) throw new Error('SendPaymentV2 returned an update for another payment hash');
     updates += 1;
     const result = deps.store.applyUpdate(payment, 'SendPaymentV2');
+    reportConflicts(deps, paymentHash, result);
     lastState = result.state;
     deps.emit({ event: 'payment-update', source: 'SendPaymentV2', ...summary(payment), recordState: result.state,
       operationCompleted: result.completed });
@@ -160,7 +176,7 @@ async function trackOnce(deps: PayerDeps, paymentHash: string): Promise<'not-fou
     let found = false;
     await deps.api.trackPaymentV2(paymentHash, payment => {
       found = true;
-      deps.store.applyUpdate(payment, 'TrackPaymentV2');
+      reportConflicts(deps, paymentHash, deps.store.applyUpdate(payment, 'TrackPaymentV2'));
       return 'stop';
     });
     return found ? 'found' : 'unknown';
@@ -200,6 +216,7 @@ export async function reconcile(deps: PayerDeps, paymentHash: string, signal?: A
     try {
       await deps.api.trackPaymentV2(paymentHash, payment => {
         const result = deps.store.applyUpdate(payment, 'TrackPaymentV2');
+        reportConflicts(deps, paymentHash, result);
         deps.emit({ event: 'payment-update', source: 'TrackPaymentV2', ...summary(payment), recordState: result.state,
           operationCompleted: result.completed });
         backoff = BACKOFF_START_MS;

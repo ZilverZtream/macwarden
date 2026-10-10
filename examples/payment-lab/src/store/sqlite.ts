@@ -11,7 +11,7 @@ import { DatabaseSync, type SQLOutputValue } from 'node:sqlite';
  *   at the start. Two worker processes on one file therefore serialise their
  *   read-check-write sequences (budget reservations rely on this); the loser
  *   waits up to the busy timeout.
- * - Invariants that must hold whatever the code does (one live payment per
+ * - Invariants that must hold whatever the code does (one pending payment per
  *   operation, one ledger entry per key) are UNIQUE and CHECK constraints.
  */
 

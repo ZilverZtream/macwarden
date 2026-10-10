@@ -21,8 +21,16 @@ import { changes, immediate, int, nowIso, openDatabase, optionalInt, optionalTex
  *
  * submitting, in_flight and uncertain are unresolved: the outcome is not known
  * to the business, the operation stays open, a budget reservation stays held,
- * and the partial unique index below refuses a second payment (a replacement
- * invoice) for the operation until LND reports this one failed.
+ * and the partial unique index below refuses a second pending payment (a
+ * replacement invoice) for the operation until LND reports this one failed.
+ *
+ * The index covers pending payments (intent and the unresolved states), not
+ * succeeded ones: LND can report success for an earlier payment of an operation
+ * after it was recorded failed and a replacement was recorded, and that success
+ * must be recorded, because the money left. applyUpdate then withdraws a
+ * replacement that was never sent and flags one that may have been sent as a
+ * possible double payment. A completed operation accepts no new payment
+ * (recordIntent and prepareRetry refuse it).
  */
 
 const MIGRATIONS = [`
@@ -122,6 +130,13 @@ CREATE TABLE budget_refusals (
 -- as the current submission's, which keeps the old, conservative answer for them.
 ALTER TABLE htlc_attempts ADD COLUMN submission INTEGER NOT NULL DEFAULT 0;
 UPDATE htlc_attempts SET submission = (SELECT submissions FROM payments WHERE payments.payment_hash = htlc_attempts.payment_hash);
+`, `
+-- One pending payment per operation, not one non-failed payment ever: a success LND reports for
+-- an earlier payment after a replacement was recorded made "UNIQUE constraint failed:
+-- payments.operation_id" and the money that left was never recorded. Succeeded rows no longer count.
+DROP INDEX payments_one_live_per_operation;
+CREATE UNIQUE INDEX payments_one_pending_per_operation ON payments (operation_id)
+  WHERE state IN ('intent', 'submitting', 'in_flight', 'uncertain');
 `];
 
 export type PaymentState = 'intent' | 'submitting' | 'in_flight' | 'uncertain' | 'succeeded' | 'failed';
@@ -186,11 +201,24 @@ export type IntentResult =
   | { outcome: 'existing'; payment: PaymentRecord }
   | { outcome: 'refused'; reason: string; requestedMsat?: bigint; availableMsat?: bigint };
 
+/**
+ * Another payment of the same operation, found when LND reported this one succeeded:
+ * `withdrawn` (it was never sent; it is failed and its reservation released),
+ * `possible-double-payment` (it may have been sent and is still unresolved) or
+ * `double-payment` (LND reported it succeeded too).
+ */
+export interface PaymentConflict {
+  paymentHash: string;
+  state: PaymentState;
+  action: 'withdrawn' | 'possible-double-payment' | 'double-payment';
+}
+
 /** What an LND update changed in the record. `completed` is true exactly once per operation. */
 export interface UpdateResult {
   state: PaymentState;
   completed: boolean;
   failed: boolean;
+  conflicts: PaymentConflict[];
 }
 
 function paymentFrom(row: Row): PaymentRecord {
@@ -250,16 +278,19 @@ export class PayerStore {
     return row === undefined ? undefined : paymentFrom(row);
   }
 
-  /** The operation's live payment, or its most recent failed one. */
+  /** The operation's succeeded payment, else its live one, else its most recent failed one. */
   paymentForOperation(operationId: string): PaymentRecord | undefined {
     const row = this.db.prepare(`SELECT * FROM payments WHERE operation_id = ?
-      ORDER BY CASE WHEN state = 'failed' THEN 1 ELSE 0 END, updated_at DESC LIMIT 1`).get(operationId);
+      ORDER BY CASE state WHEN 'succeeded' THEN 0 WHEN 'failed' THEN 2 ELSE 1 END, updated_at DESC LIMIT 1`).get(operationId);
     return row === undefined ? undefined : paymentFrom(row);
   }
 
-  /** The operation's payment for this exact payment request, if one was recorded. */
+  /**
+   * The operation's payment for this payment request, if one was recorded. BOLT11 is
+   * case-insensitive (QR codes carry it in upper case), so the text is compared lower-cased.
+   */
   paymentForRequest(operationId: string, paymentRequest: string): PaymentRecord | undefined {
-    const row = this.db.prepare(`SELECT * FROM payments WHERE operation_id = ? AND payment_request = ?
+    const row = this.db.prepare(`SELECT * FROM payments WHERE operation_id = ? AND lower(payment_request) = lower(?)
       ORDER BY CASE WHEN state = 'failed' THEN 1 ELSE 0 END, updated_at DESC LIMIT 1`).get(operationId, paymentRequest);
     return row === undefined ? undefined : paymentFrom(row);
   }
@@ -267,6 +298,10 @@ export class PayerStore {
   operation(operationId: string): OperationRecord | undefined {
     const row = this.db.prepare('SELECT * FROM operations WHERE operation_id = ?').get(operationId);
     return row === undefined ? undefined : operationFrom(row);
+  }
+
+  paymentsForOperation(operationId: string): PaymentRecord[] {
+    return this.db.prepare('SELECT * FROM payments WHERE operation_id = ? ORDER BY created_at').all(operationId).map(paymentFrom);
   }
 
   unresolvedPayments(): PaymentRecord[] {
@@ -496,9 +531,10 @@ export class PayerStore {
           if (record.feeMsat !== payment.feeMsat || record.valueMsat !== payment.valueMsat) {
             throw new Error(`LND reported different amounts for already settled payment ${payment.paymentHash}`);
           }
-          return { state: 'succeeded', completed: false, failed: false };
+          return { state: 'succeeded', completed: false, failed: false, conflicts: [] };
         }
         if (record.state === 'failed') this.#event(payment.paymentHash, 'success-after-failure', { source });
+        const conflicts = this.#settleConflicts(record, now);
         if (payment.valueMsat !== record.amountMsat) {
           this.#event(payment.paymentHash, 'amount-mismatch', { expectedMsat: record.amountMsat, lndValueMsat: payment.valueMsat });
         }
@@ -521,24 +557,62 @@ export class PayerStore {
         }
         this.#event(payment.paymentHash, 'succeeded', { source, valueMsat: payment.valueMsat, feeMsat: payment.feeMsat,
           htlcAttempts: payment.htlcs.length, succeededAttempts: payment.htlcs.filter(item => item.status === 'SUCCEEDED').length });
-        return { state: 'succeeded', completed, failed: false };
+        return { state: 'succeeded', completed, failed: false, conflicts };
       }
       if (payment.status === 'FAILED') {
         if (record.state === 'succeeded') throw new Error(`LND reported failure for settled payment ${payment.paymentHash}`);
         const failed = this.#fail(payment.paymentHash, payment.failureReason, payment);
-        return { state: 'failed', completed: false, failed };
+        return { state: 'failed', completed: false, failed, conflicts: [] };
       }
       // IN_FLIGHT or INITIATED: LND holds the payment. Not terminal.
-      if (record.state === 'succeeded') return { state: 'succeeded', completed: false, failed: false };
+      if (record.state === 'succeeded') return { state: 'succeeded', completed: false, failed: false, conflicts: [] };
       // A failed payment stays failed: an IN_FLIGHT snapshot that arrives after the failure is stale
       // (a concurrent tracker, an older page), and reopening the operation would leave its
       // reservation released while the payment looked live. A retry goes through prepareRetry.
-      if (record.state === 'failed') return { state: 'failed', completed: false, failed: false };
+      if (record.state === 'failed') return { state: 'failed', completed: false, failed: false, conflicts: [] };
       const result = this.db.prepare(`UPDATE payments SET state = 'in_flight', uncertain_reason = NULL, lnd_payment_index = ?, updated_at = ?
         WHERE payment_hash = ? AND state <> 'in_flight'`).run(payment.paymentIndex, now, payment.paymentHash);
       if (changes(result) === 1) this.#event(payment.paymentHash, 'in-flight', { source, status: payment.status, htlcAttempts: payment.htlcs.length });
-      return { state: 'in_flight', completed: false, failed: false };
+      return { state: 'in_flight', completed: false, failed: false, conflicts: [] };
     });
+  }
+
+  /**
+   * LND reports `record` succeeded: the operation is paid. Every other payment of the
+   * operation that is not failed is dealt with first, in the same transaction:
+   *
+   * - intent (never sent): withdrawn. It becomes failed with reason WITHDRAWN and its
+   *   reservation is released; claimForSubmission can no longer take it, so it is
+   *   never sent.
+   * - submitting, in_flight or uncertain (it may have been sent): it stays unresolved
+   *   and is reconciled like any other, because LND may still pay it; both payments
+   *   get a `possible-double-payment` event. If LND later reports it succeeded, its
+   *   principal and fee are posted and its reservation consumed like this one's
+   *   (the money left), and it is a `double-payment`.
+   * - succeeded: a `double-payment` event on both.
+   */
+  #settleConflicts(record: PaymentRecord, now: string): PaymentConflict[] {
+    const conflicts: PaymentConflict[] = [];
+    const others = this.db.prepare(`SELECT * FROM payments WHERE operation_id = ? AND payment_hash <> ? AND state <> 'failed'
+      ORDER BY created_at`).all(record.operationId, record.paymentHash).map(paymentFrom);
+    for (const other of others) {
+      if (other.state === 'intent') {
+        const reason = `WITHDRAWN: operation ${record.operationId} was paid by payment ${record.paymentHash}`;
+        this.db.prepare(`UPDATE payments SET state = 'failed', failure_reason = ?, resolved_at = ?, updated_at = ?
+          WHERE payment_hash = ? AND state = 'intent'`).run(reason, now, now, other.paymentHash);
+        this.db.prepare(`UPDATE reservations SET state = 'released', updated_at = ? WHERE payment_hash = ? AND state = 'held'`)
+          .run(now, other.paymentHash);
+        this.#event(other.paymentHash, 'withdrawn', { reason, paidBy: record.paymentHash });
+        conflicts.push({ paymentHash: other.paymentHash, state: other.state, action: 'withdrawn' });
+        continue;
+      }
+      const action = other.state === 'succeeded' ? 'double-payment' : 'possible-double-payment';
+      const detail = { operationId: record.operationId, succeeded: record.paymentHash, other: other.paymentHash, otherState: other.state };
+      this.#event(other.paymentHash, action, detail);
+      this.#event(record.paymentHash, action, detail);
+      conflicts.push({ paymentHash: other.paymentHash, state: other.state, action });
+    }
+    return conflicts;
   }
 
   /**

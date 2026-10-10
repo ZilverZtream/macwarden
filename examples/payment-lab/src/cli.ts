@@ -9,9 +9,10 @@ import {
 } from './config.ts';
 import { describeError } from './lnd/errors.ts';
 import { decodeInvoice, reconcile, recordIntent, submit, type Fault, type PayOutcome, type PayerDeps } from './payer/payer.ts';
-import { PayerStore, type OperationKind } from './payer/store.ts';
+import { PayerStore, type OperationKind, type PaymentRecord } from './payer/store.ts';
 import { cancelHoldInvoice, createInvoice, listen, reconcileInvoices, settleHoldInvoice, type ReceiverDeps } from './receiver/receiver.ts';
 import { ReceiverStore } from './receiver/store.ts';
+import { bolt11PaymentHash, damagedPaymentRequest } from './util/bolt11.ts';
 import { assertHash } from './util/encoding.ts';
 import { parseAmount } from './util/money.ts';
 
@@ -213,17 +214,40 @@ async function payer(command: string, args: string[]): Promise<number> {
  * any other; a payment that was sent is answered from the record or TrackPaymentV2.
  * Only a new invoice, or a recorded intent that was never sent, goes on to be
  * decoded and checked, because it is about to be sent. Returns undefined for those.
+ *
+ * "An invoice it recorded" is matched by payment hash when the invoice decodes
+ * offline (bolt11.ts), else by text compared case-insensitively: BOLT11 is
+ * case-insensitive, and QR codes carry invoices in upper case. If a completed
+ * operation's stored invoice is damaged, the invoice given cannot be compared
+ * with it as text; it is then read with DecodePayReq (a read, nothing is sent)
+ * and matched by hash, and a refusal says the record is damaged.
  */
 async function answerFromRecord(deps: PayerDeps, operationId: string, paymentRequest: string): Promise<number | undefined> {
   const operation = deps.store.operation(operationId);
   if (operation === undefined) return undefined;
-  const recorded = deps.store.paymentForRequest(operationId, paymentRequest);
+  let recorded = recordedPayment(deps, operationId, paymentRequest);
   if (operation.state === 'completed') {
     const paid = deps.store.paymentForOperation(operationId);
     if (paid?.state !== 'succeeded') return undefined;
     if (recorded === undefined) {
-      emit({ event: 'intent-refused', operationId, reason: `operation ${operationId} is already completed` });
-      return EXIT.refused;
+      const damaged = deps.store.paymentsForOperation(operationId).filter(item => damagedPaymentRequest(item.paymentRequest));
+      if (damaged.length === 0) {
+        emit({ event: 'intent-refused', operationId, reason: `operation ${operationId} is already completed` });
+        return EXIT.refused;
+      }
+      const hash = await paymentHashFromLnd(deps, paymentRequest);
+      const match = hash === undefined ? undefined : deps.store.payment(hash);
+      if (match?.operationId !== operationId) {
+        emit({ event: 'intent-refused', operationId, reason: `operation ${operationId} is completed (payment ${paid.paymentHash}), but the stored `
+          + `invoice of payment ${damaged.map(item => item.paymentHash).join(', ')} is damaged, so the invoice given could not be compared with it as text; `
+          + (hash === undefined ? 'DecodePayReq could not read the invoice given either'
+            : `the invoice given is for payment hash ${hash}, which this operation never recorded`)
+          + '; inspect the record with "payer show"' });
+        return EXIT.refused;
+      }
+      recorded = match;
+      emit({ event: 'stored-invoice-damaged', operationId, paymentHashes: damaged.map(item => item.paymentHash),
+        matchedBy: 'payment hash from DecodePayReq' });
     }
     emit({ event: 'already-recorded', operationId, paymentHash: paid.paymentHash, state: paid.state });
     return exitFor({ kind: 'succeeded', paymentHash: paid.paymentHash, feeMsat: paid.feeMsat ?? 0n });
@@ -234,6 +258,23 @@ async function answerFromRecord(deps: PayerDeps, operationId: string, paymentReq
     return exitFor({ kind: 'failed', paymentHash: recorded.paymentHash, reason: recorded.failureReason ?? 'unknown' });
   }
   return exitFor(await reconcileOrReport(deps, recorded.paymentHash, recorded.state));
+}
+
+/** The operation's payment for this invoice: by payment hash when it decodes offline, else by case-insensitive text. */
+function recordedPayment(deps: PayerDeps, operationId: string, paymentRequest: string): PaymentRecord | undefined {
+  const hash = bolt11PaymentHash(paymentRequest);
+  const byHash = hash === undefined ? undefined : deps.store.payment(hash);
+  if (byHash?.operationId === operationId) return byHash;
+  return deps.store.paymentForRequest(operationId, paymentRequest);
+}
+
+/** The payment hash LND reads from an invoice, or undefined. DecodePayReq only reads; expiry does not matter here. */
+async function paymentHashFromLnd(deps: PayerDeps, paymentRequest: string): Promise<string | undefined> {
+  try {
+    return (await deps.api.decodePayReq(paymentRequest)).paymentHash;
+  } catch {
+    return undefined;
+  }
 }
 
 /** A repeated request for an operation that was already submitted is answered from LND, never by paying again. */
