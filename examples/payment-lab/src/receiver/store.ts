@@ -205,19 +205,38 @@ export class ReceiverStore {
     });
   }
 
-  markCreated(paymentHash: string, paymentRequest: string, addIndex: bigint): void {
-    immediate(this.db, () => {
-      this.db.prepare(`UPDATE invoices SET state = CASE WHEN state = 'creating' THEN 'open' ELSE state END, payment_request = ?,
-        add_index = ?, updated_at = ? WHERE payment_hash = ?`).run(paymentRequest, addIndex, nowIso(), paymentHash);
+  /**
+   * LND has the invoice (its create answer or a lookup says so). `creating` becomes
+   * `open`. LND's answer also wins over an earlier `not-created` decision, unless
+   * the order has meanwhile got another live invoice: one live invoice per order is
+   * a constraint, so the record then keeps `not-created` and the caller reports it.
+   * Returns the record's state afterwards.
+   */
+  markCreated(paymentHash: string, paymentRequest: string, addIndex: bigint): InvoiceRecordState | undefined {
+    return immediate(this.db, () => {
+      this.db.prepare(`UPDATE invoices SET state = CASE WHEN state = 'creating' THEN 'open'
+          WHEN state = 'not-created' AND NOT EXISTS (SELECT 1 FROM invoices other WHERE other.order_id = invoices.order_id
+            AND other.payment_hash <> invoices.payment_hash AND other.state IN ('creating', 'open', 'accepted', 'settled')) THEN 'open'
+          ELSE state END, payment_request = ?, add_index = ?, updated_at = ? WHERE payment_hash = ?`)
+        .run(paymentRequest, addIndex, nowIso(), paymentHash);
+      return this.invoice(paymentHash)?.state;
     });
   }
 
-  /** LND answered the create call with an error and a lookup confirms it has no such invoice. */
-  markNotCreated(paymentHash: string): void {
-    immediate(this.db, () => {
-      this.db.prepare(`UPDATE invoices SET state = 'not-created', updated_at = ? WHERE payment_hash = ? AND state = 'creating'`)
-        .run(nowIso(), paymentHash);
-    });
+  /**
+   * LND has no such invoice and the create call can no longer be in flight. With
+   * `createdBefore`, only a record whose intent was written before that time is
+   * decided (see CREATION_WINDOW_MS in receiver.ts). Returns whether it was marked.
+   */
+  markNotCreated(paymentHash: string, createdBefore?: string): boolean {
+    return immediate(this.db, () => changes(this.db.prepare(`UPDATE invoices SET state = 'not-created', updated_at = ?
+      WHERE payment_hash = ? AND state = 'creating' AND (? IS NULL OR created_at <= ?)`)
+      .run(nowIso(), paymentHash, createdBefore ?? null, createdBefore ?? null)) === 1);
+  }
+
+  #otherLiveInvoice(record: InvoiceRecord): boolean {
+    return this.db.prepare(`SELECT 1 AS n FROM invoices WHERE order_id = ? AND payment_hash <> ?
+      AND state IN ('creating', 'open', 'accepted', 'settled')`).get(record.orderId, record.paymentHash) !== undefined;
   }
 
   /**
@@ -248,7 +267,12 @@ export class ReceiverStore {
     const next = LND_TO_RECORD[invoice.state];
     if (next === undefined) return 'unchanged';
     let outcome: DeliveryOutcome = 'unchanged';
-    if (RANK[next] > RANK[record.state] || (record.state === 'creating' && next === 'open')) {
+    // A record marked not-created that LND reports after all moves to LND's state, unless the
+    // order has another live invoice by now: the move would break one-live-invoice-per-order
+    // (and a cancellation would cancel the order under the live one). The record then stays
+    // not-created, and a settlement is still posted below: the money for the order arrived.
+    const blocked = record.state === 'not-created' && this.#otherLiveInvoice(record);
+    if (!blocked && (RANK[next] > RANK[record.state] || (record.state === 'creating' && next === 'open'))) {
       this.db.prepare(`UPDATE invoices SET state = ?, settle_index = ?, amt_paid_msat = ?, add_index = COALESCE(add_index, ?),
         payment_request = COALESCE(payment_request, ?), updated_at = ? WHERE payment_hash = ?`)
         .run(next, invoice.settleIndex === 0n ? null : invoice.settleIndex, invoice.amtPaidMsat, invoice.addIndex,

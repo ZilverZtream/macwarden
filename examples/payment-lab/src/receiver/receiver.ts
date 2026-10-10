@@ -38,6 +38,29 @@ async function lookup(deps: ReceiverDeps, paymentHash: string): Promise<Invoice 
   }
 }
 
+/**
+ * When NotFound decides an invoice in `creating`. The state means "the create call
+ * may be in flight", and while it may be, a lookup that finds nothing proves
+ * nothing: LND can still create the invoice a moment later. So NotFound is
+ * conclusive only when the call is known to be over:
+ *
+ * - LND answered the create call with an error (the creator saw the answer), or
+ * - the intent was recorded longer ago than CREATION_WINDOW_MS. AddInvoice and
+ *   AddHoldInvoice use the REST client's default unary timeout (30 s), so a call
+ *   still pending after the window has been abandoned by its caller.
+ *
+ * Anything else (another process reconciling, the creator's own call timing out
+ * or losing its connection after the request was sent) leaves the invoice
+ * `creating`: the order keeps it as its live invoice, no replacement is issued,
+ * and a later pass decides. If LND's created answer still arrives after a
+ * not-created decision, markCreated records it.
+ */
+export const CREATION_WINDOW_MS = 120_000;
+
+function creationCutoff(): string {
+  return new Date(Date.now() - CREATION_WINDOW_MS).toISOString();
+}
+
 export type CreateOutcome =
   | { kind: 'created'; paymentHash: string; paymentRequest: string }
   | { kind: 'refused'; reason: string }
@@ -65,12 +88,19 @@ export async function createInvoice(deps: ReceiverDeps, input: { orderId: string
     if ('paymentHash' in created && created.paymentHash !== paymentHash) {
       throw new Error('LND created an invoice for a different payment hash');
     }
-    deps.store.markCreated(paymentHash, created.paymentRequest, created.addIndex);
+    const state = deps.store.markCreated(paymentHash, created.paymentRequest, created.addIndex);
+    if (state === 'not-created') return supersededCreation(paymentHash, input.orderId);
     deps.emit({ event: 'invoice-created', orderId: input.orderId, paymentHash, rpc: input.hold ? 'AddHoldInvoice' : 'AddInvoice' });
     return { kind: 'created', paymentHash, paymentRequest: created.paymentRequest };
   } catch (error) {
     return await resolveCreation(deps, paymentHash, error);
   }
+}
+
+/** LND created the invoice after it had been recorded not-created and the order got another live invoice. */
+function supersededCreation(paymentHash: string, orderId: string): CreateOutcome {
+  return { kind: 'unresolved', paymentHash, reason: `LND created invoice ${paymentHash} after it was recorded as not created, and order ${orderId} `
+    + 'already has another live invoice; cancel one of them (a settlement of either is still fulfilled and posted)' };
 }
 
 async function resolveCreation(deps: ReceiverDeps, paymentHash: string, error: unknown): Promise<CreateOutcome> {
@@ -80,13 +110,21 @@ async function resolveCreation(deps: ReceiverDeps, paymentHash: string, error: u
   }
   const found = await lookup(deps, paymentHash);
   if (found === 'not-found') {
-    deps.store.markNotCreated(paymentHash);
-    return { kind: 'not-created', paymentHash, reason: describeError(error) };
+    // Conclusive only if the call is over (see CREATION_WINDOW_MS): LND answered it with an error.
+    if (deps.store.markNotCreated(paymentHash, error instanceof LndError ? undefined : creationCutoff())) {
+      return { kind: 'not-created', paymentHash, reason: describeError(error) };
+    }
+    return { kind: 'unresolved', paymentHash, reason: `${describeError(error)}; LND has no invoice for the hash yet, but the create call may still `
+      + `reach it, so it stays creating; run "receiver reconcile" after ${CREATION_WINDOW_MS / 1000} s to decide it` };
   }
   if (found === 'unknown') {
     return { kind: 'unresolved', paymentHash, reason: `${describeError(error)}; run "receiver reconcile" to resolve it` };
   }
-  deps.store.markCreated(paymentHash, found.paymentRequest, found.addIndex);
+  const order = deps.store.invoice(paymentHash)?.orderId ?? '';
+  if (deps.store.markCreated(paymentHash, found.paymentRequest, found.addIndex) === 'not-created') {
+    apply(deps, found, 'create-call');
+    return supersededCreation(paymentHash, order);
+  }
   apply(deps, found, 'create-call');
   return { kind: 'created', paymentHash, paymentRequest: found.paymentRequest };
 }
@@ -158,7 +196,8 @@ export async function reconcileInvoices(deps: ReceiverDeps, onlyOrder?: string):
     const found = await lookup(deps, invoice.paymentHash);
     if (found === 'unknown') { unknown += 1; continue; }
     if (found === 'not-found') {
-      if (invoice.state === 'creating') { deps.store.markNotCreated(invoice.paymentHash); resolved += 1; } else unknown += 1;
+      // A creating invoice is decided only after the creation window: its create call may still be in flight.
+      if (invoice.state === 'creating' && deps.store.markNotCreated(invoice.paymentHash, creationCutoff())) resolved += 1; else unknown += 1;
       continue;
     }
     if (invoice.state === 'creating') deps.store.markCreated(invoice.paymentHash, found.paymentRequest, found.addIndex);
