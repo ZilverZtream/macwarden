@@ -1313,6 +1313,8 @@ function reconcileOracle(model, lnd, window, now) {
   const nodeOf = new Map();
   for (const item of model.records) if (item.type === 'run-start') nodeOf.set(item.run, item.node);
   const mine = model.records.filter(item => nodeOf.get(item.run) === NODE);
+  // A --since or --until before 1970-01-01T00:00:00Z is refused at Q1 (1.2.1, PF-2).
+  if ((window.sinceMs !== null && window.sinceMs < 0) || (window.untilMs !== null && window.untilMs < 0)) return { exit: 2 };
   if (window.sinceMs !== null && window.untilMs !== null && window.sinceMs > window.untilMs) return { exit: 2 };
   const until = window.untilMs ?? now;
   const since = window.sinceMs ?? Math.min(mine.length ? Date.parse(mine[0].time) : until, until);
@@ -1556,24 +1558,13 @@ export async function builtApi(distRoot = resolve('dist')) {
     run: reconcile.run, render: output.render, LndError: errors.LndError };
 }
 
-// The earliest instant a four-digit year renders (0000-01-01T00:00:00.000Z).
-const YEAR_ZERO = Date.parse('0000-01-01T00:00:00.000Z');
-const relativeMs = (value, now) => {
-  const match = typeof value === 'string' ? /^([1-9][0-9]{0,5})(m|h|d)$/.exec(value) : null;
-  return match ? Date.parse(now) - Number(match[1]) * { m: 60_000, h: 3_600_000, d: 86_400_000 }[match[2]] : null;
-};
 /**
  * Open defects this campaign found (see the campaign report); each is reproduced by the seeds it
  * lists there. A failure one of them explains is not a new finding; the command line still fails on it.
  */
 export const KNOWN_DEFECTS = [
-  // An upper-case invoice holding the Kelvin sign (U+212A) where a 'K' was: it lower-cases to the
-  // bech32 'k' and decodes, though the specification (and LND's zpay32) refuse non-ASCII characters.
-  { id: 'PF-1', target: 'facts', test: failure => failure.kind === 'specification' && failure.input?.invoiceDefect === 'homoglyph' },
-  // --since or --until <n>d reaching before the year 0: the window is printed as a six-digit year
-  // the reconcile schema refuses.
-  { id: 'PF-2', target: 'reconcile', test: failure => failure.kind === 'schema'
-    && [failure.input?.window?.since, failure.input?.window?.until].some(value => (relativeMs(value, failure.input.window.now) ?? Infinity) < YEAR_ZERO) },
+  // PF-1 (non-ASCII look-alike in an invoice) and PF-2 (a reconcile window before the year 0)
+  // were fixed in 1.2.1 and are no longer excused.
 ];
 export function knownDefect(failure) { return KNOWN_DEFECTS.find(item => item.target === failure.target && item.test(failure))?.id ?? null; }
 

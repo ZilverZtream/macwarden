@@ -156,7 +156,11 @@ it('PAYJ/bolt11 a checksum, character, case or padding error, or a missing p fie
 });
 
 it('PAYJ/bolt11 non-ASCII characters are invalid before case folding: Kelvin sign, long s, dotted and dotless I, fullwidth (PF-1)', () => {
-  const paymentHash = hash('pf1');
+  // A hash whose invoice has every substituted letter in its data part.
+  let n = 0;
+  const dataPart = (candidate: string) => candidate.slice(candidate.lastIndexOf('1') + 1);
+  while (!['k', 's', 'l', 'q'].every(letter => dataPart(invoice({ hash: hash(`pf1-${n}`), amount: '10u' })).includes(letter))) n++;
+  const paymentHash = hash(`pf1-${n}`);
   const text = invoice({ hash: paymentHash, amount: '10u' });
   const upper = text.toUpperCase();
   expect(decodeBolt11(upper)).toEqual({ paymentHash: paymentHash.toString('hex'), amountMsat: 1_000_000n });
@@ -171,7 +175,7 @@ it('PAYJ/bolt11 non-ASCII characters are invalid before case folding: Kelvin sig
     [text, 'q', 'ｑ'],
   ];
   for (const [base, ascii, lookalike] of swaps) {
-    const at = base.indexOf(ascii, base.lastIndexOf(base === upper ? '1' : '1') + 1);
+    const at = base.indexOf(ascii, base.lastIndexOf('1') + 1);
     expect(at, `${ascii} in the data part`).toBeGreaterThan(0);
     const swapped = `${base.slice(0, at)}${lookalike}${base.slice(at + 1)}`;
     expect(decodeBolt11(swapped), `U+${lookalike.charCodeAt(0).toString(16)}`).toBeNull();

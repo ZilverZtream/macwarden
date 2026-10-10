@@ -237,6 +237,32 @@ it('RECONCILE/relative windows and a payment journaled before the window is attr
   expect((later.result as ReconcileResult).lookups.attributedOutsideWindow).toBe(1);
 });
 
+it('RECONCILE/epoch a window reaching before 1970 is refused at Q1; a large valid window stays inside the schema (PF-2)', async () => {
+  const s = setup([start(0), line('registered', 1, { session: 1 }), line('alive', 3_590)]);
+  const lndOk = fakeLnd({});
+  for (const [args, message] of [
+    [['--since', '999999d'], '--since must not be before 1970-01-01T00:00:00Z'],
+    [['--since', '20736d'], '--since must not be before 1970-01-01T00:00:00Z'], // the clock, 2026-10-09T12:00Z, is 20,735.5 days after the epoch
+    [['--since', '1969-12-31T23:59:59Z'], '--since must not be before 1970-01-01T00:00:00Z'],
+    [['--since', '999999d', '--until', '999999h'], '--since must not be before 1970-01-01T00:00:00Z'],
+    [['--since', '0001-01-01T00:00:00Z', '--until', '1969-12-31T23:59:59.999Z'], '--since must not be before 1970-01-01T00:00:00Z'],
+    [['--until', '1969-12-31T23:59:59Z'], '--until must not be before 1970-01-01T00:00:00Z'],
+  ] as [string[], string][]) {
+    const output = await reconcile([...s.args, ...args, '--json'], lndOk);
+    expect(output.error, args.join(' ')).toMatchObject({ code: 2, step: 'Q1', message });
+    expectSchemaValid(output);
+  }
+  // The epoch itself is a valid start, and so is a relative window of decades.
+  for (const since of ['1970-01-01T00:00:00Z', '20000d']) {
+    const output = await reconcile([...s.args, '--since', since, '--json'], fakeLnd({}));
+    expect(output.error ?? null, since).toBeNull();
+    expectSchemaValid(output);
+    const result = output.result as ReconcileResult;
+    expect(Date.parse(result.window.since)).toBeGreaterThanOrEqual(0);
+    expect(result.coverage.gaps[0].from).toBe(result.window.since);
+  }
+});
+
 it('RECONCILE/steps arguments, permissions, the journal and LND failures stop at their step with nothing changed', async () => {
   const s = setup([start(0)]);
   const lndOk = fakeLnd({});
