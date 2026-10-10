@@ -1,0 +1,95 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "one-pending-payment-per-operation",
+  "rule": "One operation has at most one pending payment (intent, submitting, in_flight or uncertain).",
+  "message": "hand-written scenario (no violation recorded)",
+  "seed": null,
+  "case": null,
+  "config": {
+    "scale": "small",
+    "budget": true,
+    "limit": "10000"
+  },
+  "failingStep": -1,
+  "originalSteps": 15,
+  "events": [
+    {
+      "t": "intent",
+      "p": "p0",
+      "op": 0,
+      "inv": 0
+    },
+    {
+      "t": "submit",
+      "p": "p0",
+      "op": 0,
+      "inv": 0
+    },
+    {
+      "t": "intent",
+      "p": "p1",
+      "op": 0,
+      "inv": 1
+    },
+    {
+      "t": "send.arrive",
+      "pick": 0
+    },
+    {
+      "t": "lnd.payment",
+      "pick": 0,
+      "what": "fail"
+    },
+    {
+      "t": "send.deliver",
+      "pick": 0
+    },
+    {
+      "t": "send.deliver",
+      "pick": 0
+    },
+    {
+      "t": "intent",
+      "p": "p1",
+      "op": 0,
+      "inv": 1
+    },
+    {
+      "t": "retry",
+      "p": "p0",
+      "op": 0
+    },
+    {
+      "t": "intent",
+      "p": "p0",
+      "op": 0,
+      "inv": 2
+    },
+    {
+      "t": "submit",
+      "p": "p1",
+      "op": 0,
+      "inv": 1
+    },
+    {
+      "t": "send.arrive",
+      "pick": 0
+    },
+    {
+      "t": "lnd.payment",
+      "pick": 0,
+      "what": "succeed"
+    },
+    {
+      "t": "send.deliver",
+      "pick": 0
+    },
+    {
+      "t": "send.deliver",
+      "pick": 0
+    }
+  ],
+  "states": {},
+  "note": "A replacement invoice is refused while the operation's payment is pending, admitted once LND failed it, and blocks a retry and a third invoice while it is pending in turn."
+}

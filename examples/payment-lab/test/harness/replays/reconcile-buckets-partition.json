@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "reconcile-buckets-partition",
+  "rule": "receiver reconcile counts every invoice it covers exactly once (resolved + open + unknown = targets), and exits 75 iff unknown > 0, else 0.",
+  "message": "reconcile counted 0 (resolved 0, open 0, unknown 0) for 1 target invoice(s)",
+  "seed": 3,
+  "case": 0,
+  "config": {
+    "scale": "huge",
+    "budget": true,
+    "limit": "9223372036854775807"
+  },
+  "failingStep": 1,
+  "originalSteps": 60,
+  "events": [
+    {
+      "t": "create",
+      "p": "p0",
+      "order": 0,
+      "hold": false
+    }
+  ],
+  "states": {
+    "targets": [
+      "o0#1"
+    ],
+    "result": {
+      "resolved": 0,
+      "open": 0,
+      "unknown": 0
+    },
+    "after": {
+      "invoices": {
+        "o0#1": {
+          "order": "o0",
+          "state": "not-created",
+          "amount": "5000"
+        }
+      },
+      "orders": {
+        "o0": "awaiting-payment"
+      },
+      "fulfillments": [],
+      "ledger": [],
+      "cursor": {
+        "settle": "0",
+        "add": "0"
+      }
+    }
+  }
+}

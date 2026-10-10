@@ -1,0 +1,157 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "terminal-states-final",
+  "rule": "Succeeded is final and a completed operation stays completed; failed changes only by a retry (to intent) or by LND reporting success.",
+  "message": "applyUpdate moved failed payment op0/i0 to in_flight (only a retry or LND's success may)",
+  "seed": 3,
+  "case": 2,
+  "config": {
+    "scale": "huge",
+    "budget": true,
+    "limit": "9223372036854775807"
+  },
+  "failingStep": 10,
+  "originalSteps": 60,
+  "events": [
+    {
+      "t": "intent",
+      "p": "p0",
+      "op": 0,
+      "inv": 0
+    },
+    {
+      "t": "submit",
+      "p": "p0",
+      "op": 0,
+      "inv": 0
+    },
+    {
+      "t": "reconcile",
+      "p": "p0",
+      "op": 0,
+      "inv": 0
+    },
+    {
+      "t": "track.deliver",
+      "pick": 0.5
+    },
+    {
+      "t": "send.arrive",
+      "pick": 0.5
+    },
+    {
+      "t": "submit",
+      "p": "p1",
+      "op": 0,
+      "inv": 0
+    },
+    {
+      "t": "lnd.payment",
+      "pick": 0.5,
+      "what": "fail"
+    },
+    {
+      "t": "send.arrive",
+      "pick": 0.5
+    },
+    {
+      "t": "send.deliver",
+      "pick": 0.25
+    },
+    {
+      "t": "send.deliver",
+      "pick": 0.25
+    },
+    {
+      "t": "send.deliver",
+      "pick": 0.5
+    }
+  ],
+  "states": {
+    "call": {
+      "proc": "p1",
+      "method": "applyUpdate",
+      "args": [
+        {
+          "paymentHash": "op0/i0",
+          "status": "IN_FLIGHT",
+          "htlcs": 0
+        },
+        "SendPaymentV2"
+      ]
+    },
+    "before": {
+      "payments": {
+        "op0/i0": {
+          "op": "op0",
+          "state": "failed",
+          "subs": 2,
+          "amount": "4611686018427387904"
+        }
+      },
+      "operations": {
+        "op0": "failed"
+      },
+      "reservations": [
+        {
+          "id": "1",
+          "budget": "B",
+          "hash": "op0/i0",
+          "principal": "4611686018427387904",
+          "allowance": "1000",
+          "state": "released"
+        }
+      ],
+      "ledger": [],
+      "events": {
+        "op0/i0": [
+          "intent-recorded",
+          "submit",
+          "not-initiated",
+          "in-flight",
+          "failed"
+        ]
+      },
+      "budgets": {
+        "B": "9223372036854775807"
+      }
+    },
+    "after": {
+      "payments": {
+        "op0/i0": {
+          "op": "op0",
+          "state": "in_flight",
+          "subs": 2,
+          "amount": "4611686018427387904"
+        }
+      },
+      "operations": {
+        "op0": "open"
+      },
+      "reservations": [
+        {
+          "id": "1",
+          "budget": "B",
+          "hash": "op0/i0",
+          "principal": "4611686018427387904",
+          "allowance": "1000",
+          "state": "released"
+        }
+      ],
+      "ledger": [],
+      "events": {
+        "op0/i0": [
+          "intent-recorded",
+          "submit",
+          "not-initiated",
+          "in-flight",
+          "failed"
+        ]
+      },
+      "budgets": {
+        "B": "9223372036854775807"
+      }
+    }
+  }
+}

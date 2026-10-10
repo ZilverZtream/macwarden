@@ -1,0 +1,129 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "no-internal-error",
+  "rule": "Store calls and workflows on a live process never throw (LND is truthful; the only refusal by exception is a FAILED for a payment already succeeded).",
+  "message": "receiver applyInvoice threw: UNIQUE constraint failed: invoices.order_id",
+  "seed": 3,
+  "case": 3,
+  "config": {
+    "scale": "small",
+    "budget": false,
+    "limit": "10000"
+  },
+  "failingStep": 8,
+  "originalSteps": 60,
+  "events": [
+    {
+      "t": "listen",
+      "p": "p1"
+    },
+    {
+      "t": "create",
+      "p": "p1",
+      "order": 0,
+      "hold": true
+    },
+    {
+      "t": "rreconcile",
+      "p": "p0",
+      "order": null,
+      "cli": false
+    },
+    {
+      "t": "answer",
+      "kind": "lookup",
+      "pick": 0.5,
+      "mode": "ok"
+    },
+    {
+      "t": "create",
+      "p": "p0",
+      "order": 0,
+      "hold": true
+    },
+    {
+      "t": "answer",
+      "kind": "create",
+      "pick": 0.75,
+      "mode": "ok"
+    },
+    {
+      "t": "answer",
+      "kind": "create",
+      "pick": 0.5,
+      "mode": "ok"
+    },
+    {
+      "t": "sub.deliver",
+      "pick": 0.75
+    },
+    {
+      "t": "sub.deliver",
+      "pick": 0.75
+    }
+  ],
+  "states": {
+    "call": {
+      "proc": "p1",
+      "method": "applyInvoice",
+      "args": [
+        {
+          "paymentHash": "o0#1",
+          "state": "OPEN",
+          "settleIndex": "0",
+          "amtPaidMsat": "0",
+          "htlcs": 0
+        },
+        "subscription"
+      ],
+      "error": "UNIQUE constraint failed: invoices.order_id"
+    },
+    "before": {
+      "invoices": {
+        "o0#1": {
+          "order": "o0",
+          "state": "not-created",
+          "amount": "5000"
+        },
+        "o0#2": {
+          "order": "o0",
+          "state": "open",
+          "amount": "5000"
+        }
+      },
+      "orders": {
+        "o0": "awaiting-payment"
+      },
+      "fulfillments": [],
+      "ledger": [],
+      "cursor": {
+        "settle": "0",
+        "add": "1"
+      }
+    },
+    "after": {
+      "invoices": {
+        "o0#1": {
+          "order": "o0",
+          "state": "not-created",
+          "amount": "5000"
+        },
+        "o0#2": {
+          "order": "o0",
+          "state": "open",
+          "amount": "5000"
+        }
+      },
+      "orders": {
+        "o0": "awaiting-payment"
+      },
+      "fulfillments": [],
+      "ledger": [],
+      "cursor": {
+        "settle": "0",
+        "add": "1"
+      }
+    }
+  }
+}

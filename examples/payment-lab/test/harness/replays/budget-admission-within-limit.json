@@ -1,0 +1,60 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "budget-admission-within-limit",
+  "rule": "Admission follows bigint arithmetic (admitted iff principal + fee allowance <= limit - held - consumed), never throws on large sums, budgetStatus equals the exact sums, and held + consumed stays within the limit unless LND reported success after a recorded failure.",
+  "message": "recordIntent threw: BigInt value is too large to bind.",
+  "seed": 3,
+  "case": 0,
+  "config": {
+    "scale": "huge",
+    "budget": true,
+    "limit": "9223372036854775807"
+  },
+  "failingStep": 0,
+  "originalSteps": 60,
+  "events": [
+    {
+      "t": "intent",
+      "p": "p1",
+      "op": 1,
+      "inv": 0
+    }
+  ],
+  "states": {
+    "call": {
+      "proc": "p1",
+      "method": "recordIntent",
+      "args": [
+        {
+          "operationId": "op1",
+          "paymentHash": "op1/i0",
+          "amountMsat": "4611686018427387905",
+          "feeLimitMsat": "4611686018427387904",
+          "budgetId": "B"
+        }
+      ],
+      "error": "BigInt value is too large to bind."
+    },
+    "before": {
+      "payments": {},
+      "operations": {},
+      "reservations": [],
+      "ledger": [],
+      "events": {},
+      "budgets": {
+        "B": "9223372036854775807"
+      }
+    },
+    "after": {
+      "payments": {},
+      "operations": {},
+      "reservations": [],
+      "ledger": [],
+      "events": {},
+      "budgets": {
+        "B": "9223372036854775807"
+      }
+    }
+  }
+}

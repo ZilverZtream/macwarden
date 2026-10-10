@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "canceled-final-for-open-accepted",
+  "rule": "A canceled invoice (or a late invoice LND was seen to cancel) is never made live again by a replayed OPEN or ACCEPTED or a delayed create answer.",
+  "message": "hand-written scenario (no violation recorded)",
+  "seed": null,
+  "case": null,
+  "config": {
+    "scale": "small",
+    "budget": false,
+    "limit": "10000"
+  },
+  "failingStep": -1,
+  "originalSteps": 7,
+  "events": [
+    {
+      "t": "create",
+      "p": "p0",
+      "order": 0,
+      "hold": true
+    },
+    {
+      "t": "answer",
+      "kind": "create",
+      "pick": 0,
+      "mode": "ok"
+    },
+    {
+      "t": "rreconcile",
+      "p": "p0",
+      "order": 0,
+      "cli": false
+    },
+    {
+      "t": "invoice",
+      "what": "expire",
+      "pick": 0
+    },
+    {
+      "t": "rreconcile",
+      "p": "p1",
+      "order": 0,
+      "cli": false
+    },
+    {
+      "t": "answer",
+      "kind": "lookup",
+      "pick": 0.75,
+      "mode": "ok"
+    },
+    {
+      "t": "answer",
+      "kind": "lookup",
+      "pick": 0.25,
+      "mode": "stale"
+    }
+  ],
+  "states": {},
+  "note": "Two reconciliations look a hold invoice up around its expiry: the later lookup records it canceled, then the earlier one's delayed answer still says OPEN; the record stays canceled."
+}

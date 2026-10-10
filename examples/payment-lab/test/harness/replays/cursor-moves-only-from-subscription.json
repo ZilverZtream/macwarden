@@ -1,0 +1,95 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "cursor-moves-only-from-subscription",
+  "rule": "The subscription cursor moves only with subscription deliveries (to the highest index seen) or an explicit cursor-set.",
+  "message": "hand-written scenario (no violation recorded)",
+  "seed": null,
+  "case": null,
+  "config": {
+    "scale": "small",
+    "budget": false,
+    "limit": "10000"
+  },
+  "failingStep": -1,
+  "originalSteps": 15,
+  "events": [
+    {
+      "t": "listen",
+      "p": "p0"
+    },
+    {
+      "t": "create",
+      "p": "p0",
+      "order": 0,
+      "hold": false
+    },
+    {
+      "t": "answer",
+      "kind": "create",
+      "pick": 0,
+      "mode": "ok"
+    },
+    {
+      "t": "invoice",
+      "what": "pay",
+      "pick": 0
+    },
+    {
+      "t": "sub.deliver",
+      "pick": 0
+    },
+    {
+      "t": "sub.deliver",
+      "pick": 0
+    },
+    {
+      "t": "create",
+      "p": "p1",
+      "order": 1,
+      "hold": false
+    },
+    {
+      "t": "answer",
+      "kind": "create",
+      "pick": 0,
+      "mode": "ok"
+    },
+    {
+      "t": "invoice",
+      "what": "pay",
+      "pick": 0
+    },
+    {
+      "t": "rreconcile",
+      "p": "p1",
+      "order": 1,
+      "cli": false
+    },
+    {
+      "t": "answer",
+      "kind": "lookup",
+      "pick": 0,
+      "mode": "ok"
+    },
+    {
+      "t": "cursor-set",
+      "p": "p0",
+      "pick": 0.5
+    },
+    {
+      "t": "kill",
+      "p": "p0"
+    },
+    {
+      "t": "listen",
+      "p": "p0"
+    },
+    {
+      "t": "sub.deliver",
+      "pick": 0
+    }
+  ],
+  "states": {},
+  "note": "The listener's deliveries move the cursor; a settlement learned by lookup does not; the cursor is set back and a restarted listener receives the second settlement again."
+}
