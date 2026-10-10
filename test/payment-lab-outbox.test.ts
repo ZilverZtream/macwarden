@@ -495,7 +495,7 @@ describe('payment lab outbox: upgrading a database without an outbox', () => {
     store.db.exec('DROP TABLE outbox; PRAGMA user_version = 3');
     store.close();
     const upgraded = receiverStore(file);
-    expect(upgraded.db.prepare('PRAGMA user_version').all()[0]?.user_version).toBe(4n);
+    expect(upgraded.db.prepare('PRAGMA user_version').all()[0]?.user_version).toBe(5n);
     expect(upgraded.outbox()).toEqual([expect.objectContaining({ idempotencyKey: `ORD-M:${hash}`, state: 'pending',
       payload: { orderId: 'ORD-M', paymentHash: hash, amountMsat: '1000', settleIndex: '3', ledgerEntryId: entryId } })]);
     const effects = target('migrate-receiver-receipts');
@@ -516,7 +516,7 @@ describe('payment lab outbox: upgrading a database without an outbox', () => {
     store.db.exec('DROP TABLE outbox; PRAGMA user_version = 6');
     store.close();
     const upgraded = payerStore(file);
-    expect(upgraded.db.prepare('PRAGMA user_version').all()[0]?.user_version).toBe(7n);
+    expect(upgraded.db.prepare('PRAGMA user_version').all()[0]?.user_version).toBe(8n);
     expect(upgraded.outbox().map(row => [row.idempotencyKey, row.state])).toEqual([[`OP-M:${preimageFor('mig-a').paymentHash}`, 'pending']]);
   });
 });

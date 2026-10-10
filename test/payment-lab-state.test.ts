@@ -1203,3 +1203,204 @@ describe('payment lab one settlement per payment hash', () => {
     await balancedAgainst(store, [invoice(full, 'SETTLED', 1000n, 1n), invoice(under, 'SETTLED', 999n, 2n)]);
   });
 });
+
+/**
+ * Audit 5a8ddb1 (functional, against an older tree): the exact orderings of N02 and N03 not covered
+ * above (N04 is L3, N05 is L4), N13 (an initialization failure closes the handle), a database newer
+ * than the code is refused, the lookup indexes, and two conditional store invariants: the budget
+ * consumes what the ledger posts when LND's value differs from the invoice, and a completed
+ * operation's replacement is never reverted to intent or claimed.
+ */
+describe('payment lab audit 5a8ddb1', () => {
+  /** node:sqlite and the lab's openDatabase, loaded the way the helpers load the lab (no typed import of the example's sources). */
+  interface RawHandle { isOpen: boolean; exec(sql: string): void; prepare(sql: string): { all(...params: unknown[]): Record<string, unknown>[] }; close(): void }
+  type OpenDatabase = (path: string, migrations: readonly (string | ((db: RawHandle) => void))[]) => RawHandle;
+  const sqliteModule = '../examples/payment-lab/src/store/sqlite.ts';
+  const loadSqlite = async (): Promise<{ openDatabase: OpenDatabase }> => await import(/* @vite-ignore */ sqliteModule) as { openDatabase: OpenDatabase };
+  const rawOpen = async (path: string): Promise<RawHandle> => {
+    const { DatabaseSync } = await import('node:sqlite') as unknown as { DatabaseSync: new (path: string) => RawHandle };
+    return new DatabaseSync(path);
+  };
+  const version = (db: { prepare(sql: string): { all(): Record<string, unknown>[] } }): unknown => db.prepare('PRAGMA user_version').all()[0]?.user_version;
+  const plan = (db: { prepare(sql: string): { all(...params: unknown[]): Record<string, unknown>[] } }, sql: string): string =>
+    db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all('x').map(row => String(row.detail)).join('\n');
+
+  it('N02: retry takes the replacement also when the clock went back between the two payments', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const store = payerStore('n02-clock.db');
+      store.setBudget('B1', 1100n);
+      store.setBudget('B2', 1100n);
+      const pay = (label: string, budgetId: string): string => {
+        const { paymentHash } = preimageFor(label);
+        expect(store.recordIntent({ operationId: 'OP-N02', kind: 'payout', paymentRequest: `lnbcrt-${label}`, invoice: decoded(paymentHash, 1000n),
+          feeLimitMsat: 100n, maxParts: 1, budgetId }).outcome).toBe('recorded');
+        expect(store.claimForSubmission(paymentHash)).toBe(true);
+        store.applyUpdate(payment(label, 'FAILED'), 'SendPaymentV2', 1);
+        return paymentHash;
+      };
+      vi.setSystemTime(new Date('2026-10-10T12:00:00.000Z'));
+      pay('n02-original', 'B1');
+      // The wall clock is set back a minute: the replacement's timestamps are older than the original's.
+      vi.setSystemTime(new Date('2026-10-10T11:59:00.000Z'));
+      const newer = pay('n02-replacement', 'B2');
+      expect(store.prepareRetry('OP-N02')).toMatchObject({ outcome: 'recorded', payment: { paymentHash: newer } });
+      expect(store.budgetStatus('B2')).toMatchObject({ heldMsat: 1100n });
+      expect(store.budgetStatus('B1')).toMatchObject({ heldMsat: 0n });
+      expect(store.operation('OP-N02')?.budgetId).toBe('B2');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('N03: a CANCELED lookup of a late invoice LND canceled, after its replacement was not created, leaves the order open', () => {
+    const store = receiverStore('n03.db');
+    const orderId = 'ORD-N03';
+    const late = preimageFor('n03-late');
+    const other = preimageFor('n03-other');
+    expect(store.recordInvoiceIntent({ orderId, amountMsat: 1000n, kind: 'standard', ...late }).outcome).toBe('recorded');
+    expect(store.markNotCreated(late.paymentHash)).toBe(true);
+    expect(store.recordInvoiceIntent({ orderId, amountMsat: 1000n, kind: 'standard', ...other }).outcome).toBe('recorded');
+    expect(store.applyInvoice(invoice(late.paymentHash, 'OPEN'), 'subscription')).toBe('late-invoice');
+    expect(store.applyInvoice(invoice(late.paymentHash, 'CANCELED'), 'lookup')).toBe('state-updated');
+    expect(store.markNotCreated(other.paymentHash)).toBe(true);
+    // The delayed create answer, the stale OPEN and a repeated CANCELED: none revives A or cancels the order.
+    expect(store.markCreated(late.paymentHash, 'lnbcrt-n03-late', 1n)).toBe('not-created');
+    expect(store.applyInvoice(invoice(late.paymentHash, 'OPEN'), 'subscription')).toBe('unchanged');
+    expect(store.applyInvoice(invoice(late.paymentHash, 'CANCELED'), 'lookup')).toBe('unchanged');
+    expect(store.invoice(late.paymentHash)).toMatchObject({ state: 'not-created', lateLndState: 'CANCELED' });
+    expect(store.order(orderId)?.state).toBe('awaiting-payment');
+    const next = preimageFor('n03-next');
+    expect(store.recordInvoiceIntent({ orderId, amountMsat: 1000n, kind: 'standard', ...next }).outcome).toBe('recorded');
+  });
+
+  it('N13: a failing migration rolls back and closes the database handle; the original error propagates', async () => {
+    const { openDatabase } = await loadSqlite();
+    const file = dir.path('n13.db');
+    let handle: RawHandle | undefined;
+    expect(() => openDatabase(file, ['CREATE TABLE kept (x INTEGER);', db => { handle = db; throw new Error('migration 2 failed'); }]))
+      .toThrow('migration 2 failed');
+    expect(handle?.isOpen).toBe(false);
+    const raw = await rawOpen(file);
+    try {
+      expect(version(raw)).toBe(0);
+      expect(raw.prepare(`SELECT name FROM sqlite_master WHERE name = 'kept'`).all()).toEqual([]);
+    } finally {
+      raw.close();
+    }
+  });
+
+  it('a database newer than the code is refused, naming both versions, and left unchanged', async () => {
+    const { createHash } = await import('node:crypto');
+    const { readFileSync } = await import('node:fs');
+    const file = dir.path('newer.db');
+    const store = payerStore(file);
+    budgeted(store, 'newer', 'OP-NEWER');
+    const known = Number(version(store.db));
+    store.db.exec(`PRAGMA user_version = ${known + 1}`);
+    store.close();
+    const digest = (): string => createHash('sha256').update(readFileSync(file)).digest('hex');
+    const before = digest();
+    expect(() => new lab.PayerStore(file)).toThrow(new RegExp(`schema version ${known + 1} is newer than this code supports \\(${known}\\)`));
+    expect(digest()).toBe(before);
+    const { openDatabase } = await loadSqlite();
+    let ran = false;
+    expect(() => openDatabase(file, [() => { ran = true; }])).toThrow(/schema version \d+ is newer than this code supports \(1\)/);
+    expect(ran).toBe(false);
+    expect(digest()).toBe(before);
+  });
+
+  it('lookup indexes: payments and events by payment or operation, invoices by order, deliveries by payment; rerunnable', () => {
+    const payerFile = dir.path('indexes-payer.db');
+    const p = payerStore(payerFile);
+    expect(plan(p.db, 'SELECT * FROM payments WHERE operation_id = ? ORDER BY rowid')).toMatch(/^SEARCH payments USING INDEX payments_by_operation \(operation_id=\?\)$/);
+    expect(plan(p.db, 'SELECT at, kind, detail FROM payment_events WHERE payment_hash = ? ORDER BY event_id'))
+      .toMatch(/^SEARCH payment_events USING INDEX payment_events_by_payment \(payment_hash=\?\)$/);
+    const r = receiverStore('indexes-receiver.db');
+    expect(plan(r.db, 'SELECT * FROM invoices WHERE order_id = ? ORDER BY created_at, rowid')).toMatch(/^SEARCH invoices USING INDEX invoices_by_order \(order_id=\?\)$/);
+    expect(plan(r.db, 'SELECT * FROM deliveries WHERE payment_hash = ? ORDER BY delivery_id'))
+      .toMatch(/^SEARCH deliveries USING INDEX deliveries_by_payment \(payment_hash=\?\)$/);
+    // The methods still answer through them.
+    const hash = budgeted(p, 'indexes', 'OP-IDX');
+    expect(p.events(hash).map(item => item.kind)).toEqual(['intent-recorded']);
+    // Reopening changes nothing; a database rewound to the previous version runs the step again without error.
+    const payerVersion = version(p.db);
+    p.db.exec(`PRAGMA user_version = ${Number(payerVersion) - 1}`);
+    p.close();
+    const reopened = payerStore(payerFile);
+    expect(version(reopened.db)).toBe(payerVersion);
+    expect(reopened.db.prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('payments_by_operation', 'payment_events_by_payment')`).all())
+      .toHaveLength(2);
+    reopened.close();
+    expect(version(payerStore(payerFile).db)).toBe(payerVersion);
+  });
+
+  /** A SUCCEEDED for a budgeted 1000 msat intent (fee limit 100) on which LND reports `valueMsat` and a fee of 1. */
+  async function succeededWith(file: string, valueMsat: bigint, failFirst = false): Promise<{ store: PayerStore; hash: string }> {
+    const store = payerStore(file);
+    const hash = budgeted(store, file, `OP-${file}`);
+    expect(store.claimForSubmission(hash)).toBe(true);
+    if (failFirst) store.applyUpdate(payment(file, 'FAILED'), 'SendPaymentV2', 1);
+    const success = { ...payment(file, 'SUCCEEDED', valueMsat), feeMsat: 1n };
+    expect(store.applyUpdate(success, 'TrackPaymentV2', 1).state).toBe('succeeded');
+    const result = await lab.verifyLedger(store);
+    expect(result).toMatchObject({ balanced: true, unbalancedEntries: [], invalidEntries: [] });
+    const budget = result.accounts.find(account => account.account === 'budget:B');
+    // The budget's account, its records and the ledger's principal plus fee agree.
+    expect(budget).toMatchObject({ computed: valueMsat + 1n, records: valueMsat + 1n });
+    expect(store.ledger(`OP-${file}`).map(item => item.amountMsat)).toEqual([valueMsat, 1n]);
+    return { store, hash };
+  }
+
+  it('an accepted SUCCEEDED above the invoice amount consumes the actual principal and records the overrun', async () => {
+    const { store, hash } = await succeededWith('amount-above.db', 1500n);
+    expect(store.budgetStatus('B')).toEqual({ budgetId: 'B', limitMsat: 1100n, heldMsat: 0n, consumedMsat: 1501n, availableMsat: -401n });
+    const kinds = store.events(hash).map(item => item.kind);
+    expect(kinds).toEqual(expect.arrayContaining(['amount-mismatch', 'budget-actual-principal', 'budget-overrun']));
+    expect(JSON.parse(store.events(hash).find(item => item.kind === 'budget-overrun')?.detail ?? '{}')).toMatchObject({ overMsat: '401' });
+  });
+
+  it('an accepted SUCCEEDED below the invoice amount consumes the actual principal; no overrun', async () => {
+    const { store, hash } = await succeededWith('amount-below.db', 500n);
+    expect(store.budgetStatus('B')).toMatchObject({ heldMsat: 0n, consumedMsat: 501n, availableMsat: 599n });
+    const kinds = store.events(hash).map(item => item.kind);
+    expect(kinds).toEqual(expect.arrayContaining(['amount-mismatch', 'budget-actual-principal']));
+    expect(kinds).not.toContain('budget-overrun');
+  });
+
+  it('a SUCCEEDED after a recorded failure, above the invoice amount, also consumes the actual principal', async () => {
+    const { store } = await succeededWith('amount-after-failure.db', 1500n, true);
+    expect(store.budgetStatus('B')).toMatchObject({ heldMsat: 0n, consumedMsat: 1501n });
+  });
+
+  it('a replacement of an operation another payment completed is withdrawn on NotFound, never reverted to intent or claimed', async () => {
+    const store = payerStore('completed-invariant.db');
+    store.setBudget('B', 10_000n);
+    const first = preimageFor('completed-first').paymentHash;
+    expect(store.recordIntent({ operationId: 'OP-DONE', kind: 'payout', paymentRequest: 'lnbcrt-first', invoice: decoded(first, 1000n),
+      feeLimitMsat: 100n, maxParts: 1, budgetId: 'B' }).outcome).toBe('recorded');
+    expect(store.claimForSubmission(first)).toBe(true);
+    store.applyUpdate(payment('completed-first', 'FAILED'), 'SendPaymentV2', 1);
+    expect(replacement(store, 'OP-DONE')).toBe('recorded');
+    const second = preimageFor('OP-DONE-replacement').paymentHash;
+    expect(store.claimForSubmission(second)).toBe(true);
+    expect(store.markUncertain(second, 'connection lost', 1)).toBe('uncertain');
+    // LND reports the first payment succeeded after all: the operation is completed; the replacement may have been sent.
+    store.applyUpdate(payment('completed-first', 'SUCCEEDED'), 'TrackPaymentV2', 1);
+    expect(store.operation('OP-DONE')?.state).toBe('completed');
+    // LND has no payment for the replacement: it is withdrawn, its reservation released, not put back to intent.
+    const deps = payer(store);
+    deps.api.track.push(notFound);
+    expect(await lab.reconcile(deps, second)).toMatchObject({ kind: 'failed', reason: expect.stringMatching(/^WITHDRAWN: operation OP-DONE was paid by payment /) as string });
+    expect(store.payment(second)).toMatchObject({ state: 'failed' });
+    expect(store.claimForSubmission(second)).toBe(false);
+    expect(store.budgetStatus('B')).toMatchObject({ heldMsat: 0n, consumedMsat: 1010n });
+    // Direct store calls: a revert finds nothing to revert; an intent of a completed operation (written by hand) is not claimed but withdrawn.
+    expect(store.markNotInitiated(second, 'NotFound', 1)).toBe('unchanged');
+    store.db.exec(`UPDATE payments SET state = 'intent' WHERE payment_hash = '${second}'`);
+    expect(store.claimForSubmission(second)).toBe(false);
+    expect(store.payment(second)).toMatchObject({ state: 'failed', submissions: 1 });
+    expect(store.events(second).map(item => item.kind).filter(kind => kind === 'submit')).toHaveLength(1);
+    expect(await lab.verifyLedger(store)).toMatchObject({ balanced: true, invalidEntries: [] });
+  });
+});

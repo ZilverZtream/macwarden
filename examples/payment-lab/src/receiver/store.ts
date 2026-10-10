@@ -90,7 +90,12 @@ ALTER TABLE invoices ADD COLUMN late_lnd_state TEXT;
 // entries and the table is dropped; see migrateReceiverLedger for the counter-account.
 migrateReceiverLedger,
 // 4: the transactional outbox (src/outbox/); a fulfill-order row for every fulfillment already recorded.
-migrateReceiverOutbox];
+migrateReceiverOutbox, `
+-- 5: lookup indexes. invoicesForOrder (show, explain, reconcile --order) scanned invoices and sorted them;
+-- deliveries (the timeline) scanned every delivery. Both now read in their output order.
+CREATE INDEX IF NOT EXISTS invoices_by_order ON invoices (order_id, created_at);
+CREATE INDEX IF NOT EXISTS deliveries_by_payment ON deliveries (payment_hash, delivery_id);
+`];
 
 export type InvoiceRecordState = 'creating' | 'open' | 'accepted' | 'settled' | 'canceled' | 'not-created';
 export type DeliverySource = 'subscription' | 'lookup' | 'single-subscription' | 'settle-call' | 'create-call';

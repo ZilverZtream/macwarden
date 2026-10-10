@@ -26,21 +26,45 @@ const BUSY_TIMEOUT_MS = 15_000;
  */
 export type Migration = string | ((db: DatabaseSync) => void);
 
+/**
+ * Opens the store's database and brings its schema to `migrations.length`. A database whose
+ * user_version is newer than the migrations this code knows (written by a later version) is
+ * refused before anything is written: forward compatibility is not supported. A failure here
+ * (a PRAGMA, a migration, the version check) closes the handle before the error propagates,
+ * because the caller never gets the handle to close.
+ */
 export function openDatabase(path: string, migrations: readonly Migration[]): DatabaseSync {
   // Create the file owner-only before SQLite does; SQLite gives -wal and -shm the same mode.
   closeSync(openSync(path, 'a', 0o600));
   const db = new DatabaseSync(path, { timeout: BUSY_TIMEOUT_MS, readBigInts: true, enableForeignKeyConstraints: true });
-  db.exec('PRAGMA journal_mode = WAL');
-  db.exec('PRAGMA synchronous = FULL');
-  immediate(db, () => {
-    const version = Number(int(db.prepare('PRAGMA user_version').get() ?? {}, 'user_version'));
-    for (let index = version; index < migrations.length; index += 1) {
-      const step = migrations[index] ?? '';
-      if (typeof step === 'string') db.exec(step); else step(db);
-    }
-    if (version < migrations.length) db.exec(`PRAGMA user_version = ${migrations.length}`);
-  });
+  try {
+    // Read before the journal-mode PRAGMA, which converts the file to WAL: a newer database is left as it was.
+    refuseNewer(db, migrations.length);
+    db.exec('PRAGMA journal_mode = WAL');
+    db.exec('PRAGMA synchronous = FULL');
+    immediate(db, () => {
+      // Read again under the write lock: another process may have migrated the file meanwhile.
+      const version = refuseNewer(db, migrations.length);
+      for (let index = version; index < migrations.length; index += 1) {
+        const step = migrations[index] ?? '';
+        if (typeof step === 'string') db.exec(step); else step(db);
+      }
+      if (version < migrations.length) db.exec(`PRAGMA user_version = ${migrations.length}`);
+    });
+  } catch (error) {
+    try { db.close(); } catch { /* the original error is the one to report */ }
+    throw error;
+  }
   return db;
+}
+
+/** The database's schema version; throws if it is newer than `known`, the number of migrations this code has. */
+function refuseNewer(db: DatabaseSync, known: number): number {
+  const version = Number(int(db.prepare('PRAGMA user_version').get() ?? {}, 'user_version'));
+  if (version > known) {
+    throw new Error(`database schema version ${version} is newer than this code supports (${known}); it was written by a later version, and is left unchanged`);
+  }
+  return version;
 }
 
 /** Runs `work` in one write transaction; any throw rolls it back. */
