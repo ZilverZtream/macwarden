@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { run as reconcileRun } from '../src/commands/reconcile.js';
@@ -427,7 +427,7 @@ it('PAYJ/time a clock that returns NaN or jumps past the year 9999 never crashes
     ['throws', () => { throw new Error('no clock'); }]] as const) {
     const refused = join(dir, `${name}.journal`);
     await expect(openJournal(refused, { clock })).rejects.toThrow(new JournalError('cannot open payment journal: the system clock is invalid'));
-    expect(readFileSync(refused, 'utf8')).toBe('');
+    expect(existsSync(refused)).toBe(false); // refused before anything is created
   }
 });
 
