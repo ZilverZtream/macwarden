@@ -1,7 +1,7 @@
 import { endpoint, connectionProblem, flagProblem, nodeInfo, drift, listIds, failureDetails, readBoundedFile, readOnlineCredential, onlineAdapter, onlineWarnings, connectionSettings } from '../online.js';
 import * as nodeFs from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { isProtectedPath, outputNameProblem } from '../protected-path.js';
+import { isProtectedPath, outputNameProblem, resolveUnprotectedPath } from '../protected-path.js';
 import { unsafeNodeDiagnostics } from '../environment.js';
 import { decodeMacaroon, parseTimeBefore } from '../decode/index.js';
 import { type InputIO } from '../input/index.js';
@@ -12,7 +12,7 @@ import { inventoryResult, type InventoryResult, type OutputResult } from '../out
 import { readUsage, usagePath, type UsageStore } from '../watch/usage.js';
 import { buildAccessReview, formatAccessReview, REPORT_FORMATS, type ReportFormat } from '../report/access-review.js';
 import { macwardenVersion } from '../version.js';
-import { reserveOut } from './bake/write-out.js';
+import { namesRegistryFile, registryPath, REGISTRY_OUT_REFUSAL, reserveOut } from './bake/write-out.js';
 import { reserveFailure } from './bake/out-errors.js';
 
 type ReadLnd = LndAdapter;
@@ -108,6 +108,14 @@ async function runSteps(args: string[], deps: Deps): Promise<InventoryOutput> {
   if (reportOut !== undefined && isProtectedPath(reportOut)) return fail(3, 'N7', 'protected report path');
   const reportName = reportOut === undefined ? null : outputNameProblem(reportOut);
   if (reportName) return fail(3, 'N7', `report path refused: ${reportName}`);
+  if (reportOut !== undefined) {
+    let reportPath: string;
+    try { reportPath = await resolveUnprotectedPath(reportOut, deps.fs); }
+    catch { return fail(3, 'N7', 'cannot check report path'); }
+    const registryFile = await registryPath(supplied['--registry'], deps.fs, deps.env);
+    if (registryFile !== null && namesRegistryFile(reportPath, registryFile))
+      return fail(3, 'N7', REGISTRY_OUT_REFUSAL.replace('output path', 'report path'));
+  }
   const settings = connectionSettings(flag => supplied[flag], deps.env);
   if (settings.problem) return fail(2, null, settings.problem);
   // connectionProblem below refuses a missing setting before either path is used.
@@ -225,8 +233,12 @@ async function runSteps(args: string[], deps: Deps): Promise<InventoryOutput> {
       let mac: Secret;
       let decoded: ReturnType<typeof decodeMacaroon>;
       try {
-        if (!(await deps.fs.stat(entry.outPath)).isFile()) continue;
-        mac = (await readOnlineCredential(entry.outPath,
+        // SAFE-02: a registry entry is editable metadata; a protected outPath (macaroons.db,
+        // wallet.db, a *.key, ...), or one that resolves to it, is never probed: unverified.
+        if (isProtectedPath(entry.outPath)) continue;
+        const path = await deps.fs.realpath(entry.outPath);
+        if (isProtectedPath(path) || !(await deps.fs.stat(path)).isFile()) continue;
+        mac = (await readOnlineCredential(path,
           { stdin: process.stdin, fs: deps.fs })).secret;
         decoded = decodeMacaroon(mac);
       } catch { continue; }

@@ -282,6 +282,22 @@ async function runHelper(path: string, systemRoot: string, mode: 'verify'): Prom
 }
 
 /**
+ * The helper's answer in create mode: the CREATED reply, EXISTS, or failed when it exited
+ * without printing either. A null wait means the helper exited without that line; only both
+ * null is a failure, and a null is never read as "exists" (that would report EEXIST for a path
+ * nothing created). Both waits settle together when the line arrives only with the exit output.
+ */
+export function creationOutcome(helper: { next(prefix: string): Promise<string | null> }):
+  Promise<{ kind: 'created'; line: string } | { kind: 'exists' } | { kind: 'failed' }> {
+  return new Promise(settle => {
+    let silent = 0;
+    const none = () => { if (++silent === 2) settle({ kind: 'failed' }); };
+    void helper.next('CREATED ').then(line => line === null ? none() : settle({ kind: 'created', line }));
+    void helper.next('EXISTS').then(line => line === null ? none() : settle({ kind: 'exists' }));
+  });
+}
+
+/**
  * Creates `path` (which must not exist) with an owner-only security descriptor through the
  * fixed System32 PowerShell helper, then keeps the helper waiting so the caller can verify
  * the object at the path after opening it exclusively. 'exists' when the path already
@@ -290,13 +306,11 @@ async function runHelper(path: string, systemRoot: string, mode: 'verify'): Prom
 async function createPrivateFile(path: string, systemRoot: string): Promise<PrivateCreation | 'exists' | null> {
   const helper = startHelper(path, systemRoot, 'create');
   if (!helper) return null;
-  const outcome = await Promise.race([
-    helper.next('CREATED ').then(line => ({ kind: 'created' as const, line })),
-    helper.next('EXISTS').then(() => ({ kind: 'exists' as const, line: null })),
-  ]);
+  const outcome = await creationOutcome(helper);
   if (outcome.kind === 'exists') { helper.end(); return 'exists'; }
+  if (outcome.kind === 'failed') { helper.end(); return null; }
   let reply: Record<string, unknown> | null;
-  try { reply = outcome.line === null ? null : JSON.parse(outcome.line) as Record<string, unknown>; } catch { reply = null; }
+  try { reply = JSON.parse(outcome.line) as Record<string, unknown>; } catch { reply = null; }
   if (!reply || typeof reply.sid !== 'string' || !SID.test(reply.sid)) { helper.end(); return null; }
   let verified: Promise<WindowsAcl | null> | undefined;
   return { sid: reply.sid, noAcl: reply.noAcl === true, created: parseAcl(reply.acl), end: helper.end,

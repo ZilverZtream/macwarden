@@ -77,7 +77,9 @@ it('RECOMMEND/label observed methods map to the exact permissions LND requires a
     { method: '/lnrpc.Lightning/GetInfo', calls: 3, lastUsed: '2026-10-08T10:00:00Z', permissions: ['info:read'] }]);
   const commands = (result.result as { commands: string[] }).commands;
   expect(commands[0]).toMatch(/^macwarden bake --label app1-narrow --uri \/lnrpc\.Lightning\/AddInvoice,\/lnrpc\.Lightning\/GetInfo --out <file> --lnd-rest localhost:18080 /);
-  expect(commands[1]).toMatch(/^after switching the app to the new file: macwarden revoke app1 /);
+  // A runnable command: the note is a trailing comment, valid in POSIX sh and PowerShell (1.2.1).
+  expect(commands[1]).toMatch(/^macwarden revoke app1 --lnd-rest localhost:18080 .*[^ ] {2}# after switching the app to the new file$/);
+  expect(render(result, 'text')).toMatch(/^next {9}macwarden revoke app1 .* {2}# after switching the app to the new file$/m);
   // Recommendation only: registry and usage are untouched.
   expect(JSON.parse(readFileSync(s.registry, 'utf8')).entries).toHaveLength(1);
 });
@@ -323,7 +325,7 @@ it('RECOMMEND/selectors a credential ID narrows when consistent, but never sugge
     expect(commands[0]).toMatch(/^macwarden bake --label shop-narrow --uri \/lnrpc\.Lightning\/GetInfo /);
   }
   const byLabel = await run(['shop', ...s.args], s.deps);
-  expect((byLabel.result as { commands: string[] }).commands[1]).toMatch(/^after switching the app to the new file: macwarden revoke shop /);
+  expect((byLabel.result as { commands: string[] }).commands[1]).toMatch(/^macwarden revoke shop --lnd-rest \S+ .*[^ ] {2}# after switching the app to the new file$/);
 });
 
 it('RECOMMEND/selectors no narrowing command when the usage identity cannot be resolved to one set of permissions', async () => {

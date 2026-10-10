@@ -14,7 +14,7 @@ import { openRegistry, RegistryInputError, RegistryUsageError, type RegistryEntr
 import { DecodeError, LndError, LndUncertainError, UsageError } from '../../errors.js';
 import { Secret } from '../../secret.js';
 import type { OutputResult } from '../../output/index.js';
-import { reserveOut, type ReservedOut } from './write-out.js';
+import { namesRegistryFile, registryPath, REGISTRY_OUT_REFUSAL, reserveOut, type ReservedOut } from './write-out.js';
 import { reserveFailure } from './out-errors.js';
 import { allocateRootKeyId } from './allocate.js';
 import { canaryCondition, canaryConfigPath, ensureCanaryConfig, newCondition } from '../../watch/canary.js';
@@ -160,6 +160,8 @@ async function runSteps(args: string[], deps: Deps, state: RunState): Promise<Ba
   let outPath: string;
   try { outPath = await resolveUnprotectedPath(request.out, deps.fs); }
   catch { return fail(3, 'B4', 'cannot check output path'); }
+  const registryFile = await registryPath(request.registry, deps.fs, deps.env);
+  if (registryFile !== null && namesRegistryFile(outPath, registryFile)) return fail(3, 'B4', REGISTRY_OUT_REFUSAL);
   try { await deps.fs.lstat(request.out); return fail(3, 'B4', 'output file already exists'); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
     return fail(3, 'B4', 'cannot check output path'); }

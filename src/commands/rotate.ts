@@ -18,7 +18,7 @@ import { DecodeError, LndError, LndUncertainError, UsageError } from '../errors.
 import { Secret } from '../secret.js';
 import { rotateConfirmation, rotatePlanResult, writeRotateFinishPlan, writeRotateStagePlan, writeRotatePrompt,
   type OutputResult, type RotatePlan, type RotateStagedResult, type RotateFinishedResult } from '../output/index.js';
-import { reserveOut, type ReservedOut } from './bake/write-out.js';
+import { namesRegistryFile, REGISTRY_OUT_REFUSAL, reserveOut, type ReservedOut } from './bake/write-out.js';
 import { reserveFailure } from './bake/out-errors.js';
 import { allocateRootKeyId } from './bake/allocate.js';
 
@@ -250,7 +250,8 @@ async function finishSteps(request: Request, deps: Deps, state: RunState): Promi
     if (replacement.facts.fingerprint !== next.fingerprint || replacement.facts.rootKeyId !== nextId)
       return fail(3, 'F7', 'staged replacement file does not match the registry', warnings);
   } catch { return fail(3, 'F7', 'unreadable or undecodable staged replacement file', warnings); }
-  if (!replacement.facts.permissions.length)
+  // No permissions, or a time-before caveat already passed: LND cannot accept it.
+  if (!usable(replacement, deps.clock()))
     return fail(5, 'F7', 'new credential is not accepted; nothing changed', warnings);
   try {
     if ((await lnd.checkMacaroon(replacement.secret, replacement.facts.permissions)).valid !== true)
@@ -292,6 +293,11 @@ async function finishSteps(request: Request, deps: Deps, state: RunState): Promi
         return fail(3, 'F9', 'old or replacement entry changed since F3; nothing sent to LND', warnings);
       registry.reload(current.entries);
     } catch { return fail(3, 'F9', 'unreadable or invalid registry on reread; nothing sent to LND', warnings); }
+    // The F7 proof is as old as the confirmation prompt: a replacement whose time-before caveat
+    // passed while the prompt was open must not let O be deleted (or recorded revoked).
+    if (!usable(replacement, deps.clock()))
+      return fail(5, 'F7', 'new credential is not accepted: it expired while waiting for confirmation; nothing changed; ' +
+        `abandon it with macwarden revoke ${next.rootKeyId} and stage a new replacement`, warnings);
     if (!repaired) {
       if (!lnd.deleteMacaroonId) throw new Error('missing LND delete method');
       let deleted = false;
@@ -422,6 +428,7 @@ async function runSteps(args: string[], deps: Deps, state: RunState): Promise<Ro
   let outPath: string;
   try { outPath = await resolveUnprotectedPath(request.out, deps.fs); }
   catch { return fail(3, 'S5', 'cannot check output path'); }
+  if (namesRegistryFile(outPath, registry.location)) return fail(3, 'S5', REGISTRY_OUT_REFUSAL);
   try { await deps.fs.lstat(request.out); return fail(3, 'S5', 'output file already exists'); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
     return fail(3, 'S5', 'cannot check output path'); }
@@ -435,7 +442,7 @@ async function runSteps(args: string[], deps: Deps, state: RunState): Promise<Ro
       return fail(4, 'S6', 'unreadable TLS certificate');
     cert = await readBoundedFile(request.cert, deps.fs);
   } catch { return fail(4, 'S6', 'unreadable TLS certificate'); }
-  try { own = (await readOnlineCredential(request.own, { stdin: process.stdin, fs: deps.fs })).secret; }
+  try { own = (await readOnlineCredential(request.own, { stdin: deps.stdin ?? process.stdin, fs: deps.fs })).secret; }
   catch { return fail(4, 'S6', 'unreadable own macaroon'); }
   try { ownFacts = decodeMacaroon(own); }
   catch { return fail(4, 'S6', 'undecodable own macaroon'); }
