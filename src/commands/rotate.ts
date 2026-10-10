@@ -244,7 +244,7 @@ async function finishSteps(request: Request, deps: Deps, state: RunState): Promi
   catch (error) { return lndFailure(error, 'F6', warnings); }
   if (!ids.includes(nextId)) return fail(5, 'F6',
     `staged replacement is not in LND; clear it with macwarden revoke ${next.rootKeyId}`, warnings);
-  const repaired = !ids.includes(id);
+  let repaired = !ids.includes(id);
   let replacement: Target;
   try {
     if (!next.outPath) return fail(3, 'F7', 'staged replacement file is not recorded', warnings);
@@ -260,8 +260,10 @@ async function finishSteps(request: Request, deps: Deps, state: RunState): Promi
       return fail(5, 'F7', 'new credential is not accepted; nothing changed', warnings);
   } catch (error) { return lndFailure(error, 'F7', warnings); }
   let target: Target | undefined;
-  let evidence: RotateFinishedResult['evidence'] = 'by-id-only';
-  if (!repaired && old.outPath) {
+  let evidence = 'by-id-only' as RotateFinishedResult['evidence'];
+  // F7 baseline for a present O; returns a refusal, or null to continue.
+  const baseline = async (): Promise<RotateOutput | null> => {
+    if (!old.outPath) return null;
     try { target = await readTarget(old.outPath, deps); }
     catch { /* Without a usable old file, ID absence is the proof. */ }
     const relation = target && recordedFileRelation(old, target.facts);
@@ -273,6 +275,11 @@ async function finishSteps(request: Request, deps: Deps, state: RunState): Promi
       try { if ((await lnd.checkMacaroon(target.secret, target.facts.permissions)).valid === true) evidence = 'rejected'; }
       catch (error) { return lndFailure(error, 'F7', warnings); }
     }
+    return null;
+  };
+  if (!repaired) {
+    const refused = await baseline();
+    if (refused) return refused;
   }
   if (request.dryRun) return rotatePlanResult({ dryRun: true, stage: 'finish', old,
     permissions: [...old.permissions], grade: old.grade }, next, warnings, repaired);
@@ -300,6 +307,27 @@ async function finishSteps(request: Request, deps: Deps, state: RunState): Promi
     if (!usable(replacement, deps.clock()))
       return fail(5, 'F7', 'new credential is not accepted: it expired while waiting for confirmation; nothing changed; ' +
         `abandon it with macwarden revoke ${next.rootKeyId} and stage a new replacement`, warnings);
+    // The F6 absence of O is as old as the prompt too: a node restore (or another operator) may
+    // have put O back meanwhile. Observe LND again before recording O revoked by absence; if O is
+    // listed again, take the normal F7 baseline and F10 delete instead.
+    if (repaired) {
+      try { ids = await listIds(lnd); }
+      catch (error) { return lndFailure(error, 'F6', warnings); }
+      if (!ids.includes(nextId)) return fail(5, 'F6',
+        `staged replacement is not in LND; nothing changed; clear it with macwarden revoke ${next.rootKeyId}`, warnings);
+      if (ids.includes(id)) {
+        repaired = false;
+        const refused = await baseline();
+        if (refused) return refused;
+      }
+    }
+    // And the F7 acceptance proof: the replacement may have been deleted from LND (directly or
+    // through another registry) while the prompt was open, which the registry re-read cannot see.
+    try {
+      if ((await lnd.checkMacaroon(replacement.secret, replacement.facts.permissions)).valid !== true)
+        return fail(5, 'F7', 'new credential is not accepted after confirmation; nothing changed; ' +
+          `run \`${inventoryRecoveryCommand(request)}\`, and abandon it with macwarden revoke ${next.rootKeyId} if LND no longer holds it`, warnings);
+    } catch (error) { return lndFailure(error, 'F7', warnings); }
     if (!repaired) {
       if (!lnd.deleteMacaroonId) throw new Error('missing LND delete method');
       let deleted = false;

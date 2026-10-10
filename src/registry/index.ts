@@ -251,7 +251,10 @@ export class Registry {
   reload(entries: RegistryEntry[]): void {
     if (!this.ownedLock) input('registry-lock', 'registry lock required');
     validate(entries);
-    this.entries.splice(0, this.entries.length, ...structuredClone(entries));
+    // Never spread into splice: a large registry exceeds the engine's argument limit.
+    const copy = structuredClone(entries);
+    this.entries.length = 0;
+    for (const entry of copy) this.entries.push(entry);
   }
 
   markReplacedBy(nodePubkey: string, rootKeyId: string, replacementId: string): void {
@@ -287,9 +290,13 @@ export class Registry {
     try { claim = await this.fs.open(claimPath, 'wx', 0o600); }
     catch { input('registry-lock', `registry acquisition in progress or ambiguous: ${claimPath}. ` +
       'Stop all writers, establish that the recorded process is gone in its namespace, then delete this .claim file (and any stale lock) offline before retrying.'); }
-    const identity = await claim.stat();
+    let identity: { dev: number; ino: number } | undefined;
     let primary: { error: unknown } | undefined;
     try {
+      // Under the cleanup below (audit N12): a failing stat must still close the descriptor and
+      // remove the claim, and is reported as an ordinary lock failure.
+      try { identity = await claim.stat(); }
+      catch { input('registry-lock', 'cannot create registry lock'); }
       await claim.writeFile(JSON.stringify({ pid: process.pid,
         hostname: (this.deps.hostname ?? nodeHostname)(), startedAt: new Date().toISOString(), processDomain }));
       await claim.close();
@@ -299,7 +306,10 @@ export class Registry {
     let cleanup: { error: unknown } | undefined;
     try {
       const current = await this.fs.lstat(claimPath);
-      if (!current.isFile() || current.dev !== identity.dev || current.ino !== identity.ino)
+      // Without the descriptor's identity, only the empty file this run created (nothing was
+      // written to it) is taken as ours; a competitor's claim carries its owner record.
+      const ours = identity ? current.dev === identity.dev && current.ino === identity.ino : current.size === 0;
+      if (!current.isFile() || !ours)
         input('registry-lock', 'registry acquisition owner changed; preserved competing claim');
       await this.retryBusy(() => this.fs.unlink(claimPath));
     } catch (error) {
@@ -312,6 +322,7 @@ export class Registry {
     const failure = cleanup ?? primary;
     if (failure) {
       if (this.ownedLock) await this.unlock().catch(() => {});
+      this.ownedLock = undefined;
       throw failure.error;
     }
     await this.removeStaleTemps();
@@ -428,13 +439,17 @@ export class Registry {
   async save(): Promise<void> {
     if (!this.ownedLock) input('registry-lock', 'registry lock required');
     validate(this.entries);
+    const text = this.originalText !== undefined && JSON.stringify(this.entries) === this.originalEntries
+      ? this.originalText : JSON.stringify({ schema: 1, entries: this.entries }, null, 2) + '\n';
+    // The reader refuses a registry above REGISTRY_FILE_LIMIT: never write one it could not read back.
+    if (Buffer.byteLength(text) > REGISTRY_FILE_LIMIT)
+      input('registry-save', `cannot save registry: it would exceed the ${REGISTRY_FILE_LIMIT / 1024 / 1024} MiB a registry may hold; registry unchanged`);
     const tempPath = `${this.path}.${randomUUID()}.tmp`;
     let handle: nodeFs.FileHandle | undefined;
     try {
       // Owner-only from creation on every platform (1.2.1); the rename keeps that.
       handle = (await reserveOwnerOnly(tempPath, this.fs)).handle;
-      await handle.writeFile(this.originalText !== undefined && JSON.stringify(this.entries) === this.originalEntries
-        ? this.originalText : JSON.stringify({ schema: 1, entries: this.entries }, null, 2) + '\n');
+      await handle.writeFile(text);
       await handle.sync();
       await handle.close();
       handle = undefined;
@@ -472,21 +487,26 @@ export class Registry {
 
   async unlock(): Promise<void> {
     const owned = this.ownedLock;
-    this.ownedLock = undefined;
     if (!owned) return;
+    // Ownership is given up only when the lock is released, gone or someone else's (audit N11):
+    // after a transient failure a second unlock retries, and this process can still re-lock.
+    const lost = () => { this.ownedLock = undefined; input('registry-lock', 'registry lock owner changed; preserved competing lock'); };
     try {
       const lockPath = `${this.path}.lock`;
       const stat = await this.fs.lstat(lockPath, { bigint: true });
       // Birth time (0 where the file system has none) tells most recycled inodes apart too.
-      if (!stat.isFile() || stat.dev !== owned.dev || stat.ino !== owned.ino || stat.birthtimeNs !== owned.birth)
-        input('registry-lock', 'registry lock owner changed; preserved competing lock');
+      if (!stat.isFile() || stat.dev !== owned.dev || stat.ino !== owned.ino || stat.birthtimeNs !== owned.birth) lost();
       // A file system may hand a freed inode number to the next file at once, so identity
       // alone cannot tell a replaced lock apart: the record, with this acquisition's token,
       // must be exactly the one written.
-      if (await readPlainFile(lockPath, this.fs, LOCK_FILE_LIMIT) !== owned.record)
-        input('registry-lock', 'registry lock owner changed; preserved competing lock');
-      await this.fs.unlink(lockPath);
-    } catch { input('registry-lock', 'cannot release registry lock'); }
+      if (await readPlainFile(lockPath, this.fs, LOCK_FILE_LIMIT) !== owned.record) lost();
+      // Antivirus and indexers briefly hold files open: bounded retries, as for the claim.
+      await this.retryBusy(() => this.fs.unlink(lockPath));
+      this.ownedLock = undefined;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') this.ownedLock = undefined;
+      input('registry-lock', 'cannot release registry lock');
+    }
   }
 }
 

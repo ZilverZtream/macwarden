@@ -1306,6 +1306,18 @@ function windowArgs(r, model, now) {
     return match ? now - Number(match[1]) * { m: 60_000, h: 3_600_000, d: 86_400_000 }[match[2]] : Date.parse(value); };
   const since = r.weighted([[null, 4], [instant(), 4], [relative(), 2]]);
   const until = r.weighted([[null, 5], [instant(), 3.5], [relative(), 1.5]]);
+  // A short explicit window starting at a registration of this node (drawn last, so every earlier
+  // draw of the case is unchanged): the cases that can reconcile completely (exit 0). Before audit
+  // N14 most exit-0 cases were default windows of no width, which now exit 2.
+  if (r.chance(0.15)) {
+    const nodeRuns = new Set(model.records.filter(item => item.type === 'run-start' && item.node === NODE).map(item => item.run));
+    const starts = model.records.filter(item => item.type === 'registered' && nodeRuns.has(item.run));
+    if (starts.length) {
+      const from = Date.parse(r.pick(starts).time);
+      const short = [iso(from), iso(from + r.int(0, 2_000))];
+      return { since: short[0], until: short[1], sinceMs: Date.parse(short[0]), untilMs: Date.parse(short[1]) };
+    }
+  }
   return { since, until, sinceMs: parse(since), untilMs: parse(until) };
 }
 
@@ -1318,7 +1330,12 @@ function reconcileOracle(model, lnd, window, now) {
   if ((window.sinceMs !== null && window.sinceMs < 0) || (window.untilMs !== null && window.untilMs < 0)) return { exit: 2 };
   if (window.sinceMs !== null && window.untilMs !== null && window.sinceMs > window.untilMs) return { exit: 2 };
   const until = window.untilMs ?? now;
-  const since = window.sinceMs ?? Math.min(mine.length ? Date.parse(mine[0].time) : until, until);
+  // The default --since is the earliest record time for the node (audit N14: a clock set back
+  // between runs makes a later run start earlier); with no record, or the earliest after the
+  // window's end, there is no default window and Q1 refuses it rather than reporting nothing.
+  const earliest = mine.reduce((min, item) => Math.min(min, Date.parse(item.time)), Infinity);
+  if (window.sinceMs === null && (!mine.length || earliest > until)) return { exit: 2 };
+  const since = window.sinceMs ?? earliest;
   if (since > until) return { exit: 2 };
   const inWindow = ms => ms >= since && ms <= until;
   // Requests after --until take no part in attribution or observations (1.2.1, audit F08).

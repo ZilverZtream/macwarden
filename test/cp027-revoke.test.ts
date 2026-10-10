@@ -37,10 +37,11 @@ it.each(['wrong text', 'EOF', 'non-TTY'])('CP-027/V7-repair %s declines absence 
     expect(f.calls).toEqual(prefix); unchanged(f, before); released(f);
     expect(f.prompt.mock.calls.length).toBe(kind === 'non-TTY' ? 0 : 1);
   }));
-it.each(['typed label', '--yes'])('CP-027/V7-repair %s records by-id-only without any LND call after absence',
+it.each(['typed label', '--yes'])('CP-027/V7-repair %s records by-id-only with one re-list and no mutation after absence',
   async kind => scratch(async f => {
     absent(f); success(f, await invoke(f, kind === '--yes' ? ['--yes'] : []), 'by-id-only', true);
-    expect(f.calls).toEqual(prefix); expect(f.lnd.deleteMacaroonId).not.toHaveBeenCalled();
+    // The absence is observed again under the lock, after the confirmation (N07).
+    expect(f.calls).toEqual([...prefix, 'ListMacaroonIDs']); expect(f.lnd.deleteMacaroonId).not.toHaveBeenCalled();
   }));
 
 it.each(['present', 'absent repair'])('CP-027/V10 %s refuses a held lock without deleting or altering its owner',
@@ -261,7 +262,7 @@ it.each(['write', 'rename', 'repair write'])('CP-027/V13 %s failure preserves re
     f.deps.fs.writeFile = fs.writeFile; f.deps.fs.rename = fs.rename; f.deps.fs.open = fs.open; f.calls.length = 0;
     f.lnd.deleteMacaroonId.mockClear(); f.lnd.checkMacaroon.mockClear(); f.lnd.listMacaroonIds.mockClear();
     success(f, await invoke(f), 'by-id-only', true);
-    expect(f.calls).toEqual(prefix); expect(f.lnd.deleteMacaroonId).not.toHaveBeenCalled();
+    expect(f.calls).toEqual([...prefix, 'ListMacaroonIDs']); expect(f.lnd.deleteMacaroonId).not.toHaveBeenCalled();
   }));
 
 it('CP-027/revoke-live-flow injected command flow removes only its target and preserves another ID and record', async () => scratch(async f => {
