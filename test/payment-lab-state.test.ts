@@ -976,3 +976,144 @@ describe('payment lab round 4', () => {
     expect(store.invoice(hash)?.state).toBe('settled');
   });
 });
+
+/**
+ * Round 5 (the verifier's probes of 3705845): no amount, fee, time or index LND sends is
+ * negative, so a negative one is an unreadable answer (P1); a late invoice LND returns from
+ * ACCEPTED to OPEN is still canceled and never counted resolved while LND holds it (P2).
+ */
+describe('payment lab round 5', () => {
+  const HASH = preimageFor('p1-json').paymentHash;
+  const paymentJson = {
+    payment_hash: HASH, status: 'IN_FLIGHT', value_msat: '1000', fee_msat: '0', creation_time_ns: '1', payment_index: '1',
+    htlcs: [{ attempt_id: '1', status: 'IN_FLIGHT', attempt_time_ns: '1', resolve_time_ns: '0',
+      route: { total_amt_msat: '1000', total_fees_msat: '0', hops: [{ chan_id: '1', amt_to_forward_msat: '1000', fee_msat: '0' }] } }],
+  };
+  const invoiceJson = { r_hash: Buffer.from(HASH, 'hex').toString('base64'), state: 'OPEN', value_msat: '1000', amt_paid_msat: '0',
+    add_index: '1', settle_index: '0', htlcs: [{ chan_id: '1', htlc_index: '0', amt_msat: '1000', state: 'ACCEPTED' }] };
+  const payReqJson = { destination: DESTINATION, payment_hash: HASH, num_msat: '1000', timestamp: '1', expiry: '3600' };
+
+  /** A copy of `json` with the field at `path` set to `value`. */
+  function withField(json: unknown, path: (string | number)[], value: unknown): unknown {
+    const copy = structuredClone(json) as Record<string | number, unknown>;
+    let at = copy;
+    for (const key of path.slice(0, -1)) at = at[key] as Record<string | number, unknown>;
+    at[path[path.length - 1] ?? ''] = value;
+    return copy;
+  }
+
+  it('P1: a negative amount, fee, time or index from LND is an unreadable answer; zero still reads', () => {
+    expect(lab.parsePayment(paymentJson).feeMsat).toBe(0n);
+    expect(lab.parseInvoice(invoiceJson).amtPaidMsat).toBe(0n);
+    expect(lab.parsePayReq(payReqJson).amountMsat).toBe(1000n);
+    const cases: [(json: unknown) => unknown, unknown, (string | number)[]][] = [
+      [lab.parsePayment, paymentJson, ['fee_msat']],
+      [lab.parsePayment, paymentJson, ['value_msat']],
+      [lab.parsePayment, paymentJson, ['creation_time_ns']],
+      [lab.parsePayment, paymentJson, ['htlcs', 0, 'attempt_time_ns']],
+      [lab.parsePayment, paymentJson, ['htlcs', 0, 'route', 'total_fees_msat']],
+      [lab.parsePayment, paymentJson, ['htlcs', 0, 'route', 'total_amt_msat']],
+      [lab.parsePayment, paymentJson, ['htlcs', 0, 'route', 'hops', 0, 'fee_msat']],
+      [lab.parsePayment, paymentJson, ['htlcs', 0, 'route', 'hops', 0, 'amt_to_forward_msat']],
+      [lab.parseInvoice, invoiceJson, ['value_msat']],
+      [lab.parseInvoice, invoiceJson, ['amt_paid_msat']],
+      [lab.parseInvoice, invoiceJson, ['add_index']],
+      [lab.parseInvoice, invoiceJson, ['settle_index']],
+      [lab.parseInvoice, invoiceJson, ['htlcs', 0, 'amt_msat']],
+      [lab.parsePayReq, payReqJson, ['num_msat']],
+      [lab.parsePayReq, payReqJson, ['expiry']],
+    ];
+    for (const [parse, json, path] of cases) {
+      for (const value of ['-5', -5, '-9223372036854775808']) {
+        expect(() => parse(withField(json, path, value)), `${path.join('.')} = ${String(value)}`).toThrow(lab.ProtocolError);
+      }
+    }
+    // Route fees above the route total would make a negative principal: unreadable too.
+    expect(() => lab.parsePayment(withField(paymentJson, ['htlcs', 0, 'route', 'total_fees_msat'], '1001'))).toThrow(lab.ProtocolError);
+  });
+
+  it('P1: a SUCCEEDED answer with a negative fee leaves the payment uncertain with its reservation held, not stuck submitting', async () => {
+    const store = payerStore('p1-negative-fee.db');
+    const hash = budgeted(store, 'p1-negative-fee', 'OP-P1');
+    const deps = payer(store);
+    const { preimage } = preimageFor('p1-negative-fee');
+    // The REST client parses each stream message before the workflow sees it; a parse error ends the stream with that error.
+    deps.api.send.push(async onUpdate => {
+      onUpdate(lab.parsePayment({ payment_hash: hash, status: 'SUCCEEDED', value_msat: '1000', fee_msat: '-5', payment_preimage: preimage }));
+    });
+    deps.api.track.push(async () => { throw new lab.TransportError('socket hang up', 'response'); });
+    expect(await lab.submit(deps, hash, { timeoutSeconds: 30, fault: 'none' })).toMatchObject({ kind: 'unresolved', state: 'uncertain' });
+    expect(store.payment(hash)?.state).toBe('uncertain');
+    expect(store.budgetStatus('B')).toMatchObject({ heldMsat: 1100n, consumedMsat: 0n });
+  });
+
+  /**
+   * Order ORD-<name>: hold invoice B recorded not-created, then A created and live; B turns up
+   * late in LND and is seen ACCEPTED. The tests then have LND return B to OPEN (its accepted
+   * HTLCs were canceled or timed out).
+   */
+  function lateAccepted(name: string): { store: ReceiverStore; live: string; late: string } {
+    const store = receiverStore(`${name}.db`);
+    const late = preimageFor(`${name}-late`);
+    const live = preimageFor(`${name}-live`);
+    const orderId = `ORD-${name}`;
+    expect(store.recordInvoiceIntent({ orderId, amountMsat: 1000n, kind: 'hold', ...late }).outcome).toBe('recorded');
+    expect(store.markNotCreated(late.paymentHash)).toBe(true);
+    expect(store.recordInvoiceIntent({ orderId, amountMsat: 1000n, kind: 'hold', ...live }).outcome).toBe('recorded');
+    expect(store.markCreated(live.paymentHash, `lnbcrt-${name}-live`, 1n)).toBe('open');
+    expect(store.applyInvoice(invoice(late.paymentHash, 'ACCEPTED'), 'lookup')).toBe('late-invoice');
+    expect(store.invoice(late.paymentHash)).toMatchObject({ state: 'not-created', lateLndState: 'ACCEPTED' });
+    return { store, live: live.paymentHash, late: late.paymentHash };
+  }
+
+  /** LND's invoices by hash; CancelInvoice moves an OPEN or ACCEPTED one to CANCELED, or fails with `cancelFails`. */
+  function lndInvoices(states: Map<string, string>, cancelFails: boolean): FakeInvoiceApi & { cancels: string[] } {
+    const cancels: string[] = [];
+    return {
+      cancels,
+      lookupInvoice: async paymentHash => invoice(paymentHash, states.get(paymentHash) ?? 'OPEN'),
+      settleInvoice: async () => undefined,
+      cancelInvoice: async paymentHash => {
+        cancels.push(paymentHash);
+        if (cancelFails) throw new lab.TransportError('socket hang up', 'response');
+        if (states.get(paymentHash) === 'OPEN' || states.get(paymentHash) === 'ACCEPTED') states.set(paymentHash, 'CANCELED');
+      },
+      subscribeInvoices: (_from, _onInvoice, signal) => heldUntilAborted(signal),
+    };
+  }
+
+  it('P2: OPEN after ACCEPTED for a late invoice is recorded and is late-invoice again; canceled stays final, settled outranks it', () => {
+    const { store, late } = lateAccepted('p2-store');
+    expect(store.applyInvoice(invoice(late, 'OPEN'), 'lookup')).toBe('late-invoice');
+    expect(store.invoice(late)).toMatchObject({ state: 'not-created', lateLndState: 'OPEN' });
+    expect(store.applyInvoice(invoice(late, 'ACCEPTED'), 'subscription')).toBe('late-invoice');
+    expect(store.invoice(late)?.lateLndState).toBe('ACCEPTED');
+    expect(store.applyInvoice(invoice(late, 'CANCELED'), 'lookup')).toBe('state-updated');
+    expect(store.applyInvoice(invoice(late, 'OPEN'), 'subscription')).toBe('unchanged');
+    expect(store.applyInvoice(invoice(late, 'ACCEPTED'), 'subscription')).toBe('unchanged');
+    expect(store.invoice(late)?.lateLndState).toBe('CANCELED');
+    // The order's live invoice A is still open: B's payment is posted and fulfills the order (A is then superseded).
+    expect(store.applyInvoice(invoice(late, 'SETTLED', 1000n, 3n), 'subscription')).toBe('fulfilled');
+    expect(store.invoice(late)?.lateLndState).toBe('SETTLED');
+    expect(store.applyInvoice(invoice(late, 'OPEN'), 'subscription')).toBe('unchanged');
+    expect(store.invoice(late)?.lateLndState).toBe('SETTLED');
+  });
+
+  it('P2: a late invoice LND returned from ACCEPTED to OPEN is canceled in LND, and counted resolved once LND reports it canceled', async () => {
+    const { store, live, late } = lateAccepted('p2-cancel');
+    const api = lndInvoices(new Map([[live, 'OPEN'], [late, 'OPEN']]), false);
+    expect(await lab.reconcileInvoices({ api, store, emit: quiet })).toEqual({ resolved: 1, open: 1, unknown: 0 });
+    expect(api.cancels).toEqual([late]);
+    expect(store.invoice(late)).toMatchObject({ state: 'not-created', lateLndState: 'CANCELED' });
+  });
+
+  it('P2: while its cancel fails, the reopened late invoice is never counted resolved, on this pass or the next', async () => {
+    const { store, live, late } = lateAccepted('p2-fail');
+    const api = lndInvoices(new Map([[live, 'OPEN'], [late, 'OPEN']]), true);
+    for (let pass = 0; pass < 2; pass += 1) {
+      expect(await lab.reconcileInvoices({ api, store, emit: quiet })).toEqual({ resolved: 0, open: 1, unknown: 1 });
+    }
+    expect(api.cancels).toEqual([late, late]);
+    expect(store.invoice(late)).toMatchObject({ state: 'not-created', lateLndState: 'OPEN' });
+  });
+});

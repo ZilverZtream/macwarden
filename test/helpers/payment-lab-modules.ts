@@ -141,6 +141,9 @@ export interface Lab {
   definiteRefusal(error: unknown): boolean;
   /** lnd/types.ts: LND's REST JSON for a payment, as the payer reads it. */
   parsePayment(value: unknown): Payment;
+  /** lnd/types.ts: LND's REST JSON for an invoice and for a decoded payment request. */
+  parseInvoice(value: unknown): Invoice;
+  parsePayReq(value: unknown): DecodedPayReq;
   submit(deps: PayerDeps, paymentHash: string, options: { timeoutSeconds: number; fault: 'none'; signal?: AbortSignal }): Promise<PayOutcome>;
   reconcile(deps: PayerDeps, paymentHash: string, signal?: AbortSignal): Promise<PayOutcome>;
   settleHoldInvoice(deps: ReceiverDeps, orderId: string): Promise<{ kind: string; reason?: string; outcome?: string }>;
@@ -155,7 +158,7 @@ export interface Lab {
 export async function loadLab(): Promise<Lab> {
   // One after another: concurrent first loads of modules that share imports are not needed here.
   const errors = await load<Pick<Lab, 'LndError' | 'TransportError' | 'ProtocolError' | 'definiteRefusal'>>('lnd/errors.ts');
-  const types = await load<Pick<Lab, 'parsePayment'>>('lnd/types.ts');
+  const types = await load<Pick<Lab, 'parsePayment' | 'parseInvoice' | 'parsePayReq'>>('lnd/types.ts');
   const payerStore = await load<Pick<Lab, 'PayerStore'>>('payer/store.ts');
   const receiverStore = await load<Pick<Lab, 'ReceiverStore'>>('receiver/store.ts');
   const payer = await load<Pick<Lab, 'submit' | 'reconcile'>>('payer/payer.ts');
@@ -168,7 +171,7 @@ export async function loadLab(): Promise<Lab> {
   }
   return { PayerStore: payerStore.PayerStore, ReceiverStore: receiverStore.ReceiverStore, LndError: errors.LndError,
     TransportError: errors.TransportError, ProtocolError: errors.ProtocolError, definiteRefusal: errors.definiteRefusal,
-    parsePayment: types.parsePayment, submit: payer.submit, reconcile: payer.reconcile,
+    parsePayment: types.parsePayment, parseInvoice: types.parseInvoice, parsePayReq: types.parsePayReq, submit: payer.submit, reconcile: payer.reconcile,
     settleHoldInvoice: receiver.settleHoldInvoice, listen: receiver.listen, createInvoice: receiver.createInvoice,
     reconcileInvoices: receiver.reconcileInvoices, main: cli.main };
 }

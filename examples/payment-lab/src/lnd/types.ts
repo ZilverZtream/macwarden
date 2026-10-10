@@ -1,5 +1,5 @@
 import { assertHash, base64ToHex, presentPreimage } from '../util/encoding.ts';
-import { array, asObject, boolean, checkedInt64, enumName, identifier, integer, optionalObject, smallInteger, string, type JsonObject } from './json.ts';
+import { array, asObject, boolean, checkedNonNegative, enumName, identifier, integer, optionalObject, smallInteger, string, type JsonObject } from './json.ts';
 
 /** Parsed LND messages. Field names follow lnrpc; amounts are millisatoshi bigints. */
 
@@ -91,7 +91,7 @@ function parseAttempt(value: unknown): HtlcAttempt {
     attemptId: identifier(o, 'attempt_id'),
     status: enumName(o, 'status', HTLC_STATUS),
     route,
-    principalMsat: checkedInt64(route.totalAmtMsat - route.totalFeesMsat, 'htlc attempt principal'),
+    principalMsat: checkedNonNegative(route.totalAmtMsat - route.totalFeesMsat, 'htlc attempt principal'),
     attemptTimeNs: integer(o, 'attempt_time_ns'),
     resolveTimeNs: integer(o, 'resolve_time_ns'),
     failureCode: failure === undefined ? undefined : enumName(failure, 'code', FAILURE_CODE),

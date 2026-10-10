@@ -111,6 +111,9 @@ Security and robustness release from an external audit of 1.2.0 and a second aud
 - An interrupt while an `--out` check or the creation of the `--out` file stalled (bake, rotate, attenuate, `inventory --report --out`) did nothing: no result was written and the process stayed alive holding the registry lock. Those calls now race the interrupt → exit 6 `cancelled` at once with the lock released; a creation call that was abandoned may still leave an empty, owner-only file, which the message names.
 - Windows: when the owner-only helper created the file but its reply was unusable (malformed, invalid SID) or missing (killed by its timeout), the empty file stayed and the next run failed "output file already exists"; it is now removed (only when absent before the call and empty).
 - `recommend`: the printed bake command quotes the `--uri` method list like the paths; through a PowerShell function or npm's `.ps1` shim an unquoted `a,b` became an array and reached bake as "a b".
+- examples/payment-lab: a negative amount, fee, time or index in an LND answer (`fee_msat`, `value_msat`, `amt_paid_msat`, `settle_index`, HTLC `amt_msat` and the rest) is an unreadable answer, so the outcome stays unknown; a SUCCEEDED payment with `fee_msat` "-5" made the payer store fail its CHECK constraint while recording the update.
+- examples/payment-lab: a late hold invoice that LND returns from ACCEPTED to OPEN (its accepted HTLCs canceled or timed out) is recorded OPEN and canceled in LND; `receiver reconcile` no longer counts it resolved on every pass while LND still holds it payable.
+- examples/payment-lab: the README states the lab's precondition, LND with the `invoicesrpc` and `routerrpc` subservers; the gateway's code-5 404 for a path it does not serve reads as NotFound.
 
 
 ### Added

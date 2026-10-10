@@ -138,10 +138,15 @@ const LND_TO_RECORD: Record<string, InvoiceRecordState | undefined> = {
  * CANCELED was recorded (a stale or wrong cancel) was paid, and the record says so.
  */
 const RANK: Record<InvoiceRecordState, number> = { 'not-created': 0, creating: 0, open: 1, accepted: 2, canceled: 3, settled: 4 };
-/** The same order for LND's state of a late invoice (late_lnd_state), so a stale delivery never moves it back either. */
+/**
+ * The order for LND's state of a late invoice (late_lnd_state), so a stale delivery never moves
+ * it back from CANCELED or SETTLED. OPEN and ACCEPTED rank alike: LND returns a hold invoice
+ * from ACCEPTED to OPEN when its accepted HTLCs are canceled or time out, so either can follow
+ * the other, and either way the invoice is live in LND and is to be canceled there.
+ */
 const LATE_RANK = (expression: string): string =>
-  `CASE ${expression} WHEN 'OPEN' THEN 1 WHEN 'ACCEPTED' THEN 2 WHEN 'CANCELED' THEN 3 WHEN 'SETTLED' THEN 4 ELSE 0 END`;
-const LND_RANK: Record<string, number> = { OPEN: 1, ACCEPTED: 2, CANCELED: 3, SETTLED: 4 };
+  `CASE ${expression} WHEN 'OPEN' THEN 1 WHEN 'ACCEPTED' THEN 1 WHEN 'CANCELED' THEN 3 WHEN 'SETTLED' THEN 4 ELSE 0 END`;
+const LND_RANK: Record<string, number> = { OPEN: 1, ACCEPTED: 1, CANCELED: 3, SETTLED: 4 };
 
 export class ReceiverStore {
   readonly db: DatabaseSync;
@@ -354,16 +359,19 @@ export class ReceiverStore {
     // `late-invoice`, for the caller to cancel in LND, and a settlement is still posted below.
     // Canceled is final: a late invoice LND canceled is never adopted (its order still awaits a
     // payment, and a replacement may be issued), and an update older than LND's last known state
-    // of it (a replayed OPEN after CANCELED) changes nothing.
+    // of it (a replayed OPEN after CANCELED) changes nothing. OPEN after ACCEPTED is not older:
+    // LND reopens a hold invoice whose accepted HTLCs were canceled, so it is recorded and the
+    // invoice is `late-invoice` again, to be canceled.
     const late = record.lateLndState;
     const behind = record.state === 'not-created' && late !== undefined
       && (late === 'CANCELED' || (LND_RANK[invoice.state] ?? 0) < (LND_RANK[late] ?? 0));
     const blocked = record.state === 'not-created' && (next === 'canceled' || behind || this.#mayNotAdopt(record));
     if (blocked) {
       const moved = changes(this.db.prepare(`UPDATE invoices SET late_lnd_state = ?, add_index = COALESCE(add_index, ?),
-          payment_request = COALESCE(payment_request, ?), updated_at = ? WHERE payment_hash = ? AND ${LATE_RANK('?')} > ${LATE_RANK('late_lnd_state')}`)
+          payment_request = COALESCE(payment_request, ?), updated_at = ? WHERE payment_hash = ? AND (${LATE_RANK('?')} > ${LATE_RANK('late_lnd_state')}
+            OR (? IN ('OPEN', 'ACCEPTED') AND late_lnd_state IN ('OPEN', 'ACCEPTED') AND late_lnd_state <> ?))`)
         .run(invoice.state, invoice.addIndex, invoice.paymentRequest === '' ? null : invoice.paymentRequest, now, invoice.paymentHash,
-          invoice.state)) === 1;
+          invoice.state, invoice.state, invoice.state)) === 1;
       if (next === 'open' || next === 'accepted') return behind ? 'unchanged' : 'late-invoice';
       if (next === 'canceled') return moved ? 'state-updated' : 'unchanged';
     }

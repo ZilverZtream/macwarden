@@ -33,7 +33,6 @@ export function boolean(source: JsonObject, key: string): boolean {
   return value;
 }
 
-const INT64_MIN = -(2n ** 63n);
 const INT64_MAX = 2n ** 63n - 1n;
 const UINT64_MAX = 2n ** 64n - 1n;
 
@@ -45,19 +44,27 @@ function anyInteger(source: JsonObject, key: string): bigint {
   throw new ProtocolError(`${key} is not an integer`);
 }
 
-/** A value that must fit a signed 64-bit integer (what SQLite stores); anything else is an unreadable answer. */
-export function checkedInt64(value: bigint, what: string): bigint {
-  if (value < INT64_MIN || value > INT64_MAX) throw new ProtocolError(`${what} is out of range`);
+/**
+ * A value that must lie in 0 to 2^63 - 1: not negative (no amount, fee, index, time or
+ * height LND sends is), and within a signed 64-bit integer (what SQLite stores). Anything
+ * else is an unreadable answer, so a payment or invoice it describes keeps its outcome
+ * unknown instead of failing a store's CHECK constraint half way through an update.
+ */
+export function checkedNonNegative(value: bigint, what: string): bigint {
+  if (value < 0n) throw new ProtocolError(`${what} is negative`);
+  if (value > INT64_MAX) throw new ProtocolError(`${what} is out of range`);
   return value;
 }
 
 /**
- * A (u)int64 amount, index or time, sent as a decimal string, or a number for 32-bit
- * fields. It must fit a signed 64-bit integer: the stores keep these values in SQLite,
- * which binds nothing larger, and no amount, index or time LND sends comes near 2^63.
+ * A (u)int64 amount, fee, index or time, sent as a decimal string, or a number for 32-bit
+ * fields. Every such field this lab reads is non-negative in LND (amounts, fees and times
+ * are unsigned or never below zero; failure_source_index is an index), so a negative value
+ * is refused, as is one of 2^63 or more: the stores keep these values in SQLite, which binds
+ * nothing larger, and no amount, index or time LND sends comes near 2^63.
  */
 export function integer(source: JsonObject, key: string): bigint {
-  return checkedInt64(anyInteger(source, key), key);
+  return checkedNonNegative(anyInteger(source, key), key);
 }
 
 /** A uint64 identifier (a channel ID, which can exceed 2^63 for an alias SCID; an HTLC index), as decimal text. */
@@ -69,7 +76,7 @@ export function identifier(source: JsonObject, key: string): string {
 
 export function smallInteger(source: JsonObject, key: string): number {
   const value = integer(source, key);
-  if (value > BigInt(Number.MAX_SAFE_INTEGER) || value < BigInt(Number.MIN_SAFE_INTEGER)) throw new ProtocolError(`${key} is out of range`);
+  if (value > BigInt(Number.MAX_SAFE_INTEGER)) throw new ProtocolError(`${key} is out of range`);
   return Number(value);
 }
 

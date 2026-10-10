@@ -397,11 +397,12 @@ export async function cancelHoldInvoice(deps: ReceiverDeps, orderId: string): Pr
 /**
  * Whether a looked-up invoice is decided: settled or canceled, by LND's answer or by the
  * record (canceled is final, also when a stale lookup still says OPEN), or a not-created
- * record that stays not-created (a late invoice LND canceled or settled, or one it does not hold).
+ * record LND was seen to cancel or settle (final below). A not-created record LND holds OPEN or
+ * ACCEPTED is not decided: it is payable there until its cancel is confirmed.
  */
 function decided(deps: ReceiverDeps, paymentHash: string, lndState: string): boolean {
-  const state = deps.store.invoice(paymentHash)?.state;
-  return lndState === 'SETTLED' || lndState === 'CANCELED' || state === 'settled' || state === 'canceled' || state === 'not-created';
+  const record = deps.store.invoice(paymentHash);
+  return lndState === 'SETTLED' || lndState === 'CANCELED' || (record !== undefined && final(record));
 }
 
 /** A record reconciliation has nothing left to do for: settled, canceled, or a not-created one LND canceled or settled. */
