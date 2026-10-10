@@ -129,7 +129,7 @@ macwarden's own credential is baked with `lncli bakemacaroon --root_key_id 7001`
 | `lightninglabs/aperture` | v0.5.0 | `sha256:29e03e2c38dca0314f748cc07f483f03615dbf9876620c8e15b94b904fa16114` |
 | `node` (paid API) | 22.23.2-alpine3.24 | `sha256:b6f26b36c8ff49624cfdac716b8ea1138d606df02586a77d364bb5536a634f85` |
 
-Aperture reads only bob's TLS certificate and `invoice.macaroon` (it loads that file by name from `macdir`), from bob's data volume mounted read-only.
+Aperture uses only bob's TLS certificate and `invoice.macaroon` (it loads that file by name from `macdir`). The demo mounts bob's whole data volume read-only, which also holds `admin.macaroon`, `wallet.db` and `tls.key`: in production mount only those two files.
 
 ## Expected output
 
