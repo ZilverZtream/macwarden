@@ -107,6 +107,10 @@ Security and robustness release from an external audit of 1.2.0 and a second aud
 - examples/payment-lab: amounts and indexes above 2^63 − 1 are a usage error (exit 2) instead of a SQLite bind crash (exit 4); a fee limit whose sum with the amount passes 2^63 is a budget refusal (exit 3); budget totals are summed exactly; LND amounts, indexes and times outside int64 are an unreadable answer, while channel IDs keep the full uint64 range.
 - examples/payment-lab: `receiver reconcile` counts each invoice exactly once (resolved, open or unknown); a not-created invoice LND does not hold counts resolved; settled and canceled invoices count resolved also when the pass is stopped.
 - examples/payment-lab: an invoice recorded canceled that LND reports settled is recorded settled with its amount and settle index; canceled stays final for a replayed OPEN or ACCEPTED.
+- `attenuate --out` naming the registry file or a file named after it (its lock, claim, temporary, canary or usage file) wrote the credential there: a fake lock then blocked every later registry writer. It is now refused at A3 as in bake B4, against the default registry location.
+- An interrupt while an `--out` check or the creation of the `--out` file stalled (bake, rotate, attenuate, `inventory --report --out`) did nothing: no result was written and the process stayed alive holding the registry lock. Those calls now race the interrupt → exit 6 `cancelled` at once with the lock released; a creation call that was abandoned may still leave an empty, owner-only file, which the message names.
+- Windows: when the owner-only helper created the file but its reply was unusable (malformed, invalid SID) or missing (killed by its timeout), the empty file stayed and the next run failed "output file already exists"; it is now removed (only when absent before the call and empty).
+- `recommend`: the printed bake command quotes the `--uri` method list like the paths; through a PowerShell function or npm's `.ps1` shim an unquoted `a,b` became an array and reached bake as "a b".
 
 
 ### Added

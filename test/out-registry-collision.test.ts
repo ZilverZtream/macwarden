@@ -9,6 +9,7 @@ import * as fsPromises from 'node:fs/promises';
 import { Readable } from 'node:stream';
 import { expect, it } from 'vitest';
 import { run as bake } from '../src/commands/bake/index.js';
+import { namesRegistryFile } from '../src/commands/bake/out-registry.js';
 import { Secret } from '../src/secret.js';
 import { directory, fixture } from './helpers/cp025-bake-support.mjs';
 import { invoke as rotate, failure as rotateFailure, scratch as rotateScratch, unchanged } from './helpers/cp028-rotate-support.js';
@@ -40,8 +41,13 @@ for (const kind of Object.keys(sidecars('r')) as Array<keyof ReturnType<typeof s
   });
 }
 
-it.runIf(caseFolding)('bake refuses --out naming the registry in another letter case', async () => {
+it('bake refuses --out naming the registry in another letter case where the file system folds case', async () => {
   const dir = mkdtempSync(join(directory('MACWARDEN_TEST_TMP'), 'out-registry-'));
+  // The rule itself, on every platform: folded on Windows and macOS, exact elsewhere.
+  expect(namesRegistryFile(join(dir, 'REGISTRY.JSON'), join(dir, 'registry.json'), 'win32')).toBe(true);
+  expect(namesRegistryFile(join(dir, 'REGISTRY.JSON'), join(dir, 'registry.json'), 'darwin')).toBe(true);
+  expect(namesRegistryFile(join(dir, 'REGISTRY.JSON'), join(dir, 'registry.json'), 'linux')).toBe(false);
+  if (!caseFolding) return;
   const f = fixture(dir, Secret);
   const result = await bake(withOut(f.args, join(dir, 'REGISTRY.JSON')), f.deps);
   expect(result.error).toMatchObject({ code: 3, step: 'B4' }); expect(f.state.calls).toEqual([]);
