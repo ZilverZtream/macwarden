@@ -84,7 +84,27 @@ export async function writeChunks(stream: Sink, chunks: Iterable<string>): Promi
   }
 }
 
+// Set once an interrupt result (exit 6 or 7, step `cancelled`) is written: the command has
+// stopped and run its cleanup (lock release, unwritten --out removal), but a file system call it
+// abandoned (a stalled mount) may still be pending and keep the process alive (1.2.1).
+let interruptWritten = false;
+
+/** Whether this process wrote an interrupt result (exit 6 or 7, step `cancelled`). */
+export function interruptedCompletion(): boolean { return interruptWritten; }
+
+/** Resolves once stdout and stderr hold no unwritten output (or are closed). */
+export async function flushStandardStreams(): Promise<void> {
+  await Promise.all([process.stdout, process.stderr].map(stream => new Promise<void>(resolve => {
+    if (closedStreams.has(stream) || stream.destroyed || stream.writableLength === 0) { resolve(); return; }
+    const done = () => { stream.off('drain', done); stream.off('close', done); stream.off('error', done); resolve(); };
+    stream.once('drain', done);
+    stream.once('close', done);
+    stream.once('error', done);
+  })));
+}
+
 async function write(result: OutputResult, mode: Mode): Promise<void> {
+  if (result.error?.step === 'cancelled' && (result.error.code === 6 || result.error.code === 7)) interruptWritten = true;
   // The first chunk is produced before anything is written: assertPlain and the
   // secret collection run first, so a rendering failure emits no partial output.
   const chunks = renderChunks(result, mode);

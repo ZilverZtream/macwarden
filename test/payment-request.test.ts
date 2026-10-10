@@ -128,6 +128,12 @@ it('PAYJ/deletions DeletePayment names its hash and scope; DeleteAllPayments its
   expect(deletionFacts(all, uint(3, 1), false)).toEqual({ paymentHash: null, scope: 'all-payments', extraction: 'complete' });
   expect(deletionFacts(all, uint(1, 1), false)).toMatchObject({ scope: 'failed-payments' });
   expect(deletionFacts(all, message(uint(1, 1), uint(2, 1)), false)).toMatchObject({ scope: 'failed-htlcs' });
+  // LND v0.21.4 refuses all_payments with failed_payments_only or failed_htlcs_only (rpcserver.go
+  // DeleteAllPayments): nothing is deleted, so the scope is `none` (1.2.1 follow-up to audit F09).
+  expect(deletionFacts(all, message(uint(3, 1), uint(2, 1)), false)).toEqual({ paymentHash: null, scope: 'none', extraction: 'complete' });
+  expect(deletionFacts(all, message(uint(3, 1), uint(1, 1)), false)).toEqual({ paymentHash: null, scope: 'none', extraction: 'complete' });
+  expect(deletionFacts(all, message(uint(1, 1), uint(2, 1), uint(3, 1)), false)).toMatchObject({ scope: 'none' });
+  expect(deletionFacts(all, message(uint(3, 1), uint(1, 1), uint(1, 0)), false)).toMatchObject({ scope: 'all-payments' });
   // failed_htlcs_only alone is a valid request (LND v0.21.4 removes every payment's failed attempts): its own scope, never `none` (audit F09).
   expect(deletionFacts(all, uint(2, 1), false)).toEqual({ paymentHash: null, scope: 'failed-htlcs', extraction: 'complete' });
   expect(deletionFacts(all, message(uint(2, 1), uint(2, 0)), false)).toMatchObject({ scope: 'none' });

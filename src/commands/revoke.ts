@@ -285,6 +285,7 @@ async function runSteps(args: string[], deps: Deps, warnings: OutputResult['warn
     }
     const revokedAt = deps.clock().toISOString();
     let revokedEntry: RegistryEntry;
+    let earlier: string | undefined;
     try {
       const existing = registry.find(pubkey, id.toString());
       if (existing) {
@@ -292,10 +293,9 @@ async function runSteps(args: string[], deps: Deps, warnings: OutputResult['warn
         else if (existing.status === 'revoked' && !repaired) {
           // Revoked but present (a node backup restored the root key, 1.2.1): this run deleted it
           // again, so the entry records this run's time and evidence, matching the result; the
-          // earlier event is kept in the warning. The registry lock is held (V10).
-          warnings.push({ code: 'revoked-but-present', message: `root key ID ${id.toString()} was recorded revoked at ` +
-            `${existing.revokedAt ?? 'an unknown time'} (evidence ${existing.revokeEvidence ?? 'unknown'}) but LND held it ` +
-            `again; this run deleted it and the entry now records this revocation` });
+          // earlier event is kept in the warning, raised once the save succeeded. The registry lock
+          // is held (V10).
+          earlier = `${existing.revokedAt ?? 'an unknown time'} (evidence ${existing.revokeEvidence ?? 'unknown'})`;
           existing.revokedAt = revokedAt;
           existing.revokeEvidence = proof;
         }
@@ -313,12 +313,18 @@ async function runSteps(args: string[], deps: Deps, warnings: OutputResult['warn
       }
       await registry.save();
     } catch {
-      // SPEC V7: an absent unregistered ID has nothing to revoke,
-      // so a rerun cannot add a record; say so instead of printing a command that exits 5.
-      return fail(7, 'V13', entry
+      // SPEC V7: an absent unregistered or already revoked ID has nothing to revoke, so a rerun
+      // cannot add or update a record; say so instead of printing a command that exits 5. A failed
+      // save leaves the file unchanged (the rename is its last failing step).
+      return fail(7, 'V13', earlier !== undefined
+        ? `root key ID ${id.toString()} deleted from LND again; the registry still records it revoked at ${earlier} ` +
+          `and this run's revocation could not be saved; the credential is revoked and no further action is needed`
+        : entry
         ? `root key ID ${id.toString()} absent from LND; registry update failed; run ${rerun(request, id)}`
         : `root key ID ${id.toString()} deleted from LND; the registry had no entry and the revocation record could not be saved; no further action is needed`, warnings);
     }
+    if (earlier !== undefined) warnings.push({ code: 'revoked-but-present', message: `root key ID ${id.toString()} was ` +
+      `recorded revoked at ${earlier} but LND held it again; this run deleted it and the entry now records this revocation` });
     const result: RevokeResult = { rootKeyId: id.toString(), label: revokedEntry.label,
       evidence: proof, repaired, entry: revokedEntry };
     return { schema: 1, command: 'revoke', ok: true, warnings, result, error: null };

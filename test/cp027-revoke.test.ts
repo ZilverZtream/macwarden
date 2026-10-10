@@ -294,3 +294,30 @@ it.each(['rejected', 'by-id-only'] as const)(
     expect(result.warnings).toContainEqual({ code: 'revoked-but-present',
       message: expect.stringContaining(`recorded revoked at ${earlier} (evidence ${oldEvidence})`) });
   }));
+
+// 1.2.1 (F12 follow-up): when the save after re-revoking a revoked-but-present root key fails, the
+// entry still records the earlier revocation; no output claims it records this one, and the message
+// prints no rerun (V7 refuses an absent, already revoked ID with exit 5, so a rerun cannot record it).
+it('F12/V13 a failed save after re-revoking a revoked-but-present key is reported truthfully, without a rerun', async () => scratch(async f => {
+  const earlier = '2026-09-02T00:00:00.000Z';
+  save(f, [{ ...f.target, status: 'revoked', revokedAt: earlier, revokeEvidence: 'rejected' }, f.other]);
+  f.lnd.deleteMacaroonId.mockImplementation(async id => {
+    f.calls.push('DeleteMacaroonID'); f.ids.splice(f.ids.indexOf(String(id)), 1); return { deleted: true };
+  });
+  const before = bytes(f);
+  f.deps.fs.rename = vi.fn(async () => { throw Object.assign(new Error('injected save rename failure'), { code: 'EACCES' }); });
+  const result = await invoke(f, ['--yes'], maxId);
+  f.deps.fs.rename = fs.rename;
+  failure(result, 7, 'V13');
+  unchanged(f, before); released(f); expect(f.ids).not.toContain(maxId);
+  expect(result.warnings.some(w => typeof w !== 'string' && w.code === 'revoked-but-present')).toBe(false);
+  expect(JSON.stringify(result)).not.toMatch(/entry now records this revocation/);
+  expect(result.error!.message).toContain(`deleted from LND again`);
+  expect(result.error!.message).toContain(`still records it revoked at ${earlier} (evidence rejected)`);
+  expect(result.error!.message).toMatch(/no further action is needed/);
+  expect(result.error!.message).not.toContain('macwarden revoke');
+  // What the message says a rerun would do is what it does: nothing to revoke, registry unchanged.
+  f.calls.length = 0;
+  failure(await invoke(f, ['--yes'], maxId), 5, 'V7');
+  unchanged(f, before); released(f);
+}));

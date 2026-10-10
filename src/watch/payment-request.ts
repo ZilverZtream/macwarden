@@ -258,8 +258,11 @@ export function deletionFacts(method: string, payload: Buffer | null, oversized:
     // DeleteAllPayments (LND v0.21.4 rpcserver.go DeleteAllPayments): failed_htlcs_only removes
     // the failed attempts of every payment, alone or with failed_payments_only (then of failed
     // payments only), so it is a deletion of its own, `failed-htlcs` (1.2.1: alone it was `none`).
-    // LND refuses a request that selects nothing (`none`), and all_payments with either other flag.
-    const scope = flags.get(2) ? 'failed-htlcs' : flags.get(3) ? 'all-payments' : flags.get(1) ? 'failed-payments' : 'none';
+    // LND refuses a request that selects nothing, and all_payments with either other flag: both
+    // delete nothing, so their scope is `none`.
+    const scope = flags.get(3)
+      ? (flags.get(1) || flags.get(2) ? 'none' : 'all-payments')
+      : flags.get(2) ? 'failed-htlcs' : flags.get(1) ? 'failed-payments' : 'none';
     return { paymentHash: null, scope, extraction: 'complete' };
   } catch { return { paymentHash: null, scope: 'none', extraction: 'malformed' }; }
 }

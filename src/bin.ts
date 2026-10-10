@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { main, completionStatus } from './cli.js';
+import { main, completionStatus, flushStandardStreams, interruptedCompletion } from './cli.js';
 import { alertCleanupDone } from './watch/alert.js';
 
 // watch runs unattended (systemd, CI). If its output can no longer be delivered (a pipe
@@ -17,6 +17,15 @@ const WATCH_EXIT_GRACE_MS = 3_000;
 
 const status = await main(process.argv.slice(2), { execArgv: process.execArgv, nodeVersion: process.versions.node });
 process.exitCode = completionStatus(status);
+// An interrupt can abandon a file system call that never returns (lstat on a stalled mount):
+// Node cannot cancel it, and the pending request would hold the process open after the exit-6/7
+// result was printed. The command has already released its locks and removed unwritten output,
+// so once that result has reached stdout and stderr the process ends with its code (1.2.1).
+// Every other exit is left to Node as before.
+if (interruptedCompletion() && process.argv[2] !== 'watch') {
+  await flushStandardStreams();
+  process.exit(completionStatus(status));
+}
 if (process.argv[2] === 'watch') {
   await alertCleanupDone();
   setTimeout(() => process.kill(process.pid, 'SIGKILL'), WATCH_EXIT_GRACE_MS).unref();
