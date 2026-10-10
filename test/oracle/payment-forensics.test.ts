@@ -113,13 +113,14 @@ beforeAll(async () => {
   await waitFor('payer funds confirmed', () => Number(lncli(['walletbalance']).confirmed_balance) > 2_000_000 && lncli(['getinfo']).synced_to_chain === true);
   // The payee starts after 101 blocks were mined and must catch up; under full validation the
   // LND shards and the Core Lightning fixture share Docker, so catching up can take minutes.
-  // A block every 20 s gives it a fresh tip to sync to; the budget is the oracle hook limit.
+  // A block every 10 s gives it a fresh tip to sync to; 170 s was not enough once in three full runs,
+  // so the wait and the hook have their own budgets, inside the oracle command limit.
   let lastBlock = Date.now();
   await waitFor('payee synced', () => {
     if (payee(['getinfo']).synced_to_chain === true) return true;
-    if (Date.now() - lastBlock >= 20_000) { mine(1, address); lastBlock = Date.now(); }
+    if (Date.now() - lastBlock >= 10_000) { mine(1, address); lastBlock = Date.now(); }
     return null;
-  }, 170_000);
+  }, 480_000);
   const payeeKey = String(payeeInfo.identity_pubkey);
   await waitFor('peer connection', () => {
     const peers = lncli(['listpeers']).peers as { pub_key: string }[];
@@ -135,7 +136,7 @@ beforeAll(async () => {
   await waitFor('active channel', () => (lncli(['listchannels', '--active_only']).channels as { remote_pubkey: string }[])
     .some(channel => channel.remote_pubkey === payeeKey));
   await waitFor('payee sees the channel', () => (payee(['listchannels', '--active_only']).channels as unknown[]).length > 0);
-}, 360_000);
+}, 600_000);
 
 afterAll(() => {
   // Release held payments and remove what this file added; the shared fixture keeps its own nodes.
