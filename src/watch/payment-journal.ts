@@ -27,7 +27,11 @@ export const JOURNAL_VERSION = 1;
  * start watch again.
  */
 export const JOURNAL_LIMIT_BYTES = 64 * 1024 * 1024;
-/** Room kept for the `full` record, so the file never exceeds JOURNAL_LIMIT_BYTES. */
+/**
+ * Room kept for the records that end a full journal: the `drop` record naming what did not fit
+ * and the `full` record (each at most JOURNAL_LINE_LIMIT, about 300 bytes together in practice),
+ * so the file never exceeds JOURNAL_LIMIT_BYTES.
+ */
 export const JOURNAL_RESERVE_BYTES = 4 * 1024;
 /** watch starts on an existing journal only while at least this much room is left before the reserve. */
 export const JOURNAL_START_ROOM_BYTES = 64 * 1024;
@@ -331,6 +335,7 @@ export function journalCoverage(records: JournalRecord[], node: string, from: nu
   let next = 0;
   for (const span of merged) {
     while (next < dropWindows.length && dropWindows[next].to < span.from) next += 1;
+    const pieces = covered.length;
     let cursor = span.from;
     let touched = false;
     for (let index = next; index < dropWindows.length && dropWindows[index].from <= span.to; index += 1) {
@@ -341,6 +346,10 @@ export function journalCoverage(records: JournalRecord[], node: string, from: nu
     }
     if (!touched) covered.push({ ...span });
     else if (cursor < span.to) covered.push({ from: cursor, to: span.to, end: span.end });
+    // A drop reaching the span's end leaves nothing covered after it (a full journal's last drop
+    // ends where the `full` record is, 1.2.1): the gap that follows keeps the reason that ended
+    // the span (`journal-full`), and the drop is listed as its own gap with its count below.
+    else if (covered.length > pieces) covered[covered.length - 1].end = span.end;
   }
   const pieces = covered.map(span => ({ ...span, from: Math.max(span.from, from), to: Math.min(span.to, to) }))
     .filter(span => span.from < span.to);
@@ -433,6 +442,12 @@ type Intake = { kind: 'call'; at: number; method: string; requestId: bigint; mac
   payload: Buffer | null; oversizedPayload: boolean; bytes: number }
   | { kind: 'marker'; make: (time: string) => JournalRecord; bytes: number; at: number };
 type Drops = { count: number; first: number; last: number };
+/**
+ * A line waiting for the disk, with what a `full` needs to report it if it never lands: its
+ * record type and time, and the calls it stands for (1 for a payment or deletion, a `drop`
+ * record's count, 0 for other markers) with the earliest capture time among them.
+ */
+type Line = { text: string; type: JournalRecord['type']; at: number; calls: number; first: number };
 
 /**
  * The journal writer of one watch run. Intercepted calls are captured synchronously (a bounded
@@ -452,7 +467,7 @@ export class PaymentJournal {
   private budget = JOURNAL_BURST_MS;
   private budgetAt = performance.now();
   private retry: ReturnType<typeof setTimeout> | null = null;
-  private pending: string[] = [];
+  private pending: Line[] = [];
   private pendingBytes = 0;
   private markerBytes = 0;
   private writing: Promise<void> | null = null;
@@ -761,28 +776,31 @@ export class PaymentJournal {
       // times never decrease along the file.
       const drops = this.lineDrop;
       this.lineDrop = null;
-      this.queue(`${JSON.stringify(this.dropRecord(drops, new Date(this.lastTime).toISOString()))}\n`, false);
+      const drop = this.dropRecord(drops, new Date(this.lastTime).toISOString());
+      this.queue({ text: `${JSON.stringify(drop)}\n`, type: 'drop', at: Date.parse(drop.time), calls: drop.count, first: drops.first }, false);
     }
-    this.queue(text, droppable);
+    const at = Date.parse(record.time);
+    const calls = record.type === 'payment' || record.type === 'deletion' ? 1 : 0;
+    this.queue({ text, type: record.type, at, calls, first: at }, droppable);
     if (record.type === 'payment') this.stats.payments += 1;
     else if (record.type === 'deletion') this.stats.deletions += 1;
   }
 
   /** Records that will never be written: counted as dropped instead of journaled. */
-  private discard(lines: string[]): void {
+  private discard(lines: Line[]): void {
     for (const line of lines) {
-      if (line.includes('"type":"payment"')) { this.stats.payments -= 1; this.stats.dropped += 1; }
-      else if (line.includes('"type":"deletion"')) { this.stats.deletions -= 1; this.stats.dropped += 1; }
+      if (line.type === 'payment') { this.stats.payments -= 1; this.stats.dropped += 1; }
+      else if (line.type === 'deletion') { this.stats.deletions -= 1; this.stats.dropped += 1; }
     }
   }
 
-  private queue(text: string, droppable: boolean): void {
-    const bytes = Buffer.byteLength(text);
+  private queue(line: Line, droppable: boolean): void {
+    const bytes = Buffer.byteLength(line.text);
     if (!droppable) {
       this.markerBytes += bytes;
       if (this.markerBytes > JOURNAL_MARKER_BYTES) { this.stop('stalled'); return; }
     }
-    this.pending.push(text);
+    this.pending.push(line);
     this.pendingBytes += bytes;
     this.lastWrite = Date.now();
   }
@@ -809,16 +827,18 @@ export class PaymentJournal {
       this.pending = [];
       this.pendingBytes = 0;
       this.markerBytes = 0;
-      // The file never grows past the limit: what does not fit is dropped and a `full` record ends coverage.
+      // The file never grows past the limit: what does not fit is dropped, and a `drop` and a
+      // `full` record, written into the reserved room, say what was lost and end coverage.
       const room = JOURNAL_LIMIT_BYTES - JOURNAL_RESERVE_BYTES - this.size;
       let take = 0;
       let bytes = 0;
-      while (take < lines.length && bytes + Buffer.byteLength(lines[take]) <= room) bytes += Buffer.byteLength(lines[take++]);
-      let text = lines.slice(0, take).join('');
+      while (take < lines.length && bytes + Buffer.byteLength(lines[take].text) <= room) bytes += Buffer.byteLength(lines[take++].text);
+      let text = lines.slice(0, take).map(line => line.text).join('');
       const full = take < lines.length;
       if (full) {
-        this.discard(lines.slice(take));
-        text += `${JSON.stringify({ ...this.base(this.now()), type: 'full' } satisfies FullRecord)}\n`;
+        const lost = lines.slice(take);
+        this.discard(lost);
+        text += this.fullRecords(lost);
       }
       try {
         await writeAll(this.handle, text);
@@ -833,6 +853,39 @@ export class PaymentJournal {
       }
       if (full) { this.stop('full'); return; }
     }
+  }
+
+  /**
+   * The lines that end a full journal, for the `lost` lines that did not fit (1.2.1: the `full`
+   * record once took the time it was written, so coverage ran on over the payments it had just
+   * discarded and they left no trace). Coverage must end where the loss began, and records must
+   * not go back in time, so: a `drop` record counts the calls the lost lines stand for (payment
+   * and deletion records, and the counts of lost `drop` records), together with the calls
+   * dropped earlier and not yet reported, from the earliest capture time of any lost line,
+   * marker or call, to the latest; the `full` record follows at that latest time. The drop
+   * window starts at the first lost line even when that is a marker: a lost `unregistered` would
+   * otherwise leave the time after it looking covered. When only markers were lost (no call),
+   * there is no `drop` record (a drop counts at least one call) and the `full` record takes the
+   * first lost line's time instead. Both times are at or after every written record (the queue
+   * is in time order), and both lines fit in JOURNAL_RESERVE_BYTES. Drops are already counted
+   * in the statistics (discard, note); nothing is counted here.
+   */
+  private fullRecords(lost: Line[]): string {
+    let calls = 0;
+    let first = lost[0].first;
+    let last = lost[0].at;
+    for (const line of lost) { calls += line.calls; first = Math.min(first, line.first); last = Math.max(last, line.at); }
+    for (const drops of [this.lineDrop, this.intakeDrop]) {
+      if (!drops) continue;
+      calls += drops.count; first = Math.min(first, drops.first); last = Math.max(last, drops.last);
+    }
+    this.lineDrop = null;
+    this.intakeDrop = null;
+    const iso = (at: number) => new Date(at).toISOString();
+    const end = `${JSON.stringify({ ...this.base(iso(calls ? last : lost[0].at)), type: 'full' } satisfies FullRecord)}\n`;
+    if (!calls) return end;
+    const drop: DropRecord = { ...this.base(iso(last)), type: 'drop', count: calls, first: iso(first), last: iso(last), reason: 'overload' };
+    return `${JSON.stringify(drop)}\n${end}`;
   }
 
   /**

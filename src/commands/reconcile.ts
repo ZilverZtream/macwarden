@@ -345,7 +345,9 @@ async function runSteps(args: string[], deps: Deps): Promise<ReconcileOutput> {
   const uncertain = results.filter(item => item.settlement.status !== 'succeeded' && item.settlement.status !== 'failed').length;
   const ambiguous = results.filter(item => item.attribution === 'ambiguous').length;
   const historical = results.filter(item => item.attribution === 'historical').length;
-  const gapMs = coverage.gaps.reduce((total, gap) => total + (gap.to - gap.from), 0);
+  // The window less the covered time (1.2.1): listed gaps can overlap (a drop inside time that is
+  // uncovered for another reason is listed beside it), so their sum counted such time twice.
+  const gapMs = Math.max(0, until - since - coverage.coveredMs);
   const result: ReconcileResult = {
     node,
     journal: { path: journalPath, size: contents.size, runs, records: mine.length, firstRecord: mine[0]?.time ?? null,

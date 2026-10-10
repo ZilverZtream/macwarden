@@ -599,3 +599,56 @@ it('PAYJ/marker-time registration changes are journaled at the time they happene
   const coverage = journalCoverage(read.records, NODE, Date.parse('2026-10-09T10:00:00.000Z'), Date.parse('2026-10-09T10:00:35.000Z'));
   expect(coverage.gaps.map(gap => [gap.reason, (gap.to - gap.from) / 1_000])).toEqual([['not-registered', 1], ['not-registered', 20]]);
 });
+
+it('PAYJ/full-drop payments discarded when the journal fills leave a drop record before the full record, and coverage ends where the loss began', async () => {
+  const dir = scratch();
+  const path = join(dir, 'full-drop.journal');
+  const head = `${start(0)}\n`;
+  const filler = JOURNAL_LIMIT_BYTES - JOURNAL_RESERVE_BYTES - (JOURNAL_START_ROOM_BYTES + 2_000) - Buffer.byteLength(head) - 1;
+  writeFileSync(path, Buffer.concat([Buffer.from(head), Buffer.alloc(filler, 0x78), Buffer.from('\n')]), { mode: 0o600 });
+  let now = Date.parse(at(0));
+  const stops: string[] = [];
+  const journal = await openJournal(path, { clock: () => new Date(now), onStop: reason => stops.push(reason) });
+  now = Date.parse(at(1));
+  journal.registered();
+  // Fill the room left before the reserve with payment records of one fixed length (four-digit request IDs).
+  const app = vector('preset-pay-only');
+  let id = 1_000n;
+  journal.capture(paymentCall(SEND, bytes(3, hash(`fill${id}`)), app, id++));
+  await settle();
+  const line = Buffer.byteLength(`${readFileSync(path, 'utf8').split('\n').at(-2)!}\n`);
+  const before = statSync(path).size;
+  const fit = Math.floor((JOURNAL_LIMIT_BYTES - JOURNAL_RESERVE_BYTES - before) / line);
+  for (let i = 0; i < fit; i++) journal.capture(paymentCall(SEND, bytes(3, hash(`fill${id}`)), app, id++));
+  // Decoding is budgeted: wait until every filler record is on disk.
+  for (let turn = 0; turn < 200 && statSync(path).size < before + fit * line; turn++) await settle();
+  expect(stops).toEqual([]);
+  expect(JOURNAL_LIMIT_BYTES - JOURNAL_RESERVE_BYTES - statSync(path).size).toBeLessThan(line);
+  // The owner's reproduction: payments captured at seconds 10 and 20 do not fit; watch stops at second 30.
+  now = Date.parse(at(10));
+  journal.capture(paymentCall(SEND, bytes(3, hash('lost-10')), app, id++));
+  now = Date.parse(at(20));
+  journal.capture(paymentCall(SEND, bytes(3, hash('lost-20')), app, id));
+  await settle();
+  now = Date.parse(at(30));
+  const stats = await journal.close();
+  expect(stats.stopped).toBe('full');
+  expect(stops).toEqual(['full']);
+  expect(stats.dropped).toBe(2);
+  expect(stats.payments).toBe(fit + 1);
+  expect(statSync(path).size).toBeLessThanOrEqual(JOURNAL_LIMIT_BYTES);
+  const read = await readJournal(path);
+  expect(read.records.slice(-2)).toEqual([
+    { v: 1, type: 'drop', time: at(20), run: journal.run, count: 2, first: at(10), last: at(20), reason: 'overload' },
+    { v: 1, type: 'full', time: at(20), run: journal.run },
+  ]);
+  const coverage = journalCoverage(read.records, NODE, Date.parse(at(0)), Date.parse(at(60)));
+  expect(coverage.covered).toEqual([[Date.parse(at(1)), Date.parse(at(10))]]);
+  // No time after second 10 is covered: the loss is listed with its count, and the gap from it keeps the reason journal-full.
+  expect(coverage.gaps).toEqual([
+    { from: Date.parse(at(0)), to: Date.parse(at(1)), reason: 'not-registered', dropped: 0 },
+    { from: Date.parse(at(10)), to: Date.parse(at(20)), reason: 'dropped', dropped: 2 },
+    { from: Date.parse(at(10)), to: Date.parse(at(60)), reason: 'journal-full', dropped: 0 },
+  ]);
+  expect(coverage.coveredMs).toBe(9_000);
+});

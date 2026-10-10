@@ -138,8 +138,9 @@ async function afterSubmitError(deps: PayerDeps, paymentHash: string, error: unk
     // holds) is settled by asking it, not by reading the message.
     deps.emit({ event: 'send-refused-by-lnd', paymentHash, message: error.message, grpcCode: error.grpcCode });
     const settled = await trackOnce(deps, paymentHash);
-    if (settled === 'not-found') {
-      deps.store.markRejected(paymentHash, error.message);
+    // The lookup is asynchronous: another tracker may have recorded a terminal state
+    // meanwhile. markRejected leaves a terminal record alone; the record below answers.
+    if (settled === 'not-found' && deps.store.markRejected(paymentHash, error.message)) {
       deps.emit({ event: 'failed', paymentHash, reason: `rejected before initiation: ${error.message}` });
       return { kind: 'failed', paymentHash, reason: `rejected before initiation: ${error.message}` };
     }

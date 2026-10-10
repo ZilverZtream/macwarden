@@ -144,6 +144,8 @@ async function payer(command: string, args: string[]): Promise<number> {
         if (fault !== 'none' && fault !== 'drop-stream-after-in-flight') throw new UsageError('--fault must be drop-stream-after-in-flight');
         const budgetId = values.budget === undefined ? undefined : identifier(values.budget, '--budget');
         const paymentRequest = required(values, 'invoice');
+        const replayed = await answerFromRecord(deps, operationId, paymentRequest);
+        if (replayed !== undefined) return replayed;
         const decoded = await decodeInvoice(deps, paymentRequest);
         if ('error' in decoded) { emit({ event: 'invoice-refused', operationId, reason: decoded.error }); return EXIT.refused; }
         emit({ event: 'invoice-decoded', operationId, paymentHash: decoded.invoice.paymentHash, amountMsat: decoded.invoice.amountMsat,
@@ -201,6 +203,37 @@ async function payer(command: string, args: string[]): Promise<number> {
   } finally {
     deps.store.close();
   }
+}
+
+/**
+ * A repeated request is answered from the record before the invoice is decoded,
+ * so a replay depends neither on the invoice still being valid (it may have
+ * expired since it was paid) nor on a fresh DecodePayReq. A completed operation
+ * replays its recorded success for any invoice it recorded, and is refused for
+ * any other; a payment that was sent is answered from the record or TrackPaymentV2.
+ * Only a new invoice, or a recorded intent that was never sent, goes on to be
+ * decoded and checked, because it is about to be sent. Returns undefined for those.
+ */
+async function answerFromRecord(deps: PayerDeps, operationId: string, paymentRequest: string): Promise<number | undefined> {
+  const operation = deps.store.operation(operationId);
+  if (operation === undefined) return undefined;
+  const recorded = deps.store.paymentForRequest(operationId, paymentRequest);
+  if (operation.state === 'completed') {
+    const paid = deps.store.paymentForOperation(operationId);
+    if (paid?.state !== 'succeeded') return undefined;
+    if (recorded === undefined) {
+      emit({ event: 'intent-refused', operationId, reason: `operation ${operationId} is already completed` });
+      return EXIT.refused;
+    }
+    emit({ event: 'already-recorded', operationId, paymentHash: paid.paymentHash, state: paid.state });
+    return exitFor({ kind: 'succeeded', paymentHash: paid.paymentHash, feeMsat: paid.feeMsat ?? 0n });
+  }
+  if (recorded === undefined || recorded.state === 'intent') return undefined;
+  if (recorded.state === 'failed') {
+    emit({ event: 'already-recorded', operationId, paymentHash: recorded.paymentHash, state: recorded.state });
+    return exitFor({ kind: 'failed', paymentHash: recorded.paymentHash, reason: recorded.failureReason ?? 'unknown' });
+  }
+  return exitFor(await reconcileOrReport(deps, recorded.paymentHash, recorded.state));
 }
 
 /** A repeated request for an operation that was already submitted is answered from LND, never by paying again. */

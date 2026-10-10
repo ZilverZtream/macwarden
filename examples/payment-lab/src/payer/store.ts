@@ -115,6 +115,13 @@ CREATE TABLE budget_refusals (
   available_msat INTEGER NOT NULL,
   at TEXT NOT NULL
 );
+`, `
+-- Each HTLC attempt carries the submission (payments.submissions at the time it was first
+-- recorded) it belongs to, so a NotFound for a later submission is judged by that
+-- submission's attempts only. Attempts recorded before this column existed are counted
+-- as the current submission's, which keeps the old, conservative answer for them.
+ALTER TABLE htlc_attempts ADD COLUMN submission INTEGER NOT NULL DEFAULT 0;
+UPDATE htlc_attempts SET submission = (SELECT submissions FROM payments WHERE payments.payment_hash = htlc_attempts.payment_hash);
 `];
 
 export type PaymentState = 'intent' | 'submitting' | 'in_flight' | 'uncertain' | 'succeeded' | 'failed';
@@ -250,6 +257,13 @@ export class PayerStore {
     return row === undefined ? undefined : paymentFrom(row);
   }
 
+  /** The operation's payment for this exact payment request, if one was recorded. */
+  paymentForRequest(operationId: string, paymentRequest: string): PaymentRecord | undefined {
+    const row = this.db.prepare(`SELECT * FROM payments WHERE operation_id = ? AND payment_request = ?
+      ORDER BY CASE WHEN state = 'failed' THEN 1 ELSE 0 END, updated_at DESC LIMIT 1`).get(operationId, paymentRequest);
+    return row === undefined ? undefined : paymentFrom(row);
+  }
+
   operation(operationId: string): OperationRecord | undefined {
     const row = this.db.prepare('SELECT * FROM operations WHERE operation_id = ?').get(operationId);
     return row === undefined ? undefined : operationFrom(row);
@@ -352,7 +366,10 @@ export class PayerStore {
         this.db.prepare(`INSERT INTO operations (operation_id, kind, amount_msat, state, budget_id, created_at, updated_at)
           VALUES (?, ?, ?, 'open', ?, ?, ?)`).run(input.operationId, input.kind, input.invoice.amountMsat, input.budgetId ?? null, now, now);
       } else {
-        this.db.prepare(`UPDATE operations SET state = 'open', updated_at = ? WHERE operation_id = ?`).run(now, input.operationId);
+        // A replacement payment brings its own budget (or none); the operation follows it, so
+        // show and prepareRetry see the budget the live payment is reserved against.
+        this.db.prepare(`UPDATE operations SET state = 'open', budget_id = ?, updated_at = ? WHERE operation_id = ?`)
+          .run(input.budgetId ?? null, now, input.operationId);
       }
       this.db.prepare(`INSERT INTO payments (payment_hash, operation_id, payment_request, destination, amount_msat, fee_limit_msat,
           max_parts, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'intent', ?, ?)`)
@@ -396,10 +413,15 @@ export class PayerStore {
    * record never saw LND acknowledge it. Back to intent: it may be submitted
    * again with the same payment hash. LND refuses a second payment for a hash
    * that is in flight or settled, so this can not pay twice.
+   *
+   * Only attempts of the current submission count: after prepareRetry the
+   * previous submission's attempts belong to a payment LND already reported
+   * failed, and say nothing about whether the retry reached LND.
    */
   markNotInitiated(paymentHash: string, evidence: string): boolean {
     return immediate(this.db, () => {
-      const attempts = this.db.prepare('SELECT COUNT(*) AS n FROM htlc_attempts WHERE payment_hash = ?').get(paymentHash) ?? {};
+      const attempts = this.db.prepare(`SELECT COUNT(*) AS n FROM htlc_attempts a JOIN payments p ON p.payment_hash = a.payment_hash
+        WHERE a.payment_hash = ? AND a.submission = p.submissions`).get(paymentHash) ?? {};
       if (int(attempts, 'n') > 0n) {
         this.#event(paymentHash, 'not-found-after-attempts', { evidence });
         return false;
@@ -413,16 +435,23 @@ export class PayerStore {
 
   /**
    * LND refused SendPaymentV2 with a definite error and has no payment for the
-   * hash: nothing was sent, and nothing will be. Terminal failure.
+   * hash: nothing was sent, and nothing will be. Terminal failure. Returns false
+   * when the record is already terminal, for example because a concurrent
+   * tracker recorded LND's success while this caller's lookup was in flight.
    */
-  markRejected(paymentHash: string, reason: string): void {
-    immediate(this.db, () => this.#fail(paymentHash, `REJECTED_BEFORE_INITIATION: ${reason}`, undefined));
+  markRejected(paymentHash: string, reason: string): boolean {
+    return immediate(this.db, () => this.#fail(paymentHash, `REJECTED_BEFORE_INITIATION: ${reason}`, undefined));
   }
 
+  /**
+   * Moves an unresolved payment to failed. Terminal states are final: a
+   * succeeded payment is never failed by this (its operation is completed and
+   * its ledger posted), and a failed one is not failed twice.
+   */
   #fail(paymentHash: string, reason: string, payment: Payment | undefined): boolean {
     const now = nowIso();
     const result = this.db.prepare(`UPDATE payments SET state = 'failed', failure_reason = ?, lnd_payment_index = COALESCE(?, lnd_payment_index),
-      uncertain_reason = NULL, resolved_at = ?, updated_at = ? WHERE payment_hash = ? AND state <> 'failed'`)
+      uncertain_reason = NULL, resolved_at = ?, updated_at = ? WHERE payment_hash = ? AND state NOT IN ('failed', 'succeeded')`)
       .run(reason, payment?.paymentIndex ?? null, now, now, paymentHash);
     if (changes(result) !== 1) return false;
     const record = this.payment(paymentHash) as PaymentRecord;
@@ -433,15 +462,17 @@ export class PayerStore {
   }
 
   #upsertAttempts(payment: Payment): void {
+    // A new attempt is tagged with the current submission; an update to a known attempt keeps its tag.
     const statement = this.db.prepare(`INSERT INTO htlc_attempts (payment_hash, attempt_id, status, principal_msat, fee_msat, hops, route,
-        failure_code, failure_source_index, attempt_time_ns, resolve_time_ns) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        failure_code, failure_source_index, attempt_time_ns, resolve_time_ns, submission)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT submissions FROM payments WHERE payment_hash = ?))
       ON CONFLICT (payment_hash, attempt_id) DO UPDATE SET status = excluded.status, failure_code = excluded.failure_code,
         failure_source_index = excluded.failure_source_index, resolve_time_ns = excluded.resolve_time_ns
         WHERE htlc_attempts.status NOT IN ('SUCCEEDED', 'FAILED')`);
     for (const attempt of payment.htlcs) {
       statement.run(payment.paymentHash, attempt.attemptId, attempt.status, attempt.principalMsat, attempt.route.totalFeesMsat,
         attempt.route.hops.length, attempt.route.hops.map(hop => hop.chanId).join('>'), attempt.failureCode ?? null,
-        attempt.failureSourceIndex ?? null, attempt.attemptTimeNs, attempt.resolveTimeNs);
+        attempt.failureSourceIndex ?? null, attempt.attemptTimeNs, attempt.resolveTimeNs, payment.paymentHash);
     }
   }
 
@@ -480,8 +511,14 @@ export class PayerStore {
           VALUES (?, ?, ?, ?, ?) ON CONFLICT (operation_id, payment_hash, account) DO NOTHING`);
         ledger.run(record.operationId, payment.paymentHash, 'principal', payment.valueMsat, now);
         ledger.run(record.operationId, payment.paymentHash, 'routing-fee', payment.feeMsat, now);
-        this.db.prepare(`UPDATE reservations SET state = 'consumed', actual_fee_msat = ?, updated_at = ?
-          WHERE payment_hash = ? AND state = 'held'`).run(payment.feeMsat, now, payment.paymentHash);
+        const consumed = changes(this.db.prepare(`UPDATE reservations SET state = 'consumed', actual_fee_msat = ?, updated_at = ?
+          WHERE payment_hash = ? AND state = 'held'`).run(payment.feeMsat, now, payment.paymentHash));
+        if (consumed === 0 && record.state === 'failed') {
+          // The recorded failure released the reservation; LND's success means the money left
+          // after all, so the latest reservation of this payment counts as consumed.
+          this.db.prepare(`UPDATE reservations SET state = 'consumed', actual_fee_msat = ?, updated_at = ? WHERE reservation_id =
+            (SELECT MAX(reservation_id) FROM reservations WHERE payment_hash = ? AND state = 'released')`).run(payment.feeMsat, now, payment.paymentHash);
+        }
         this.#event(payment.paymentHash, 'succeeded', { source, valueMsat: payment.valueMsat, feeMsat: payment.feeMsat,
           htlcAttempts: payment.htlcs.length, succeededAttempts: payment.htlcs.filter(item => item.status === 'SUCCEEDED').length });
         return { state: 'succeeded', completed, failed: false };
@@ -507,31 +544,38 @@ export class PayerStore {
   /**
    * Prepares a definitely failed payment for another submission of the same
    * invoice (same payment hash). With a budget, a new reservation is checked
-   * and taken in the same transaction.
+   * and taken in the same transaction. A completed operation is never retried,
+   * whatever its payment rows say: completion is final. The budget is the one
+   * the failed payment was reserved against (the operation's, for a payment
+   * recorded before replacements moved the operation's budget with them).
    */
   prepareRetry(operationId: string): IntentResult {
     return immediate(this.db, (): IntentResult => {
       const operation = this.operation(operationId);
       if (operation === undefined) return { outcome: 'refused', reason: `operation ${operationId} does not exist` };
+      if (operation.state === 'completed') return { outcome: 'refused', reason: `operation ${operationId} is already completed` };
       const payment = this.paymentForOperation(operationId);
       if (payment === undefined) return { outcome: 'refused', reason: `operation ${operationId} has no payment` };
       if (payment.state !== 'failed') {
         return { outcome: 'refused', reason: `payment ${payment.paymentHash} is ${payment.state}; only a payment LND reported failed is retried` };
       }
       const now = nowIso();
-      if (operation.budgetId !== undefined) {
-        const status = this.#budgetStatus(operation.budgetId);
+      const reserved = this.db.prepare('SELECT budget_id FROM reservations WHERE payment_hash = ? ORDER BY reservation_id DESC LIMIT 1')
+        .get(payment.paymentHash);
+      const budgetId = reserved === undefined ? operation.budgetId : text(reserved, 'budget_id');
+      if (budgetId !== undefined) {
+        const status = this.#budgetStatus(budgetId);
         const requested = payment.amountMsat + payment.feeLimitMsat;
         if (status === undefined || requested > status.availableMsat) {
           const available = status?.availableMsat ?? 0n;
           this.db.prepare(`INSERT INTO budget_refusals (budget_id, operation_id, payment_hash, requested_msat, available_msat, at)
-            VALUES (?, ?, ?, ?, ?, ?)`).run(operation.budgetId, operationId, payment.paymentHash, requested, available, now);
-          return { outcome: 'refused', reason: `budget ${operation.budgetId} has ${available} msat available, ${requested} msat requested`,
+            VALUES (?, ?, ?, ?, ?, ?)`).run(budgetId, operationId, payment.paymentHash, requested, available, now);
+          return { outcome: 'refused', reason: `budget ${budgetId} has ${available} msat available, ${requested} msat requested`,
             requestedMsat: requested, availableMsat: available };
         }
         this.db.prepare(`INSERT INTO reservations (budget_id, operation_id, payment_hash, principal_msat, fee_allowance_msat, state,
             created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'held', ?, ?)`)
-          .run(operation.budgetId, operationId, payment.paymentHash, payment.amountMsat, payment.feeLimitMsat, now, now);
+          .run(budgetId, operationId, payment.paymentHash, payment.amountMsat, payment.feeLimitMsat, now, now);
       }
       this.db.prepare(`UPDATE payments SET state = 'intent', failure_reason = NULL, resolved_at = NULL, updated_at = ?
         WHERE payment_hash = ?`).run(now, payment.paymentHash);

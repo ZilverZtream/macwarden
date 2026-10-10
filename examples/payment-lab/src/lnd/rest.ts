@@ -182,10 +182,15 @@ export class LndRestClient {
       req.on('response', (res: IncomingMessage) => {
         responded = true;
         if (res.statusCode !== 200) {
-          // A non-200 status carries one error object, not a stream.
+          // A non-200 status carries one error object, not a stream. Its body can be cut
+          // off like any other response, so this branch needs the same error and close
+          // handling as the stream below: the connect timer is over once TLS is up, and
+          // nothing else would settle the promise.
           const chunks: Buffer[] = [];
           let size = 0;
           res.on('data', (chunk: Buffer) => { size += chunk.length; if (size <= MAX_UNARY_BYTES) chunks.push(chunk); });
+          res.on('error', error => finish(new TransportError(`${this.label}: ${error.message}`, 'response', { cause: error })));
+          res.on('close', () => { if (!res.complete) finish(new TransportError(`${this.label}: HTTP ${res.statusCode} response ended early`, 'response')); });
           res.on('end', () => {
             let parsed: unknown;
             try { parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { parsed = undefined; }
@@ -244,7 +249,10 @@ export class LndRestClient {
         });
       });
       req.on('close', () => {
-        if (!responded) finish(new TransportError(`${this.label}: connection closed before a response`, phase()));
+        if (!responded) { finish(new TransportError(`${this.label}: connection closed before a response`, phase())); return; }
+        // Backstop once a response arrived: its own handlers settle first (they run in this
+        // turn or the next); if none did, the connection is gone and the outcome unknown.
+        setImmediate(() => finish(new TransportError(`${this.label}: connection closed before the response settled`, 'response')));
       });
       req.end(payload);
     });
