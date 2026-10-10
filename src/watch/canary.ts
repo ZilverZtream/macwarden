@@ -4,6 +4,7 @@
 // closed (rejected, but silently). The name is per installation, random and
 // innocuous because `lncli printmacaroon` shows it; each canary has its own condition.
 import * as nodeFs from 'node:fs/promises';
+import { reserveOwnerOnly } from '../private-file.js';
 import { randomBytes } from 'node:crypto';
 import type { RegistryEntry } from '../registry/index.js';
 import { readBoundedFile, type BoundedReadIO } from '../bounded-file.js';
@@ -65,7 +66,8 @@ export async function ensureCanaryConfig(path: string, fs: BoundedReadIO = nodeF
   if (existing) return existing;
   const config = { caveatName: newCaveatName(random) };
   let handle;
-  try { handle = await fs.open(path, 'wx', 0o600); }
+  // Owner-only from creation on every platform (1.2.1).
+  try { handle = (await reserveOwnerOnly(path, { open: (...args: Parameters<typeof fs.open>) => fs.open(...args), unlink: nodeFs.unlink })).handle; }
   catch (error) {
     // Another invocation created it first: use that one.
     if ((error as NodeJS.ErrnoException).code === 'EEXIST') {

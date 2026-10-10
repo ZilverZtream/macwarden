@@ -438,13 +438,21 @@ function byStartThenDetector(a: Hit, b: Hit): number {
 
 // Punctuation that commonly follows a URI in text (markdown, prose, YAML flow, shell) but is
 // matched by the lndconnect pattern. It is removed only when the URI as matched does not parse.
-const TRAILING_PUNCTUATION = /[`)\]}>.,;:!?'"*]+$/;
+// Stripped by one backward scan: the anchored regex `[...]+$` this replaced backtracked
+// quadratically on a match that ends in other characters (audit 1.2.1), so one hostile 262 KB
+// line cost 35 s.
+const TRAILING_PUNCTUATION = new Set('`)]}>.,;:!?\'"*');
+function withoutTrailingPunctuation(text: string): string {
+  let end = text.length;
+  while (end > 0 && TRAILING_PUNCTUATION.has(text[end - 1])) end -= 1;
+  return text.slice(0, end);
+}
 
 /** The credential an lndconnect match carries, and the match's length in code points once confirmed. */
 function lndconnectCredential(text: string): { bytes: Buffer; length: number } | null {
   const bytes = parseLndconnect(text, { standardBase64: true });
   if (bytes) return { bytes, length: Array.from(text).length };
-  const trimmed = text.replace(TRAILING_PUNCTUATION, '');
+  const trimmed = withoutTrailingPunctuation(text);
   if (trimmed === text) return null;
   const retried = parseLndconnect(trimmed, { standardBase64: true });
   return retried ? { bytes: retried, length: Array.from(trimmed).length } : null;
@@ -534,7 +542,7 @@ function scanLine(path: string, line: number, text: string, now: Date, ctx: Scan
       confirmedL402.add(hit);
       lineFindings.push({ hit, finding });
     }
-    spans.push(...l402Spans);
+    for (const span of l402Spans) spans.push(span);
     spans.sort((a, b) => a.start - b.start);
   }
   let spanIndex = 0;

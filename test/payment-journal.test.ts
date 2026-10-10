@@ -435,3 +435,143 @@ it('PAYJ/coverage gaps carry their reason; coverage exists only between register
   expect(journalCoverage(instant, NODE, Date.parse(at(1)), Date.parse(at(20))).gaps)
     .toEqual([{ from: Date.parse(at(5)), to: Date.parse(at(5)), reason: 'dropped', dropped: 1 }]);
 });
+
+// 1.2.1: coverage is computed in sorted sweeps. A hostile journal holds hundreds of thousands of
+// drop records; pairing each with every span was quadratic.
+it('PAYJ/coverage-linear tens of thousands of disjoint drop windows cost linear time', async () => {
+  const { compare, LINEAR_4X } = await import('./helpers/growth.js');
+  const journalOf = (drops: number) => {
+    const lines = [start(0), record('registered', 1, { session: 1 })];
+    for (let index = 0; index < drops; index++)
+      lines.push(record('drop', 12 + 3 * index, { count: 1, first: at(10 + 3 * index), last: at(11 + 3 * index), reason: 'overload' }));
+    lines.push(record('unregistered', 20 + 3 * drops, { session: 1, reason: 'stopping' }));
+    const records = lines.map(line => parseRecord(line)!);
+    return () => {
+      const coverage = journalCoverage(records, NODE, Date.parse(at(0)), Date.parse(at(30 + 3 * drops)));
+      expect(coverage.gaps.filter(gap => gap.reason === 'dropped')).toHaveLength(drops);
+      expect(coverage.gaps.reduce((total, gap) => total + gap.dropped, 0)).toBe(drops);
+      expect(coverage.covered).toHaveLength(drops + 1);
+    };
+  };
+  const timing = await compare(async () => journalOf(5_000)(), async () => journalOf(20_000)());
+  expect(timing.ratio, timing.summary).toBeLessThan(LINEAR_4X);
+}, 120_000);
+
+// 1.2.1: a write may complete partially; every byte of a line is written before it counts.
+it('PAYJ/short-write a descriptor that writes a few bytes at a time still lands every record; one that makes no progress stops the run', async () => {
+  const dir = scratch();
+  const chunked = (limit: number) => ({ ...fs, open: async (...args: Parameters<typeof fs.open>) => {
+    const handle = await fs.open(...args);
+    return new Proxy(handle, { get(target, key) {
+      if (key === 'write') return async (data: Buffer | string, offset = 0, length?: number, position?: number | null) => {
+        const buffer = typeof data === 'string' ? Buffer.from(data, 'utf8') : data;
+        const take = Math.min(limit, (length ?? buffer.length - offset));
+        return target.write(buffer, offset, take, position ?? null);
+      };
+      const value = Reflect.get(target, key, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+  } } as typeof fs);
+  const path = join(dir, 'chunked.journal');
+  const journal = await openJournal(path, { fs: chunked(7) });
+  journal.registered();
+  journal.capture(paymentCall(SEND, bytes(3, hash('seven')), vector('preset-pay-only')));
+  journal.capture(paymentCall(SEND, bytes(3, hash('eight')), vector('preset-pay-only'), 2n));
+  const stats = await journal.close();
+  expect(stats).toMatchObject({ payments: 2, dropped: 0, stopped: null });
+  const read = await readJournal(path);
+  expect(read.tornTail).toBe(false);
+  expect(read.records.filter(item => item.type === 'payment').map(item => (item as { paymentHash: string }).paymentHash))
+    .toEqual([hash('seven').toString('hex'), hash('eight').toString('hex')]);
+  expect(read.records.map(item => item.type)).toEqual(['run-start', 'registered', 'payment', 'payment', 'unregistered', 'run-end']);
+
+  const stuck = join(dir, 'stuck.journal');
+  const stops: string[] = [];
+  let open = true;
+  const noProgress = { ...fs, open: async (...args: Parameters<typeof fs.open>) => {
+    const handle = await fs.open(...args);
+    return new Proxy(handle, { get(target, key) {
+      if (key === 'write' && !open) return async () => ({ bytesWritten: 0, buffer: Buffer.alloc(0) });
+      const value = Reflect.get(target, key, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+  } } as typeof fs;
+  const second = await openJournal(stuck, { fs: noProgress, onStop: reason => stops.push(reason) });
+  open = false;
+  second.registered();
+  second.capture(paymentCall(SEND, bytes(3, hash('never')), vector('preset-pay-only')));
+  const ended = await second.close();
+  expect(ended.stopped).toBe('write-failed');
+  expect(stops).toEqual(['write-failed']);
+  expect((await readJournal(stuck)).records.map(item => item.type)).toEqual(['run-start']);
+});
+
+// 1.2.1: an amount the journal cannot record (above int64 millisatoshi) is written as no amount,
+// so the reader still accepts the file.
+it('PAYJ/bounds a request whose fee limit or amount overflows the journal range is journaled without it, and the journal stays readable', async () => {
+  const dir = scratch();
+  const path = join(dir, 'overflow.journal');
+  const journal = await openJournal(path);
+  journal.registered();
+  const max = (1n << 63n) - 1n;
+  journal.capture(paymentCall(SEND, message(bytes(3, hash('overflow')), uint(2, 1n << 62n), uint(7, max)), vector('preset-pay-only')));
+  journal.capture(paymentCall(SEND, message(bytes(3, hash('fine')), uint(12, max), uint(13, max)), vector('preset-pay-only'), 2n));
+  const stats = await journal.close();
+  expect(stats).toMatchObject({ payments: 2, dropped: 0, stopped: null });
+  const read = await readJournal(path);
+  const payments = read.records.filter(item => item.type === 'payment') as Array<Record<string, unknown>>;
+  expect(payments[0]).toMatchObject({ paymentHash: hash('overflow').toString('hex'), amountMsat: null, amountSource: null, feeLimitMsat: null, extraction: 'complete' });
+  expect(payments[1]).toMatchObject({ paymentHash: hash('fine').toString('hex'), amountMsat: max.toString(), feeLimitMsat: max.toString() });
+});
+
+// 1.2.1: the reader validates lines as it reads them and refuses a long run of unreadable lines.
+it('PAYJ/reader more than 64 consecutive unreadable lines make the journal invalid wherever they are; 64 at the tail are a torn tail', async () => {
+  const dir = scratch();
+  const prefix = `${start(0)}\n${record('registered', 1, { session: 1 })}\n`;
+  const tolerated = join(dir, 'tolerated.journal');
+  writeFileSync(tolerated, prefix + '\n'.repeat(64));
+  const read = await readJournal(tolerated);
+  expect(read.records.map(item => item.type)).toEqual(['run-start', 'registered']);
+  expect(read.tornTail).toBe(true);
+  const refused = join(dir, 'refused.journal');
+  writeFileSync(refused, prefix + '\n'.repeat(65));
+  await expect(readJournal(refused)).rejects.toThrow('invalid payment journal (line 67)');
+  // A file of nothing but newlines fails at once, not after holding every line.
+  const empties = join(dir, 'empties.journal');
+  writeFileSync(empties, `${start(0)}\n${'\n'.repeat(4_000_000)}`);
+  const started = performance.now();
+  await expect(readJournal(empties)).rejects.toThrow(/invalid payment journal/);
+  expect(performance.now() - started).toBeLessThan(5_000);
+}, 60_000);
+
+// 1.2.1: decoding has the same 20 % time budget as attribution, so a flood of slow payloads
+// cannot keep the event loop busy; the intake fills and drops instead.
+it('PAYJ/budget a flood of 64 KiB payloads never blocks the event loop for long: decoding is budgeted and the rest is dropped', async () => {
+  const dir = scratch();
+  const path = join(dir, 'budget.journal');
+  const journal = await openJournal(path);
+  journal.registered();
+  // A SendToRouteV2 request with 2,000 repeated route messages of 16 empty hops: slow to decode, under the 64 KiB cap.
+  const hop = Buffer.from([0x22, 0x00]);
+  const route = Buffer.concat([Buffer.from([0x30, 0x05]), ...Array.from({ length: 16 }, () => hop)]);
+  const payload = message(bytes(1, hash('flood')), ...Array.from({ length: 1_750 }, () => bytes(2, route)));
+  expect(payload.length).toBeLessThan(64 * 1024);
+  let worstGap = 0;
+  let last = performance.now();
+  const watchdog = setInterval(() => { const now = performance.now(); worstGap = Math.max(worstGap, now - last); last = now; }, 1);
+  const began = performance.now();
+  try {
+    for (let round = 0; round < 6; round++) {
+      for (let index = 0; index < 400; index++) journal.capture(paymentCall(ROUTE, payload, vector('preset-pay-only'), BigInt(round * 400 + index + 1)));
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  } finally { clearInterval(watchdog); }
+  const stats = await journal.close();
+  const elapsed = performance.now() - began;
+  console.log(`PAYJ/budget worst loop gap ${worstGap.toFixed(0)} ms over ${elapsed.toFixed(0)} ms; journaled ${stats.payments}, dropped ${stats.dropped}`);
+  expect(stats.payments + stats.dropped).toBe(2_400);
+  expect(stats.dropped).toBeGreaterThan(0);
+  expect(worstGap).toBeLessThan(150);
+  const read = await readJournal(path);
+  expect(read.records.filter(item => item.type === 'drop').length).toBeGreaterThan(0);
+}, 60_000);

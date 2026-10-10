@@ -132,7 +132,8 @@ function createLnd(config, macaroonHex, onRequest) {
     if (payload !== undefined) headers['content-type'] = 'application/json';
     onRequest?.(method, path, headers);
     const what = `${method} ${path.split('?')[0].replace(/\/lnbc\w+$/, '/<invoice>')}`;
-    const response = await exchange(httpsRequest, { host: config.lndHost, port: config.lndPort, method, path, headers, ca: config.ca },
+    // rejectUnauthorized is explicit: an inherited NODE_TLS_REJECT_UNAUTHORIZED=0 would otherwise turn the pinned certificate off.
+    const response = await exchange(httpsRequest, { host: config.lndHost, port: config.lndPort, method, path, headers, ca: config.ca, rejectUnauthorized: true },
       payload, timeoutMs, what);
     if (response.status !== 200) throw new HttpStatusError(what, response.status, lndMessage(response.text));
     if (!stream) return parseJson(response.text) ?? {};

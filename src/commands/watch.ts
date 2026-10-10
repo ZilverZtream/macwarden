@@ -50,6 +50,8 @@ export type Deps = {
   dropped?: () => number;
   /** Waits for queued output, at most the given milliseconds. */
   drainOutput?: (ms: number) => Promise<boolean>;
+  /** After closeOutput: resolves once the write already in flight has completed (or after `ms`), so nothing interleaves with the summary. */
+  settleOutput?: (ms: number) => Promise<boolean>;
   /** Abandons queued output after a final drain timed out (a reader that never reads). */
   closeOutput?: () => void;
   platform?: NodeJS.Platform;
@@ -191,7 +193,14 @@ function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /** One watcher per registry: an exclusive lock file, replaced only when its owner is gone. */
-class OwnerlessLock extends Error {}
+class OwnerlessLock extends Error {
+  /** What the operator is told at W6. */
+  readonly detail: string;
+  constructor(message: string, detail: string) { super(message); this.detail = detail; }
+}
+const ownerless = (path: string) => new OwnerlessLock('watch lock without owner record',
+  `the watch lock ${path} holds no owner record (an earlier watch was interrupted while creating it); `
+  + 'if no watch is running for this registry, delete that file and start watch again');
 
 type LockOwner = { pid: number; hostname: string; domain?: unknown };
 
@@ -273,6 +282,15 @@ export async function acquireLock(path: string, deps: Deps): Promise<() => Promi
         throw failure;
       }
       await handle.close();
+      // On Windows an exclusive create follows a dangling symbolic link and creates its target
+      // (audit 1.2.1): the lock must be the regular file at the path itself, or the file it did
+      // create is removed and the lock refused.
+      const onDisk = await deps.fs.lstat(path, { bigint: true }).catch(() => null);
+      if (!onDisk || !onDisk.isFile() || onDisk.isSymbolicLink() || onDisk.dev !== identity.dev || onDisk.ino !== identity.ino) {
+        const target = await deps.fs.realpath(path).catch(() => null);
+        if (target && resolvePath(target) !== key) await deps.fs.unlink(target).catch(() => undefined);
+        throw new OwnerlessLock('watch lock path is a symbolic link', `the watch lock path ${path} is a symbolic link; remove it and start watch again`);
+      }
       heldLocks.add(key);
       return async () => {
         heldLocks.delete(key);
@@ -294,8 +312,8 @@ export async function acquireLock(path: string, deps: Deps): Promise<() => Promi
         // through one descriptor bound to the checked file and at most LOCK_FILE_LIMIT + 1 bytes.
         stale = await readPlainFile(path, deps.fs, LOCK_FILE_LIMIT); owner = JSON.parse(stale) as typeof owner;
       }
-      catch { throw new OwnerlessLock('watch lock without owner record'); }
-      if (typeof owner.hostname !== 'string' || !Number.isSafeInteger(owner.pid)) throw new OwnerlessLock('watch lock without owner record');
+      catch { throw ownerless(path); }
+      if (typeof owner.hostname !== 'string' || !Number.isSafeInteger(owner.pid)) throw ownerless(path);
       if (!lockOwnerGone(owner as LockOwner, host, pid, domain)) throw Object.assign(new Error('watch lock held'), { code: 'EEXIST' });
       await takeOverStaleLock(path, stale, pid, deps);
     }
@@ -393,12 +411,13 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
     return wanted !== guardName;
   };
 
+  // Interrupted before W6: nothing locked or registered (audit 1.2.1).
+  if (cancellationSignal()?.aborted) return fail(6, 'cancelled', 'interrupted', warnings);
   const usageFile = usagePath(registry.location);
   let release: () => Promise<void>;
   try { release = await acquireLock(`${registry.location}.watch.lock`, deps); }
   catch (error) {
-    if (error instanceof OwnerlessLock) return fail(3, 'W6', `the watch lock ${registry.location}.watch.lock holds no owner record `
-      + '(an earlier watch was interrupted while creating it); if no watch is running for this registry, delete that file and start watch again', warnings);
+    if (error instanceof OwnerlessLock) return fail(3, 'W6', error.detail, warnings);
     return fail(3, 'W6', `another watch is running for this registry (lock ${registry.location}.watch.lock)`, warnings);
   }
   let usage: UsageStore;
@@ -428,6 +447,8 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
       return fail(3, 'W6', error instanceof JournalError ? error.message : 'cannot open payment journal', warnings);
     }
   }
+  if (journal?.aclWarning) warnings.push({ code: 'acl-best-effort',
+    message: 'the payment journal lies on a volume that stores no Windows permissions (FAT or exFAT): anyone with access to the volume can read it' });
 
   const register = deps.register ?? registerMiddleware;
   const sleep = deps.sleep ?? defaultSleep;
@@ -748,6 +769,10 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
     processCanaries();
     runWork(Number.MAX_SAFE_INTEGER);
     throttle.flush();
+    // From here on no alert command starts (audit MW102-05): the usage write below may take a
+    // while (the Windows owner-only creation runs a helper), and a waiting alert must not start
+    // behind a command that ends meanwhile. The running one gets its deadline at runner.stop.
+    runner.stopping();
     usage.endCoverage(pubkey, deps.clock());
     await flush();
     if (journal) {
@@ -773,9 +798,13 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
     // Queued events go out before the summary; a reader that never reads cannot hold us forever.
     // A reader that never reads must not keep this process alive: after the bounded
     // drain, drop what is left (counted) and stop retrying writes.
-    if (await deps.drainOutput?.(5_000) === false) deps.closeOutput?.();
+    if (await deps.drainOutput?.(5_000) === false) { deps.closeOutput?.(); await deps.settleOutput?.(1_000); }
   }
-  // A run that never registered watched nothing: it must not report success.
+  // A run that never registered watched nothing: it must not report success. One interrupted
+  // before its first registration was interrupted, not refused (audit 1.2.1).
+  if (!failure && !everRegisteredRun && signal?.aborted)
+    return fail(6, 'cancelled', `interrupted before any session registered with LND's gRPC endpoint ${request.grpcHost}:${request.grpcPort} `
+      + `(from ${request.grpcSource})`, warnings);
   if (!failure && !everRegisteredRun) failure = { registered: false, code: 4, stage: 'W7', message: unreachable(), disabled: false };
   if (failure) {
     if (failure.disabled) return fail(4, 'W7', 'LND RPC middleware is disabled: set rpcmiddleware.enable=true in lnd.conf and restart LND '
@@ -798,10 +827,10 @@ export async function run(args: string[], deps: Deps): Promise<WatchOutput> {
 }
 
 /** Production event output: queued and written off the event loop (see output-queue.ts). */
-export function stdoutEvents(): Pick<Deps, 'emit' | 'dropped' | 'drainOutput' | 'closeOutput'> {
+export function stdoutEvents(): Pick<Deps, 'emit' | 'dropped' | 'drainOutput' | 'closeOutput' | 'settleOutput'> {
   let stopped = false;
   const queue = createOutputQueue(fdWriter(1, undefined, undefined, () => stopped));
-  return { emit: (line, priority) => queue.push(line, priority), dropped: queue.dropped, drainOutput: ms => queue.drain(ms),
+  return { emit: (line, priority) => queue.push(line, priority), dropped: queue.dropped, drainOutput: ms => queue.drain(ms), settleOutput: ms => queue.settle(ms),
     closeOutput: () => { stopped = true; queue.close(); } };
 }
 

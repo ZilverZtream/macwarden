@@ -7,4 +7,6 @@
   entry: macwarden scan --fail-on READ --ignore-file .macwardenignore
   language: system
   pass_filenames: true
-  types: [text]
+  # Both text and binary: pre-commit classes a macaroon file (it starts with bytes 02 01 03) as
+  # binary, and "types: [text]" never passed one to the scan (audit 1.2.1).
+  types_or: [text, binary]

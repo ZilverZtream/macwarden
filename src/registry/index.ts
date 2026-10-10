@@ -1,5 +1,9 @@
 import { ownProcessDomain, validDomain, type ProcessDomain } from './process-domain.js';
 import * as nodeFs from 'node:fs/promises';
+import { reserveOwnerOnly } from '../private-file.js';
+
+/** Largest registry file read: 64 MiB holds far more entries than one node ever bakes. */
+export const REGISTRY_FILE_LIMIT = 64 * 1024 * 1024;
 import { homedir as nodeHomedir, hostname as nodeHostname } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -427,7 +431,8 @@ export class Registry {
     const tempPath = `${this.path}.${randomUUID()}.tmp`;
     let handle: nodeFs.FileHandle | undefined;
     try {
-      handle = await this.fs.open(tempPath, 'wx', 0o600);
+      // Owner-only from creation on every platform (1.2.1); the rename keeps that.
+      handle = (await reserveOwnerOnly(tempPath, this.fs)).handle;
       await handle.writeFile(this.originalText !== undefined && JSON.stringify(this.entries) === this.originalEntries
         ? this.originalText : JSON.stringify({ schema: 1, entries: this.entries }, null, 2) + '\n');
       await handle.sync();
@@ -491,8 +496,12 @@ export async function openRegistry(path?: string, deps: RegistryDeps = {}): Prom
   try { selected = await resolveUnprotectedPath(path ?? defaultPath(deps), fs); }
   catch { input('registry-read', 'cannot read registry'); }
   let text: string;
-  try { text = await fs.readFile(selected, 'utf8'); }
-  catch (error) {
+  // Bounded like every other sidecar (audit 1.2.1): a regular file of at most REGISTRY_FILE_LIMIT.
+  try {
+    const found = await fs.stat(selected);
+    if (!found.isFile() || found.size > REGISTRY_FILE_LIMIT) input('registry-read', 'cannot read registry');
+    text = await fs.readFile(selected, 'utf8');
+  } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return new Registry(selected, [], deps);
     input('registry-read', 'cannot read registry');
   }

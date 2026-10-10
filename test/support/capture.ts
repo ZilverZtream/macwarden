@@ -1,6 +1,7 @@
 import { vi } from 'vitest';
 
-export async function captureMain(main: (argv: string[]) => Promise<number>, argv: string[]) {
+export async function captureMain(main: (argv: string[], runtime?: { execArgv?: readonly string[]; nodeVersion?: string }) => Promise<number>,
+  argv: string[], runtime?: { execArgv?: readonly string[]; nodeVersion?: string }) {
   let stdout = '';
   let stderr = '';
   const out = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: string | Uint8Array) => {
@@ -15,7 +16,7 @@ export async function captureMain(main: (argv: string[]) => Promise<number>, arg
     throw new Error('process.exit called from main');
   }) as typeof process.exit);
   try {
-    const code = await main(argv);
+    const code = await main(argv, runtime);
     return { code, stdout, stderr, exitCalls: exit.mock.calls.length };
   } finally {
     out.mockRestore();

@@ -61,7 +61,7 @@ it('CP-001/B10 pins the package, lockfile, scripts and strict TypeScript', () =>
   const lock = JSON.parse(read('package-lock.json'));
   const tsconfig = JSON.parse(read('tsconfig.json'));
   expect(pkg).toMatchObject({
-    name: 'macwarden', version: '1.2.0', type: 'module', license: 'MIT',
+    name: 'macwarden', version: '1.2.1', type: 'module', license: 'MIT',
     engines: { node: '^22.23.2 || ^24.18.1 || >=26.5.1' },
   });
   expect(pkg.dependencies ?? {}).toEqual({});
@@ -70,7 +70,7 @@ it('CP-001/B10 pins the package, lockfile, scripts and strict TypeScript', () =>
   expect(pkg.devDependencies).toEqual(pinned);
   expect(pkg.scripts).toMatchObject(scripts);
   expect(lock.packages['']).toMatchObject({
-    name: 'macwarden', version: '1.2.0', devDependencies: pinned,
+    name: 'macwarden', version: '1.2.1', devDependencies: pinned,
   });
   expect(tsconfig.compilerOptions.strict).toBe(true);
 });
@@ -168,4 +168,11 @@ it('CP-001/B13 restricts network imports to src/lnd and keeps runtime packages o
         `${relative(root, file)} imports package ${specifier}`).toBe(true);
     }
   }
+});
+
+// Audit 1.2.1: pre-commit classes a macaroon file as binary; "types: [text]" never passed one to the scan.
+it('CP-001/B12 the pre-commit hook receives binary files as well as text', () => {
+  const hook = read('.pre-commit-hooks.yaml');
+  expect(hook).toMatch(/^ {2}types_or: \[text, binary\]$/m);
+  expect(hook).not.toMatch(/^ {2}types: \[text\]$/m);
 });

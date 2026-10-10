@@ -202,3 +202,23 @@ it('MW110-01 hostile 5 MB lines of open candidates scan in linear time', async (
     expect(timing.ratio, `${name}: ${timing.summary}`).toBeLessThan(LINEAR_4X);
   }
 }), 180_000);
+
+// Audit 1.2.1: the trailing-punctuation strip behind the lndconnect retry backtracked
+// quadratically on a hit ending in other characters (35 s for one 262 KB line, no finding).
+it('MW110-01 an lndconnect hit followed by a wall of punctuation scans in linear time', async () => temp(async dir => {
+  const shapes = {
+    parens: (n: number) => `lndconnect://h?macaroon=${')'.repeat(n)}x`,
+    mixed: (n: number) => `lndconnect://h?macaroon=${'.,;:!?)]}>'.repeat(Math.ceil(n / 10)).slice(0, n)}x`,
+  };
+  for (const [name, shape] of Object.entries(shapes)) {
+    const scanOf = (size: number) => {
+      const path = join(dir, `${name}-${size}.txt`);
+      writeFileSync(path, shape(size));
+      return async () => { await scan([path], {}); };
+    };
+    const timing = await compare(scanOf(100_000), scanOf(400_000));
+    console.log(`MW110-01 ${name} 100 KB and 400 KB: ${timing.summary}`);
+    expect(timing.ratio, `${name}: ${timing.summary}`).toBeLessThan(LINEAR_4X);
+    expect(timing.large, name).toBeLessThan(5_000);
+  }
+}), 180_000);

@@ -3,6 +3,7 @@
 // timestamps:
 // never macaroon bytes, request or response payloads, or gRPC metadata.
 import * as nodeFs from 'node:fs/promises';
+import { reserveOwnerOnly } from '../private-file.js';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
 import { BoundedFileError, readBoundedFile, type BoundedReadIO } from '../bounded-file.js';
@@ -264,6 +265,7 @@ export class UsageStore {
     const safeMethod = /^\/[A-Za-z0-9_.]+\/[A-Za-z0-9_]+$/.test(method) ? method : '/unknown/Unknown';
     const key = this.key(nodePubkey, credential, rootKeyId, safeMethod);
     const now = at.toISOString();
+    this.byRoot = null;
     const existing = this.records.get(key);
     if (existing) {
       if (error) existing.errors += 1; else existing.calls += 1;
@@ -304,9 +306,24 @@ export class UsageStore {
   /** Records in a stable order (ordinal comparison, no locale work). */
   entries(): UsageRecord[] { return sortRecords([...this.records.values()]); }
 
+  // Records by node and root key ID, built on first use and dropped on every change (audit
+  // 1.2.1: inventory asked for each of 95,000 root key IDs, scanning every record each time).
+  private byRoot: Map<string, UsageRecord[]> | null = null;
+  private rootIndex(): Map<string, UsageRecord[]> {
+    if (this.byRoot) return this.byRoot;
+    const index = new Map<string, UsageRecord[]>();
+    for (const record of this.records.values()) {
+      const key = `${record.nodePubkey}\n${record.rootKeyId}`;
+      const list = index.get(key);
+      if (list) list.push(record); else index.set(key, [record]);
+    }
+    return this.byRoot = index;
+  }
+
   forCredential(nodePubkey: string, select: { rootKeyId?: string; credential?: string }): UsageRecord[] {
     const node = nodePubkey.toLowerCase();
-    return sortRecords([...this.records.values()].filter(record => record.nodePubkey === node
+    const candidates = select.rootKeyId === undefined ? [...this.records.values()] : this.rootIndex().get(`${node}\n${select.rootKeyId}`) ?? [];
+    return sortRecords(candidates.filter(record => record.nodePubkey === node
       && (select.rootKeyId === undefined || record.rootKeyId === select.rootKeyId)
       && (select.credential === undefined || record.credential === select.credential)));
   }
@@ -424,7 +441,8 @@ export async function writeUsage(path: string, store: UsageStore,
   // Snapshot first: records arriving during the write keep 'changed' set for the next flush.
   const version = store.version;
   const text = store.toText();
-  const handle = await fs.open(temp, 'wx', 0o600);
+  // Owner-only from creation on every platform (1.2.1); the rename keeps that.
+  const { handle } = await reserveOwnerOnly(temp, fs);
   let renamed = false;
   try {
     await handle.writeFile(text, 'utf8');

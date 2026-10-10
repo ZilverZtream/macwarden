@@ -86,6 +86,8 @@ export class LndRestClient {
       method,
       path,
       ca: this.#connection.tlsCert,
+      // Explicit: an inherited NODE_TLS_REJECT_UNAUTHORIZED=0 would otherwise turn the pinned certificate off.
+      rejectUnauthorized: true,
       agent: false,
       headers: {
         'Grpc-Metadata-macaroon': this.#connection.macaroonHex,

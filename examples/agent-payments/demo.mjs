@@ -101,7 +101,8 @@ async function waitFor(what, condition, timeoutMs = 120_000) {
 }
 
 // macwarden refuses to run with NODE_OPTIONS or a network NODE_DEBUG (they could log credentials).
-const baseEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== 'NODE_OPTIONS' && key !== 'NODE_DEBUG'));
+const baseEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== 'NODE_OPTIONS' && key !== 'NODE_DEBUG'
+  && key !== 'NODE_TLS_REJECT_UNAUTHORIZED'));
 const operatorEnv = { ...baseEnv, MACWARDEN_LND_REST: LND_REST, MACWARDEN_LND_GRPC: LND_GRPC,
   MACWARDEN_TLS_CERT: paths.operatorCert, MACWARDEN_MACAROON: paths.session };
 const agentEnv = { ...baseEnv, AGENT_LND_REST: LND_REST, AGENT_TLS_CERT: paths.agentCert, AGENT_MACAROON: paths.agentMacaroon,

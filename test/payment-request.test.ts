@@ -198,3 +198,27 @@ it('PAYJ/middleware only a selected method\'s request payload is passed on, as a
   const exact = decodeMiddlewareRequest(middlewareRequest({ method: SEND, serialized: Buffer.alloc(MAX_PAYLOAD_BYTES, 1) }), selected);
   expect(exact.payload.length).toBe(MAX_PAYLOAD_BYTES);
 });
+
+// 1.2.1: a satoshi amount or fee limit times 1,000, or an invoice amount, can exceed the int64
+// millisatoshi range the journal records; such a value is no amount, never a record the reader refuses.
+it('PAYJ/bounds amounts above the int64 millisatoshi range are no amount; the range itself is kept', () => {
+  const h = hash('bounds');
+  const max = (1n << 63n) - 1n;
+  const over = paymentFacts(SEND, message(bytes(3, h), uint(2, 1n << 62n), uint(7, max)), false);
+  expect(over).toMatchObject({ paymentHash: h.toString('hex'), amountMsat: null, amountSource: null, feeLimitMsat: null, extraction: 'complete' });
+  const atMax = paymentFacts(SEND, message(bytes(3, h), uint(12, max), uint(13, max)), false);
+  expect(atMax).toMatchObject({ amountMsat: max.toString(), amountSource: 'request', feeLimitMsat: max.toString() });
+  const satMax = paymentFacts(SEND, message(bytes(3, h), uint(2, 9_223_372_036_854_775n), uint(7, 9_223_372_036_854_775n)), false);
+  expect(satMax).toMatchObject({ amountMsat: '9223372036854775000', feeLimitMsat: '9223372036854775000' });
+  // An invoice amount of 21 million bitcoin fits; one of 10 billion bitcoin does not.
+  expect(paymentFacts(SEND, message(bytes(5, invoice({ hash: h, amount: '21000000' }))), false).amountMsat).toBe('2100000000000000000');
+  expect(paymentFacts(SEND, message(bytes(5, invoice({ hash: h, amount: '10000000000' }))), false))
+    .toMatchObject({ paymentHash: h.toString('hex'), amountMsat: null, amountSource: null, extraction: 'complete' });
+});
+
+// 1.2.1: proto3 treats an explicitly empty string as absent, and LND then pays the request's hash.
+it('PAYJ/send-payment an explicitly empty payment_request with a valid hash is journaled with the hash', () => {
+  const h = hash('empty-invoice');
+  expect(paymentFacts(SEND, message(bytes(3, h), bytes(5, Buffer.alloc(0)), uint(2, 7)), false))
+    .toMatchObject({ paymentHash: h.toString('hex'), amountMsat: '7000', amountSource: 'request', extraction: 'complete' });
+});

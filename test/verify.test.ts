@@ -6,7 +6,7 @@ import { Readable } from 'node:stream';
 import { afterAll, expect, it } from 'vitest';
 import { run, ROOT_KEY_0_ACCEPTED, CAN_BAKE_ACCEPTED, CAN_BAKE_ROOT_KEY_0, LOCAL_EXPIRY_UNCONFIRMED, REJECTED_INCONCLUSIVE,
   SIGNATURE_MISMATCH_INCONCLUSIVE, SIGNATURE_MISMATCH_ROOT_KEY_0, OWN_ROOT_KEY_INCONCLUSIVE, ROOT_KEY_0_INCONCLUSIVE,
-  SIGNATURE_MISMATCH_HOW_TO_CONCLUDE } from '../src/commands/verify.js';
+  SIGNATURE_MISMATCH_HOW_TO_CONCLUDE, ROOT_KEY_MISSING_CONTRADICTED } from '../src/commands/verify.js';
 import { LndError } from '../src/errors.js';
 import type { LndAdapter } from '../src/lnd/index.js';
 import { render, type VerifyResult } from '../src/output/index.js';
@@ -347,4 +347,19 @@ it('VERIFY/RT-01 regeneration a signature mismatch on the exact bytes the regist
   // A recorded fingerprint from another node does not count.
   saveRegistry([{ ...alice, nodePubkey: '03' + 'cd'.repeat(32) }]);
   expect(exit(await verify([alice.outPath!], mismatch()))).toBe(1);
+});
+
+// 1.2.1: LND's two answers must agree. A rejection that says the root key ID is gone while
+// ListMacaroonIDs still lists it is a contradiction, not a verdict.
+it('VERIFY/contradicted a root-key-missing rejection while the root key ID is still listed is not conclusive', async () => {
+  saveRegistry([]);
+  const target = register(responseBytes(oldId, vector('preset-invoice-only').permissions));
+  const { lnd } = fake({ ids: [0n, oldId, ownId], check: { valid: false, reason: 'root-key-missing', message: 'x' } });
+  const result = await verify([target], lnd);
+  expect(exit(result)).toBe(1);
+  expect(value(result)).toMatchObject({ status: 'rejected', rejection: 'other', conclusive: false, rootKeyListed: true });
+  expect(value(result).guidance).toContain(ROOT_KEY_MISSING_CONTRADICTED);
+  expect(value(result).guidance).toContain(`To make sure: macwarden revoke ${oldId} --unregistered.`);
+  expect(render(result, 'text')).toContain('status       REJECTED BY THIS CHECK ONLY (other)');
+  expect(render(result, 'text')).not.toContain('no longer exists. It can no longer be used');
 });

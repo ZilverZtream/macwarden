@@ -70,6 +70,8 @@ If you already run one of these, add macwarden's detectors to it:
 
 These rule packs only find candidates. They cannot decode a macaroon or say what it can do; `macwarden scan` does both.
 
+The packs are regular expressions over the literal credential prefixes, so they miss forms `scan` finds: hex split by separators (`02:01:03…`, `0x02, 0x01, …`), base64 that starts at a byte offset other than zero or is base64-encoded twice (a Kubernetes Secret holding a `.env`), UTF-16 text, a percent-encoded `nostr%2Bwalletconnect://` scheme, a bare NWC secret without its URI, and Core Lightning runes. Run `macwarden scan` as well where those can occur.
+
 ## Agent configurations
 
 `macwarden scan --agent-configs` checks where AI agents and MCP clients keep their server credentials on the machine that runs it: Claude Desktop and Claude Code, Cursor, VS Code, Windsurf, Continue, Gemini CLI, Codex, Zed, lnget, and a project `.env`. A credential inside an MCP server entry is reported with `context: "mcp-config"` (text: `(MCP server config)`). Run it on developer machines and agent hosts, not only in CI.

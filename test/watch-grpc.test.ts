@@ -242,3 +242,21 @@ it('WATCH/grpc-liveness a peer that stops answering is detected by HTTP/2 PING a
   relay.close();
   void p.close();
 });
+
+// Audit 1.2.1: a repeated registration confirmation from LND is not a new session.
+it('WATCH/grpc-registration a repeated reg_complete confirms the registration once', async () => {
+  const p = await peer();
+  let confirmations = 0;
+  const session = registerMiddleware({ ...p.url, tlsCert: good.ca, macaroon: new Secret(own) },
+    { name: 'macwarden-watch', readOnly: true }, () => '', () => { confirmations += 1; });
+  await until(() => p.received().length >= 1);
+  p.stream()!.write(frame(vi(8, 1)));
+  await until(() => confirmations >= 1);
+  p.stream()!.write(frame(vi(8, 1)));
+  p.stream()!.write(frame(vi(8, 1)));
+  await new Promise(resolve => setTimeout(resolve, 200));
+  expect(confirmations).toBe(1);
+  session.close();
+  await session.ended;
+  await p.close();
+});

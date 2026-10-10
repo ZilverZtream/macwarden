@@ -10,6 +10,7 @@ import * as nodeFs from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { macaroonId } from '../decode/index.js';
+import { PrivateFileError, reserveOwnerOnly, verifyOwnerOnly } from '../private-file.js';
 import type { MiddlewareCall } from '../lnd/index.js';
 import { isInstant } from '../instant.js';
 import { isProtectedPath, outputNameProblem, resolveUnprotectedPath } from '../protected-path.js';
@@ -47,6 +48,18 @@ export const JOURNAL_MARKER_BYTES = 1024 * 1024;
 export const JOURNAL_ALIVE_MS = 5 * 60_000;
 /** Intake items decoded per event-loop turn (each at most 64 KiB of payload). */
 const INTAKE_BATCH = 64;
+// Decoding may use at most this share of wall time (a token bucket refilled as time passes, at
+// most JOURNAL_BURST_MS banked), as attribution does (audit 1.2.1): one 64 KiB route payload
+// costs up to 8 ms to decode and a holder of a pay credential chooses the rate, so a count per
+// turn alone let a flood block the loop for 93-98 % of the time. When the budget is spent the
+// next batch waits on a short timer; meanwhile the intake fills and further calls are dropped
+// and counted.
+export const JOURNAL_SHARE = 0.2;
+export const JOURNAL_BURST_MS = 5;
+const JOURNAL_RETRY_MS = 5;
+// Consecutive unreadable lines a reader tolerates: each crash leaves at most one partial line and
+// one partial repair, so a longer run is not a journal watch wrote (audit 1.2.1), wherever it lies.
+export const JOURNAL_MAX_INVALID_RUN = 64;
 
 export type UnregisterReason = 'stream-lost' | 'stopping' | 'refresh';
 type Base = { v: 1; time: string; run: string };
@@ -181,7 +194,7 @@ export async function readJournal(path: string, fs: ReadIO = nodeFs): Promise<Jo
     if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino) throw new JournalError('payment journal changed while opened');
     if (opened.size > BigInt(JOURNAL_LIMIT_BYTES)) throw new JournalError('payment journal too large');
     const size = Number(opened.size);
-    const lines: string[] = [];
+    const validation = new Validation();
     const block = Buffer.allocUnsafe(1024 * 1024);
     let carry = Buffer.alloc(0);
     let position = 0;
@@ -193,7 +206,7 @@ export async function readJournal(path: string, fs: ReadIO = nodeFs): Promise<Jo
       let start = 0;
       for (let newline = chunk.indexOf(0x0a, start); newline >= 0; newline = chunk.indexOf(0x0a, start)) {
         // An over-long line is kept as a marker of its length only; it can never be valid.
-        lines.push(newline - start > JOURNAL_LINE_LIMIT ? '\u0000'.repeat(JOURNAL_LINE_LIMIT + 1) : chunk.toString('utf8', start, newline));
+        validation.line(newline - start > JOURNAL_LINE_LIMIT ? '\u0000'.repeat(JOURNAL_LINE_LIMIT + 1) : chunk.toString('utf8', start, newline));
         start = newline + 1;
       }
       carry = Buffer.from(chunk.subarray(start));
@@ -201,45 +214,53 @@ export async function readJournal(path: string, fs: ReadIO = nodeFs): Promise<Jo
       if (carry.length > JOURNAL_LINE_LIMIT) carry = Buffer.from('\u0000'.repeat(JOURNAL_LINE_LIMIT + 1));
     }
     if (position < size) throw new JournalError('payment journal changed while read');
-    return { ...validate(lines, carry.length > 0), size };
+    return { ...validation.finish(carry.length > 0), size };
   } finally { await handle.close(); }
 }
 
-function validate(lines: string[], unterminated: boolean): Omit<JournalContents, 'size'> {
-  const records: JournalRecord[] = [];
-  let repairedLines = 0;
-  let invalidRun = 0;
-  let run: { id: string; last: number; ended: boolean; registered: number | null } | null = null;
-  const invalid = (index: number): never => { throw new JournalError(`invalid payment journal (line ${index + 1})`); };
-  for (let index = 0; index < lines.length; index++) {
-    const record = parseRecord(lines[index]);
-    if (!record) { invalidRun += 1; continue; }
-    if (invalidRun) {
+// Validates records one line at a time, as the reader produces them, keeping only the records
+// (audit 1.2.1: every line of a 64 MiB file was once held before validation began).
+class Validation {
+  private readonly records: JournalRecord[] = [];
+  private repairedLines = 0;
+  private invalidRun = 0;
+  private index = -1;
+  private run: { id: string; last: number; ended: boolean; registered: number | null } | null = null;
+
+  private invalid(index: number): never { throw new JournalError(`invalid payment journal (line ${index + 1})`); }
+
+  line(text: string): void {
+    const index = ++this.index;
+    const record = parseRecord(text);
+    if (!record) { if (++this.invalidRun > JOURNAL_MAX_INVALID_RUN) this.invalid(index); return; }
+    if (this.invalidRun) {
       // Lines a crash left are tolerated only once the next run marked them repaired.
-      if (record.type !== 'run-start' || !record.repairedTail) invalid(index - 1);
-      repairedLines += invalidRun;
-      invalidRun = 0;
+      if (record.type !== 'run-start' || !record.repairedTail) this.invalid(index - 1);
+      this.repairedLines += this.invalidRun;
+      this.invalidRun = 0;
     }
     const at = Date.parse(record.time);
     if (record.type === 'run-start') {
-      run = { id: record.run, last: at, ended: false, registered: null };
+      this.run = { id: record.run, last: at, ended: false, registered: null };
     } else {
-      if (!run || run.id !== record.run || run.ended || at < run.last) invalid(index);
-      const current = run!;
+      if (!this.run || this.run.id !== record.run || this.run.ended || at < this.run.last) this.invalid(index);
+      const current = this.run!;
       current.last = at;
       if (record.type === 'registered') {
-        if (current.registered !== null) invalid(index);
+        if (current.registered !== null) this.invalid(index);
         current.registered = record.session;
       } else if (record.type === 'unregistered') {
-        if (current.registered !== record.session) invalid(index);
+        if (current.registered !== record.session) this.invalid(index);
         current.registered = null;
       } else if (record.type === 'full' || record.type === 'run-end') current.ended = true;
     }
-    records.push(record);
+    this.records.push(record);
   }
-  // Invalid lines at the end, or an unterminated last line: a write a crash cut short (or one
-  // in progress), not yet repaired by a later run. They are ignored.
-  return { records, repairedLines, tornTail: invalidRun > 0 || unterminated };
+
+  /** Invalid lines at the end, or an unterminated last line: a write a crash cut short (or one in progress), not yet repaired by a later run. They are ignored. */
+  finish(unterminated: boolean): Omit<JournalContents, 'size'> {
+    return { records: this.records, repairedLines: this.repairedLines, tornTail: this.invalidRun > 0 || unterminated };
+  }
 }
 
 export type GapReason = 'before-journal' | 'not-running' | 'not-registered' | 'unconfirmed' | 'journal-full' | 'dropped';
@@ -286,49 +307,88 @@ export function journalCoverage(records: JournalRecord[], node: string, from: nu
     }
   }
   if (current !== null) close('unconfirmed', last);
-  // Covered time: the spans, minus every drop window.
-  let covered: Span[] = spans.filter(span => span.to >= span.from).sort((a, b) => a.from - b.from);
-  for (const drop of drops) {
-    covered = covered.flatMap(span => {
-      if (drop.to < span.from || drop.from > span.to) return [span];
-      const parts: Span[] = [];
-      if (drop.from > span.from) parts.push({ from: span.from, to: drop.from, end: 'dropped' });
-      if (drop.to < span.to) parts.push({ from: drop.to, to: span.to, end: span.end });
-      return parts;
-    });
-  }
-  const clipped = covered.map(span => ({ ...span, from: Math.max(span.from, from), to: Math.min(span.to, to) }))
-    .filter(span => span.from < span.to);
-  // Merge touching spans so a gap is reported only where coverage really stops.
+  // Everything below is one sorted sweep each (1.2.1): a hostile journal holds hundreds of
+  // thousands of spans and drops, so nothing may pair every drop with every span.
+  // Merge touching spans so a gap is reported only where coverage really stops; a span that
+  // extends the previous one gives the merged span its end reason.
   const merged: Span[] = [];
-  for (const span of clipped) {
+  for (const span of spans.filter(span => span.to >= span.from).sort((a, b) => a.from - b.from)) {
     const previous = merged.at(-1);
     if (previous && span.from <= previous.to) { if (span.to > previous.to) { previous.to = span.to; previous.end = span.end; } }
     else merged.push({ ...span });
   }
+  // Merge the drop windows the same way (counts add up), so they are disjoint and sorted.
+  const dropWindows: Gap[] = [];
+  for (const drop of drops.sort((a, b) => a.from - b.from)) {
+    const previous = dropWindows.at(-1);
+    if (previous && drop.from <= previous.to) { previous.to = Math.max(previous.to, drop.to); previous.dropped += drop.dropped; }
+    else dropWindows.push({ ...drop });
+  }
+  // Covered time: the merged spans, minus every drop window, in one pass over both.
+  const covered: Span[] = [];
+  let next = 0;
+  for (const span of merged) {
+    while (next < dropWindows.length && dropWindows[next].to < span.from) next += 1;
+    let cursor = span.from;
+    let touched = false;
+    for (let index = next; index < dropWindows.length && dropWindows[index].from <= span.to; index += 1) {
+      const drop = dropWindows[index];
+      touched = true;
+      if (drop.from > cursor) covered.push({ from: cursor, to: drop.from, end: 'dropped' });
+      cursor = Math.max(cursor, drop.to);
+    }
+    if (!touched) covered.push({ ...span });
+    else if (cursor < span.to) covered.push({ from: cursor, to: span.to, end: span.end });
+  }
+  const clipped = covered.map(span => ({ ...span, from: Math.max(span.from, from), to: Math.min(span.to, to) }))
+    .filter(span => span.from < span.to);
   const gaps: Gap[] = [];
   let cursor = from;
   let reason: GapReason = firstRun === null || from < firstRun ? 'before-journal' : 'not-registered';
   // The reason for a gap that starts the window: whatever ended the last span before it.
-  const before = covered.filter(span => span.to <= from).sort((a, b) => a.to - b.to).at(-1);
+  let before: Span | undefined;
+  for (const span of covered) if (span.to <= from && (!before || span.to >= before.to)) before = span;
   if (before) reason = before.end;
-  for (const span of merged) {
+  for (const span of clipped) {
     if (span.from > cursor) gaps.push({ from: cursor, to: span.from, reason, dropped: 0 });
     cursor = Math.max(cursor, span.to);
     reason = span.end;
   }
   if (cursor < to) gaps.push({ from: cursor, to, reason, dropped: 0 });
   // Drop windows inside the window are listed with their counts, merged with the gap they form.
-  for (const drop of drops) {
+  // Both lists are sorted and the drop windows are disjoint, so one pointer over the gaps serves.
+  let gapIndex = 0;
+  const listed: Gap[] = [];
+  for (const drop of dropWindows) {
     if (drop.to < from || drop.from > to) continue;
     const window = { from: Math.max(drop.from, from), to: Math.min(drop.to, to) };
-    const existing = gaps.find(gap => gap.reason === 'dropped' && gap.from <= window.to && window.from <= gap.to);
+    while (gapIndex < gaps.length && gaps[gapIndex].to < window.from) gapIndex += 1;
+    let existing: Gap | undefined;
+    for (let index = gapIndex; index < gaps.length && gaps[index].from <= window.to; index += 1) {
+      if (gaps[index].reason === 'dropped') { existing = gaps[index]; break; }
+    }
     if (existing) { existing.dropped += drop.dropped; existing.from = Math.min(existing.from, window.from); existing.to = Math.max(existing.to, window.to); }
-    else gaps.push({ ...window, reason: 'dropped', dropped: drop.dropped });
+    else listed.push({ ...window, reason: 'dropped', dropped: drop.dropped });
   }
+  for (const gap of listed) gaps.push(gap); // never spread: a hostile journal lists hundreds of thousands
   gaps.sort((a, b) => a.from - b.from || a.to - b.to);
-  return { covered: merged.map(span => [span.from, span.to]), gaps,
-    coveredMs: merged.reduce((total, span) => total + (span.to - span.from), 0) };
+  return { covered: clipped.map(span => [span.from, span.to]), gaps,
+    coveredMs: clipped.reduce((total, span) => total + (span.to - span.from), 0) };
+}
+
+/**
+ * Writes every byte of `text` through the descriptor (1.2.1). A write may complete partially
+ * (a full disk, a signal); counting what was written is the only way to know the line landed.
+ * A write that makes no progress fails, as a failed write does.
+ */
+export async function writeAll(handle: Pick<nodeFs.FileHandle, 'write'>, text: string): Promise<void> {
+  const bytes = Buffer.from(text, 'utf8');
+  let offset = 0;
+  while (offset < bytes.length) {
+    const { bytesWritten } = await handle.write(bytes, offset, bytes.length - offset);
+    if (bytesWritten <= 0) throw new Error('write made no progress');
+    offset += bytesWritten;
+  }
 }
 
 /** Owner-only regular file: POSIX mode and owner from the open descriptor. */
@@ -368,10 +428,15 @@ type Drops = { count: number; first: number; last: number };
  */
 export class PaymentJournal {
   readonly run = randomUUID();
+  /** True when the journal lies on a Windows volume that stores no permissions (FAT, exFAT). */
+  aclWarning = false;
   private readonly intake: Intake[] = [];
   private intakeHead = 0;
   private intakeBytes = 0;
   private scheduled = false;
+  private budget = JOURNAL_BURST_MS;
+  private budgetAt = performance.now();
+  private retry: ReturnType<typeof setTimeout> | null = null;
   private pending: string[] = [];
   private pendingBytes = 0;
   private markerBytes = 0;
@@ -419,13 +484,37 @@ export class PaymentJournal {
     try { release = await deps.lock(`${target}.lock`); }
     catch { throw new JournalError(`another watch writes this payment journal (lock ${target}.lock)`); }
     let handle: nodeFs.FileHandle | null = null;
+    let aclWarning = false;
     try {
+      // Windows (1.2.1): mode bits mean nothing there, so a new journal is created owner-only by
+      // the shared helper (owned by this user, a protected DACL granting only this user), and an
+      // existing one must already be, as a POSIX journal must be 0600.
+      let created: { dev: number; ino: number } | null = null;
+      if (process.platform === 'win32') {
+        if (existing) {
+          const found = await verifyOwnerOnly(target);
+          if (!found) throw new JournalError('cannot verify the payment journal permissions');
+          if (found.noAcl) aclWarning = true;
+          else if (!found.ownerOnly) throw new JournalError('payment journal must be owner-only: on Windows it must be owned by your account and grant '
+            + 'only your account, with inheritance disabled (for example: icacls <journal> /inheritance:r /grant:r "%USERNAME%":F /setowner "%USERNAME%"), '
+            + 'or start a new journal at another path');
+        } else {
+          let reserved: Awaited<ReturnType<typeof reserveOwnerOnly>>;
+          try { reserved = await reserveOwnerOnly(target, fs); }
+          catch (error) { throw new JournalError(`cannot create payment journal${error instanceof PrivateFileError ? `: ${error.message}` : ''}`); }
+          aclWarning = reserved.aclWarning;
+          const stat = await reserved.handle.stat();
+          created = { dev: stat.dev, ino: stat.ino };
+          await reserved.handle.close();
+        }
+      }
       try {
         handle = await fs.open(target, constants.O_RDWR | constants.O_APPEND | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0), 0o600);
       } catch { throw new JournalError('cannot open payment journal'); }
       const opened = await handle.stat();
       if (!opened.isFile()) throw new JournalError('payment journal is not a regular file');
-      if (existing && (opened.dev !== existing.dev || opened.ino !== existing.ino)) throw new JournalError('payment journal changed while opened');
+      const before = existing ?? created;
+      if (before && (opened.dev !== before.dev || opened.ino !== before.ino)) throw new JournalError('payment journal changed while opened');
       const problem = ownerOnlyProblem(opened, platform, deps.uid ?? process.getuid?.());
       if (problem) throw new JournalError(problem);
       const size = opened.size;
@@ -447,9 +536,10 @@ export class PaymentJournal {
         repairedTail = newline || line === null || parseRecord(line) === null;
       }
       const journal = new PaymentJournal(handle, size, release, deps.clock, target, deps.onStop);
+      journal.aclWarning = aclWarning;
       const first: RunStartRecord = { v: 1, type: 'run-start', time: journal.now(), run: journal.run, node, version, repairedTail };
       const text = `${newline ? '\n' : ''}${JSON.stringify(first)}\n`;
-      try { await handle.write(text); await handle.sync(); }
+      try { await writeAll(handle, text); await handle.sync(); }
       catch { throw new JournalError('cannot write payment journal'); }
       journal.size += Buffer.byteLength(text);
       journal.aliveTimer = setInterval(() => journal.keepAlive(), Math.min(JOURNAL_ALIVE_MS, 60_000));
@@ -542,15 +632,36 @@ export class PaymentJournal {
   }
 
   private schedule(): void {
-    if (this.scheduled) return;
+    if (this.scheduled || this.retry) return;
     this.scheduled = true;
-    setImmediate(() => { this.scheduled = false; this.process(INTAKE_BATCH); });
+    setImmediate(() => { this.scheduled = false; this.drain(); });
   }
 
-  /** Decodes up to `limit` intake items into lines, in order, then starts a write. */
-  private process(limit: number): void {
+  /** One budgeted decoding turn; when the budget is spent, the next waits on a short timer, never spins. */
+  private drain(): void {
+    const now = performance.now();
+    this.budget = Math.min(JOURNAL_BURST_MS, this.budget + (now - this.budgetAt) * JOURNAL_SHARE);
+    this.budgetAt = now;
+    if (this.budget > 0) {
+      this.process(INTAKE_BATCH, this.budget);
+      const after = performance.now();
+      this.budget -= after - now;
+      this.budgetAt = after;
+    }
+    if (this.intakeHead < this.intake.length && !this.scheduled && !this.retry) {
+      if (this.budget > 0) this.schedule();
+      else {
+        this.retry = setTimeout(() => { this.retry = null; this.schedule(); }, JOURNAL_RETRY_MS);
+        this.retry.unref?.();
+      }
+    }
+  }
+
+  /** Decodes up to `limit` intake items (at least one, within `budgetMs`) into lines, in order, then starts a write. */
+  private process(limit: number, budgetMs = Infinity): void {
+    const started = performance.now();
     let done = 0;
-    while (this.intakeHead < this.intake.length && done < limit) {
+    while (this.intakeHead < this.intake.length && done < limit && (done === 0 || performance.now() - started < budgetMs)) {
       const item = this.intake[this.intakeHead];
       this.intake[this.intakeHead++] = undefined as unknown as Intake;
       this.intakeBytes -= item.bytes;
@@ -563,7 +674,6 @@ export class PaymentJournal {
     }
     if (this.intakeHead === this.intake.length) { this.intake.length = 0; this.intakeHead = 0; }
     else if (this.intakeHead > 4_096) { this.intake.splice(0, this.intakeHead); this.intakeHead = 0; }
-    if (this.intakeHead < this.intake.length) this.schedule();
     this.startWrite();
   }
 
@@ -584,15 +694,36 @@ export class PaymentJournal {
     try {
       const time = this.stamp(item.at);
       const whoFields = { requestId: item.requestId.toString(), credential, rootKeyId };
+      // Every record is checked with the reader's own rules before it is written (1.2.1): one the
+      // reader would refuse makes the whole journal unreadable, so a value outside its documented
+      // form is recorded as 'malformed' with no facts, and one whose identity fields cannot be
+      // written at all is dropped (counted, like any other drop) rather than written.
+      const valid = (record: PaymentRecord | DeletionRecord) => parseRecord(JSON.stringify(record)) !== null;
+      const identities = [whoFields, { requestId: whoFields.requestId, credential: 'id:undecodable', rootKeyId: 'none' }];
       if ((PAYMENT_METHODS as readonly string[]).includes(item.method)) {
         const facts = paymentFacts(item.method, payload, item.oversizedPayload);
-        return { ...this.base(time), type: 'payment', ...whoFields, method: item.method as PaymentRecord['method'],
+        const method = item.method as PaymentRecord['method'];
+        const record: PaymentRecord = { ...this.base(time), type: 'payment', ...whoFields, method,
           paymentHash: facts.paymentHash, amountMsat: facts.amountMsat, amountSource: facts.amountSource,
           feeLimitMsat: facts.feeLimitMsat, amp: facts.amp, extraction: facts.extraction };
+        if (valid(record)) return record;
+        for (const who of identities) {
+          const fallback: PaymentRecord = { ...this.base(time), type: 'payment', ...who, method, paymentHash: null, amountMsat: null,
+            amountSource: null, feeLimitMsat: null, amp: false, extraction: 'malformed' };
+          if (valid(fallback)) return fallback;
+        }
+        throw new Error('unwritable payment record');
       }
       const facts = deletionFacts(item.method, payload, item.oversizedPayload);
-      return { ...this.base(time), type: 'deletion', ...whoFields, method: item.method as DeletionRecord['method'],
+      const method = item.method as DeletionRecord['method'];
+      const record: DeletionRecord = { ...this.base(time), type: 'deletion', ...whoFields, method,
         paymentHash: facts.paymentHash, scope: facts.scope, extraction: facts.extraction };
+      if (valid(record)) return record;
+      for (const who of identities) {
+        const fallback: DeletionRecord = { ...this.base(time), type: 'deletion', ...who, method, paymentHash: null, scope: 'none', extraction: 'malformed' };
+        if (valid(fallback)) return fallback;
+      }
+      throw new Error('unwritable deletion record');
     } finally {
       // The payload holds the invoice text; it is not kept past its decoding.
       payload?.fill(0);
@@ -673,7 +804,7 @@ export class PaymentJournal {
         text += `${JSON.stringify({ ...this.base(this.now()), type: 'full' } satisfies FullRecord)}\n`;
       }
       try {
-        await this.handle.write(text);
+        await writeAll(this.handle, text);
         await this.handle.sync();
         this.size += Buffer.byteLength(text);
       } catch {
@@ -698,6 +829,7 @@ export class PaymentJournal {
     this.unregistered('stopping');
     this.flushIntakeDrop();
     this.closing = true;
+    if (this.retry) { clearTimeout(this.retry); this.retry = null; }
     this.process(Number.MAX_SAFE_INTEGER);
     if (!this.stats.stopped) {
       // Drops not yet reported are written (by append) before the end record.

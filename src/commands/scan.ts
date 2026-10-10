@@ -1,4 +1,5 @@
 import * as fs from 'node:fs/promises';
+import { unsafeNodeDiagnostics } from '../environment.js';
 import { homedir } from 'node:os';
 import { agentConfigCandidates, discoverAgentConfigs, type AgentConfigEnvironment } from '../scan/agent-configs.js';
 import { Cancelled } from '../cancellation.js';
@@ -17,11 +18,13 @@ function fail(code: number, step: string | null, message: string): OutputResult 
 export type ScanFormat = 'text' | 'json' | 'sarif' | 'github';
 const formats: ScanFormat[] = ['text', 'json', 'sarif', 'github'];
 
-type ScanDeps = { fs: typeof fs; agentEnvironment?: () => AgentConfigEnvironment };
+type ScanDeps = { fs: typeof fs; agentEnvironment?: () => AgentConfigEnvironment; env?: Record<string, string | undefined> };
 const defaultAgentEnvironment = (): AgentConfigEnvironment =>
   ({ platform: process.platform, home: homedir(), cwd: process.cwd(), env: { ...process.env } });
 
-export async function run(args: string[], deps: ScanDeps = { fs }): Promise<OutputResult & { exitCode?: number }> {
+export async function run(args: string[], deps: ScanDeps = { fs, env: { ...process.env } }): Promise<OutputResult & { exitCode?: number }> {
+  // ENV check (1.2.1): a heap snapshot or profile taken through NODE_OPTIONS would hold every credential found here.
+  if (deps.env && unsafeNodeDiagnostics(deps.env)) return fail(2, null, 'unsafe Node diagnostic settings');
   const paths: string[] = [];
   let format: ScanFormat | undefined;
   let agentConfigs = false;

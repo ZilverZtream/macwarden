@@ -200,7 +200,9 @@ it('WATCH/payment-journal a journal that stops is reported once as a status even
     await turn();
     stop();
   }, { fs: failingFs });
-  expect(opened).toBe(1);
+  // One descriptor writes the journal. On Windows a new journal is first created owner-only through
+  // a separate, exclusive handle that is closed before the writing one is opened (1.2.1).
+  expect(opened).toBe(process.platform === 'win32' ? 2 : 1);
   expect(result).toMatchObject({ ok: true, result: { paymentJournal: { stopped: 'write-failed', payments: 0, dropped: 2 } } });
   const codes = result.warnings.map(item => typeof item === 'string' ? item : item.code);
   expect(codes).toEqual(expect.arrayContaining(['payment-journal-stopped', 'payment-journal-dropped']));

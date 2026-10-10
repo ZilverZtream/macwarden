@@ -89,10 +89,11 @@ it('PAYADAPTER/list-payments queries the window with incomplete payments and rea
       count_total_payments: 'false', creation_date_start: '1791539940', creation_date_end: '1791543660' });
     expect(seen[0].headers['grpc-metadata-macaroon']).toBeDefined();
     expect(page.lastIndexOffset).toBe(9n);
+    // The attempts are summed by status while parsing, never kept (audit 1.2.1: 100,000 payments of 1,000 attempts were ~10 GiB).
     expect(page.payments[0]).toEqual({ paymentHash: HASH, status: 'succeeded', createdAtNs: 1791540000123456789n, valueMsat: 1000000n,
-      feeMsat: 2500n, htlcs: [{ status: 'failed', amountMsat: 1000000n, feesMsat: 1200n }, { status: 'succeeded', amountMsat: 1000000n, feesMsat: 2500n }],
+      feeMsat: 2500n, attempts: 2, succeededAttempts: 1, succeededMsat: 1000000n, succeededFeesMsat: 2500n, inFlightMsat: 0n,
       failureReason: null, index: 7n });
-    expect(page.payments[1]).toMatchObject({ status: 'in-flight', htlcs: [] });
+    expect(page.payments[1]).toMatchObject({ status: 'in-flight', attempts: 0, inFlightMsat: 0n });
     expect(page.payments[2]).toMatchObject({ status: 'failed', failureReason: 'insufficient-balance' });
     const kept = JSON.stringify(page, (_key, value) => typeof value === 'bigint' ? value.toString() : value);
     expect(kept).not.toContain(PREIMAGE);
@@ -107,6 +108,14 @@ it('PAYADAPTER/list-payments refuses invalid responses and queries, and bounds t
     { payments: [lndPayment({ value_msat: '1e3' })] },
     { payments: [lndPayment({ htlcs: [{ status: 'SUCCEEDED', route: { total_fees_msat: '5', total_amt_msat: '4' } }] })] },
     { payments: [lndPayment({ failure_reason: 'free text' })] },
+    // Audit 1.2.1: values outside LND's own types would reach the output outside its schema.
+    { payments: [lndPayment({ value_msat: '-5000' })] },
+    { payments: [lndPayment({ fee_msat: '-1' })] },
+    { payments: [lndPayment({ creation_time_ns: '-1' })] },
+    { payments: [lndPayment({ creation_time_ns: '100000000000000000000' })] },
+    { payments: [lndPayment({ payment_index: '18446744073709551616' })] },
+    { payments: [lndPayment({ htlcs: Array.from({ length: 1_001 }, () => ({ status: 'FAILED', route: { total_fees_msat: '0', total_amt_msat: '1' } })) })] },
+    { payments: [], last_index_offset: '18446744073709551616' },
     { payments: 'none' },
     { payments: [lndPayment(), lndPayment()], last_index_offset: '2' },
     { payments: [], last_index_offset: '-1' },
@@ -142,7 +151,7 @@ it('PAYADAPTER/track-payment reads the first streamed update and closes the stre
     route: { total_fees_msat: '10', total_amt_msat: '5010' } }] }) })}\n` }), async (adapter, seen, open) => {
     const found = await adapter.trackPayment(HASH);
     expect(seen[0].path).toBe(`/v2/router/track/${Buffer.from(HASH, 'hex').toString('base64url')}`);
-    expect(found).toMatchObject({ paymentHash: HASH, status: 'in-flight', htlcs: [{ status: 'in-flight', amountMsat: 5000n, feesMsat: 10n }] });
+    expect(found).toMatchObject({ paymentHash: HASH, status: 'in-flight', attempts: 1, succeededAttempts: 0, inFlightMsat: 5000n });
     // The stream is not kept open after its first message.
     for (let i = 0; i < 50 && open() > 0; i++) await new Promise(done => setTimeout(done, 20));
     expect(open()).toBe(0);

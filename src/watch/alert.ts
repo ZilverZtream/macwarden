@@ -38,7 +38,9 @@ const TASKKILL_MS = 10_000;
 // Process groups of alert commands that may still have members (POSIX).
 const liveGroups = new Set<number>();
 const killGroup = (pid: number) => {
-  try { process.kill(-pid, 'SIGKILL'); } catch { /* group already empty */ }
+  // Probe first (audit 1.2.1): once every member exited, the kernel may hand the group ID to an
+  // unrelated process; an empty group answers ESRCH and is left alone.
+  try { process.kill(-pid, 0); process.kill(-pid, 'SIGKILL'); } catch { /* group already empty */ }
   liveGroups.delete(pid);
 };
 

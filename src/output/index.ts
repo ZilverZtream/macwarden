@@ -93,13 +93,13 @@ export type ReconcileObservation = { time: string; run: string; requestId: strin
 export type ReconcileSettlement = { status: 'succeeded' | 'failed' | 'in-flight' | 'not-found' | 'unknown';
   source: 'list-payments' | 'track-payment' | null; createdAt: string | null; settledMsat: string | null; feesMsat: string | null;
   inFlightMsat: string | null; attempts: number | null; failureReason: string | null; predatesObservation: boolean };
-export type ReconcilePayment = { paymentHash: string; attribution: 'single' | 'ambiguous'; credentials: string[];
+export type ReconcilePayment = { paymentHash: string; attribution: 'single' | 'ambiguous' | 'historical'; credentials: string[];
   observation: { first: string; last: string; calls: number; requestedMsat: string | null; routeAttemptsMsat: string | null;
     feeLimitMsat: string | null; observations: ReconcileObservation[] };
   settlement: ReconcileSettlement; deletedBy: string[] };
 export type ReconcileCredential = { credential: string; rootKeyIds: string[]; label: string | null; payments: number; succeeded: number;
-  failed: number; inFlight: number; notFound: number; unknown: number; ambiguous: number; unmatched: number; deletions: number;
-  requestedMsat: string; settledMsat: string; feesMsat: string; inFlightMsat: string };
+  failed: number; inFlight: number; notFound: number; unknown: number; ambiguous: number; historical: number; unmatched: number;
+  deletions: number; requestedMsat: string; settledMsat: string; feesMsat: string; inFlightMsat: string };
 export type ReconcileUnattributed = { paymentHash: string; createdAt: string; status: 'succeeded' | 'failed' | 'in-flight' | 'unknown';
   settledMsat: string; feesMsat: string; inFlightMsat: string; attempts: number; failureReason: string | null;
   coverage: 'covered' | 'boundary' | 'gap' };
@@ -711,10 +711,12 @@ function reconcileText(result: ReconcileResult): string {
       + `(${row.succeeded} succeeded, ${row.failed} failed, ${row.inFlight + row.notFound + row.unknown} without a final outcome)`
       + `; requested ${msat(row.requestedMsat)}; settled ${msat(row.settledMsat)}; fees ${msat(row.feesMsat)}`
       + `${row.inFlightMsat !== '0' ? `; in flight ${msat(row.inFlightMsat)}` : ''}`
-      + `${row.ambiguous ? `; ${row.ambiguous} shared with other credentials` : ''}${row.unmatched ? `; ${row.unmatched} without a hash` : ''}`
+      + `${row.ambiguous ? `; ${row.ambiguous} shared with other credentials` : ''}${row.historical ? `; ${row.historical} with an LND record older than any journaled request` : ''}${row.unmatched ? `; ${row.unmatched} without a hash` : ''}`
       + `${row.deletions ? `; ${row.deletions} payment record deletions` : ''}`),
     ...result.payments.map(item => {
-      const observed = item.attribution === 'single' ? safeText(item.credentials[0]) : `ambiguous (${item.credentials.map(safeText).join(', ')})`;
+      const observed = item.attribution === 'single' ? safeText(item.credentials[0])
+        : item.attribution === 'historical' ? `${safeText(item.credentials[0])} (historical: LND's record is older than every journaled request)`
+          : `ambiguous (${item.credentials.map(safeText).join(', ')})`;
       const settled = item.settlement;
       return `payment      ${safeText(item.paymentHash)}  observed: ${observed}, ${item.observation.calls} request${item.observation.calls === 1 ? '' : 's'}, `
         + `requested ${msat(item.observation.requestedMsat ?? item.observation.routeAttemptsMsat)}, fee limit ${msat(item.observation.feeLimitMsat)}`

@@ -297,6 +297,9 @@ async function runSteps(args: string[], deps: Deps, state: RunState): Promise<Ba
     entry.fingerprint = finalFacts.fingerprint;
     if (finalFacts.rootKeyId !== rootKeyId || !samePermissions(finalFacts.permissions, request.permissions))
       return await recover('B12', 'bake response root key ID or permissions differ from the request');
+    // BakeMacaroon never returns caveats (audit 1.2.1): a response carrying one (a custom caveat would
+    // make the new credential depend on a middleware) is not LND's answer to this request.
+    if (finalFacts.caveats.length) return await recover('B12', 'bake response carries caveats the request did not ask for');
     entry.permissions = [...finalFacts.permissions];
     entry.caveats = finalFacts.caveats.map(({ type, value }) => ({ type, value }));
     try {

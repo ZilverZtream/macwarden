@@ -1,4 +1,5 @@
 import * as fs from 'node:fs/promises';
+import { unsafeNodeDiagnostics } from '../environment.js';
 import type { Readable } from 'node:stream';
 import { decodeL402, decodeMacaroon, decodeNwc, decodeRune, isL402Container, isL402Macaroon, isNwcContainer, isRuneContainer,
   DecodeError, parseTimeBefore, type Caveat, type L402Facts, type MacaroonFacts } from '../decode/index.js';
@@ -10,7 +11,7 @@ import { gradeFacts, describe } from '../grade/index.js';
 import { readCredential, InputError, UsageError, type InputIO } from '../input/index.js';
 import type { InspectResult, L402InspectResult, NwcInspectResult, OutputResult, RuneInspectResult } from '../output/index.js';
 
-export type Deps = { stdin: Readable & { isTTY?: boolean }; fs: InputIO['fs']; clock: () => Date };
+export type Deps = { stdin: Readable & { isTTY?: boolean }; fs: InputIO['fs']; clock: () => Date; env?: Record<string, string | undefined> };
 
 function fail(code: number, step: string | null, message: string, warnings: string[] = []): OutputResult {
   return { command: 'inspect', ok: false, warnings, result: null, error: { code, step, message } };
@@ -64,6 +65,8 @@ function macaroonResult(secret: Secret, now: Date): InspectResult | L402InspectR
 }
 
 export async function run(args: string[], deps: Deps): Promise<OutputResult> {
+  // ENV check (1.2.1): a heap snapshot or profile taken through NODE_OPTIONS would hold every credential decoded here.
+  if (deps.env && unsafeNodeDiagnostics(deps.env)) return fail(2, null, 'unsafe Node diagnostic settings');
   let unsafeArg = false;
   let endOfFlags = false;
   const inputs: string[] = [];

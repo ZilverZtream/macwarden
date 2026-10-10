@@ -30,6 +30,10 @@ export function outputNameProblem(path: string, platform: NodeJS.Platform = proc
   if (platform !== 'win32') return null;
   const absolute = win32.resolve(path);
   if (/^[\\/]{2}\.[\\/]/.test(absolute)) return 'a Windows device namespace path (\\\\.\\) is refused';
+  // \\?\ passes names to the kernel unchanged; only a drive or UNC root under it names a file system
+  // path (\\?\GLOBALROOT\Device\... reaches any device; audit 1.2.1).
+  if (/^[\\/]{2}\?[\\/]/.test(absolute) && !/^[\\/]{2}\?[\\/](?:[A-Za-z]:[\\/]|UNC[\\/])/i.test(absolute))
+    return 'a Windows device namespace path (\\\\?\\) is refused unless it names a drive or UNC path';
   const root = win32.parse(absolute).root;
   for (const component of absolute.slice(root.length).split('\\')) {
     if (!component) continue;

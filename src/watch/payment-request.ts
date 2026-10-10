@@ -116,6 +116,11 @@ function* fields(data: Buffer): Generator<Field> {
 
 /** proto3 int64: the varint is the two's complement; a negative amount is no amount. */
 function int64(value: bigint): bigint | null { return value >= INT64_SIGN ? null : value; }
+// The journal records millisatoshi amounts up to int64 (LND's own range). A satoshi amount times
+// 1,000, or an invoice amount, can exceed it: such a value is no amount (1.2.1), never a record
+// the journal reader refuses.
+const MSAT_MAX = INT64_SIGN - 1n;
+function bounded(value: bigint | null): bigint | null { return value === null || value < 0n || value > MSAT_MAX ? null : value; }
 
 const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 function text(bytes: Buffer): string {
@@ -143,6 +148,9 @@ function sendPayment(payload: Buffer): PaymentFacts {
       case 3: if (field.wire === 2) hash = field.bytes; break;
       case 5:
         if (field.wire !== 2) break;
+        // proto3: an explicitly empty string is the same as an absent one, and LND then pays the
+        // hash of field 3 (audit 1.2.1).
+        if (field.bytes!.length === 0) { invoiceTooLong = false; invoice = null; break; }
         // A UTF-8 character is at most 4 bytes: anything longer is over the character limit.
         if (field.bytes!.length > MAX_INVOICE_CHARS * 4) { invoiceTooLong = true; invoice = null; }
         else { invoiceTooLong = false; invoice = text(field.bytes!); }
@@ -155,9 +163,9 @@ function sendPayment(payload: Buffer): PaymentFacts {
     }
   }
   // Zero means unset in proto3; LND refuses a request that sets both units, or a negative value.
-  const requested = amtMsat === null || amt === null ? null : amtMsat > 0n ? amtMsat : amt > 0n ? amt * 1000n : null;
+  const requested = bounded(amtMsat === null || amt === null ? null : amtMsat > 0n ? amtMsat : amt > 0n ? amt * 1000n : null);
   // Both unset: SendPaymentV2 considers only zero-fee routes, so the limit is 0.
-  const feeLimit = feeMsat === null || feeSat === null ? null : feeMsat > 0n ? feeMsat : feeSat * 1000n;
+  const feeLimit = bounded(feeMsat === null || feeSat === null ? null : feeMsat > 0n ? feeMsat : feeSat * 1000n);
   const result: PaymentFacts = { paymentHash: null, amountMsat: null, amountSource: null,
     feeLimitMsat: feeLimit === null ? null : feeLimit.toString(), amp, extraction: 'complete' };
   if (invoiceTooLong) result.extraction = 'invoice-too-long';
@@ -167,7 +175,8 @@ function sendPayment(payload: Buffer): PaymentFacts {
     else if (decoded === null) result.extraction = 'invoice-invalid';
     else {
       result.paymentHash = decoded.paymentHash;
-      if (decoded.amountMsat !== null) { result.amountMsat = decoded.amountMsat.toString(); result.amountSource = 'invoice'; }
+      const invoiceAmount = bounded(decoded.amountMsat);
+      if (invoiceAmount !== null) { result.amountMsat = invoiceAmount.toString(); result.amountSource = 'invoice'; }
     }
   } else if (hash) {
     result.paymentHash = hashHex(hash);

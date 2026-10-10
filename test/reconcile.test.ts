@@ -36,13 +36,19 @@ const payment = (seconds: number, credential: string, rootKeyId: string, payment
   paymentHash, amountMsat, amountSource: amountMsat === null ? null : 'request', feeLimitMsat: '5000', amp: false,
   extraction: paymentHash ? 'complete' : 'amp', ...extra }, run);
 
-function lnd(paymentHash: string, createdSeconds: number, status: LndPayment['status'], htlcs: LndPayment['htlcs'] = [],
+type Htlc = { status: 'succeeded' | 'failed' | 'in-flight' | 'unknown'; amountMsat: bigint; feesMsat: bigint };
+// An LND payment as the adapter reduces it: the attempts are summed by status, not kept.
+function lnd(paymentHash: string, createdSeconds: number, status: LndPayment['status'], htlcs: Htlc[] = [],
   failureReason: string | null = null, index = 1n): LndPayment {
   const succeeded = htlcs.filter(item => item.status === 'succeeded');
+  const inFlight = htlcs.filter(item => item.status === 'in-flight');
   return { paymentHash, status, createdAtNs: ns(createdSeconds), valueMsat: succeeded.reduce((total, item) => total + item.amountMsat, 0n),
-    feeMsat: succeeded.reduce((total, item) => total + item.feesMsat, 0n), htlcs, failureReason, index };
+    feeMsat: succeeded.reduce((total, item) => total + item.feesMsat, 0n), attempts: htlcs.length, succeededAttempts: succeeded.length,
+    succeededMsat: succeeded.reduce((total, item) => total + item.amountMsat, 0n),
+    succeededFeesMsat: succeeded.reduce((total, item) => total + item.feesMsat, 0n),
+    inFlightMsat: inFlight.reduce((total, item) => total + item.amountMsat, 0n), failureReason, index };
 }
-const htlc = (status: LndPayment['htlcs'][number]['status'], amountMsat: bigint, feesMsat: bigint) => ({ status, amountMsat, feesMsat });
+const htlc = (status: Htlc['status'], amountMsat: bigint, feesMsat: bigint): Htlc => ({ status, amountMsat, feesMsat });
 
 type Fake = Partial<LndAdapter & PaymentLookup> & { listed?: LndPayment[]; tracked?: Map<string, LndPayment | null | Error>; calls?: string[] };
 function fakeLnd(fake: Fake): LndAdapter & PaymentLookup {
@@ -151,11 +157,13 @@ it('RECONCILE/classification settlement, attribution, gaps and unattributed paym
   expect(byHash.get(H('h7'))!.settlement).toMatchObject({ status: 'succeeded', source: 'track-payment', predatesObservation: true });
 
   const rows = new Map(result.credentials.map(row => [row.credential, row]));
-  expect(rows.get(C1)).toEqual({ credential: C1, rootKeyIds: ['4294967341'], label: 'shop', payments: 4, succeeded: 2, failed: 1, inFlight: 0,
-    notFound: 0, unknown: 1, ambiguous: 1, unmatched: 0, deletions: 0, requestedMsat: String(100_000 + 200_000 + 7_000 + 4_000),
-    settledMsat: String(100_000 + 4_000), feesMsat: String(2_500 + 1), inFlightMsat: '0' });
+  // h7's LND record predates its journaled request (1.2.1): historical, counted for no credential.
+  expect(byHash.get(H('h7'))).toMatchObject({ attribution: 'historical', credentials: [C1] });
+  expect(rows.get(C1)).toEqual({ credential: C1, rootKeyIds: ['4294967341'], label: 'shop', payments: 3, succeeded: 1, failed: 1, inFlight: 0,
+    notFound: 0, unknown: 1, ambiguous: 1, historical: 1, unmatched: 0, deletions: 0, requestedMsat: String(100_000 + 200_000 + 7_000),
+    settledMsat: String(100_000), feesMsat: String(2_500), inFlightMsat: '0' });
   expect(rows.get(C2)).toEqual({ credential: C2, rootKeyIds: ['0'], label: null, payments: 2, succeeded: 0, failed: 0, inFlight: 1,
-    notFound: 1, unknown: 0, ambiguous: 1, unmatched: 1, deletions: 1, requestedMsat: '60000', settledMsat: '0', feesMsat: '0',
+    notFound: 1, unknown: 0, ambiguous: 1, historical: 0, unmatched: 1, deletions: 1, requestedMsat: '60000', settledMsat: '0', feesMsat: '0',
     inFlightMsat: '50000' });
   expect(result.unmatched).toEqual([expect.objectContaining({ credential: C2, extraction: 'amp', time: at(700) })]);
   expect(result.unattributed.map(item => [item.paymentHash, item.coverage, item.status, item.settledMsat])).toEqual([
@@ -309,4 +317,41 @@ it('RECONCILE/read-only reconcile never writes: the journal and registry are unc
   expect(readFileSync(s.path).equals(before[0])).toBe(true);
   expect(readFileSync(join(s.dir, 'registry.json')).equals(before[1])).toBe(true);
   expect((await fs.readdir(s.dir)).sort()).toEqual(['own.macaroon', 'payments.journal', 'registry.json', 'tls.cert']);
+});
+
+// 1.2.1: a payment hash's attribution uses every journaled request for it, in the window or before
+// it, and LND's one record is not credited to a credential whose request came after it.
+it('RECONCILE/attribution an earlier request by another credential shares the hash; a record older than every request is historical', async () => {
+  const journal = [
+    start(0), line('registered', 1, { session: 1 }),
+    payment(100, C1, '4294967341', H('reuse'), '100000'),
+    payment(2000, C2, '0', H('reuse'), '100000'),
+    payment(2100, C2, '0', H('old'), '5000'),
+    line('alive', 3_590),
+  ];
+  const s = setup(journal, [entry('shop', '4294967341')]);
+  // Both LND records were created outside the window, so the listing lacks them; each is looked up by hash.
+  const tracked = new Map<string, LndPayment | null | Error>([
+    [H('reuse'), lnd(H('reuse'), 101, 'succeeded', [htlc('succeeded', 100_000n, 10n)], null, 1n)],
+    [H('old'), lnd(H('old'), -86_400, 'succeeded', [htlc('succeeded', 5_000n, 1n)], null, 9n)]]);
+  const output = await reconcile([...s.args, '--since', at(1_800), '--until', at(3_600)], fakeLnd({ tracked }), at(3_600));
+  expectSchemaValid(output);
+  expect(output).toMatchObject({ ok: true, exitCode: 1 });
+  const result = output.result as ReconcileResult;
+  const reuse = result.payments.find(item => item.paymentHash === H('reuse'))!;
+  // C1's request lies before the window; it still shares the attribution, and the settlement is not C2's.
+  expect(reuse).toMatchObject({ attribution: 'ambiguous', credentials: [C1, C2].sort(), observation: { first: at(100), last: at(2000), calls: 2 },
+    settlement: { status: 'succeeded', source: 'track-payment', settledMsat: '100000', predatesObservation: false } });
+  const old = result.payments.find(item => item.paymentHash === H('old'))!;
+  expect(old).toMatchObject({ attribution: 'historical', credentials: [C2], settlement: { status: 'succeeded', predatesObservation: true } });
+  const c2 = result.credentials.find(row => row.credential === C2)!;
+  expect(c2).toMatchObject({ payments: 0, succeeded: 0, ambiguous: 1, historical: 1, settledMsat: '0', feesMsat: '0', requestedMsat: '0' });
+  const c1 = result.credentials.find(row => row.credential === C1)!;
+  expect(c1).toMatchObject({ payments: 0, ambiguous: 1, historical: 0, settledMsat: '0' });
+  expect(output.warnings).toContainEqual(expect.objectContaining({ code: 'attribution-historical' }));
+  expect(output.warnings).toContainEqual(expect.objectContaining({ code: 'attribution-ambiguous' }));
+  const text = render(output, 'text');
+  expect(text).toContain(`observed: ambiguous (${[C1, C2].sort().join(', ')})`);
+  expect(text).toContain('(historical: LND\'s record is older than every journaled request)');
+  expect(text).toContain('1 with an LND record older than any journaled request');
 });

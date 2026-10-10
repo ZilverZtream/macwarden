@@ -773,7 +773,8 @@ it('WATCH/unreachable a run stopped before any session registered does not repor
   const { result } = await watchUntil([...s.args, '--lnd-grpc', 'localhost:10001'], silent, async stop => {
     await registering; await settle(); stop();
   });
-  expect(result).toMatchObject({ ok: false, error: { code: 4, step: 'W7' } });
+  // Stopped by an interrupt before any session registered: interrupted (6), naming the endpoint it waited for (1.2.1).
+  expect(result).toMatchObject({ ok: false, error: { code: 6, step: 'cancelled' } });
   expect(result.error!.message).toContain('localhost:10001 (from --lnd-grpc)');
 });
 

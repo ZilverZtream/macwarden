@@ -115,6 +115,16 @@ export function createAlertRunner(run: (event: CanaryEvent, signal: AbortSignal)
     /** Resolves once no alert command is running or waiting. */
     async idle(): Promise<void> { while (running) await running; },
     /**
+     * Ends new starts at once (watch is shutting down): new events are refused and the waiting
+     * one is discarded, both reported; the running command keeps going until stop() gives it its
+     * deadline. Called before shutdown work that takes time (the usage file write), so a waiting
+     * alert cannot slip in behind a command that ends meanwhile (1.2.1).
+     */
+    stopping(): void {
+      stopped = true;
+      if (pending) { const dropped = pending; pending = null; onFailure(dropped); }
+    },
+    /**
      * Stops alerting: refuses new events, discards the waiting one, lets the running command
      * finish for at most graceMs, then cancels it and waits at most settleMs for it to settle.
      */

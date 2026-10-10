@@ -30,6 +30,8 @@ export function platformVariants(platform = process.platform) {
       counterpart: 'test/registry.test.ts', requiredCase: 'CP-017/B5' },
     { file: 'test/cp036-protected-streams.windows-fs.test.ts', reason: 'Windows stream variant',
       counterpart: 'test/cp036-protected-paths.test.ts', requiredCase: 'CP-036/A8-protected-input-scan' },
+    { file: 'test/sidecar-private.windows-fs.test.ts', reason: 'Windows owner-only sidecar (registry, usage, canary, journal) variant',
+      counterpart: 'test/payment-journal.test.ts', requiredCase: 'PAYJ/open refusals' },
     { file: 'test/cp038-acl.windows-fs.test.ts', reason: 'Windows ACL failure-path variant',
       counterpart: 'test/cp038-online.test.ts', requiredCase: 'CP-038/B7-spec-output' },
     { file: 'test/cp039-acl.windows-fs.test.ts', reason: 'Windows absolute-icacls variant',

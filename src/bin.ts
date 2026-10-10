@@ -15,7 +15,7 @@ import { alertCleanupDone } from './watch/alert.js';
 // orphan the children taskkill has yet to find (audit MW102-05).
 const WATCH_EXIT_GRACE_MS = 3_000;
 
-const status = await main(process.argv.slice(2));
+const status = await main(process.argv.slice(2), { execArgv: process.execArgv, nodeVersion: process.versions.node });
 process.exitCode = completionStatus(status);
 if (process.argv[2] === 'watch') {
   await alertCleanupDone();

@@ -28,6 +28,8 @@ export type OutputQueue = {
   dropped(): number;
   /** Resolves true once everything queued is written, or false after timeoutMs. */
   drain(timeoutMs: number): Promise<boolean>;
+  /** After close: resolves true once the write already in flight has completed, or false after timeoutMs. */
+  settle(timeoutMs: number): Promise<boolean>;
   /**
    * Stops output for good: queued lines are dropped and counted, later lines are dropped,
    * and a writer built with the same stop predicate stops retrying. Used when a final
@@ -121,6 +123,15 @@ export function createOutputQueue(writeChunk: ChunkWriter, limitBytes = OUTPUT_L
       queue.length = 0;
       queued = 0;
       idle();
+    },
+    /** Resolves once no write is in flight (after close, the queue is empty): true when settled within the deadline. */
+    settle(timeoutMs) {
+      if (!busy) return Promise.resolve(true);
+      return new Promise(resolve => {
+        const timer = setTimeout(() => { waiters.delete(done); resolve(false); }, timeoutMs);
+        const done = () => { clearTimeout(timer); waiters.delete(done); resolve(true); };
+        waiters.add(done);
+      });
     },
     drain(timeoutMs) {
       if (!busy && !queue.length) return Promise.resolve(true);

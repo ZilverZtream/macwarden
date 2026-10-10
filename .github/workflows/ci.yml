@@ -6,9 +6,14 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+# A newer push to the same branch or pull request cancels the run it supersedes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   test:
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       # Every platform reports its own result; one failure does not cancel the rest.
       fail-fast: false
@@ -31,6 +36,7 @@ jobs:
       - run: npm test
   oracle:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
         with:
@@ -47,6 +53,7 @@ jobs:
   # The Core Lightning rune comparison runs in its own job, so an LND oracle failure cannot skip it.
   cln-oracle:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
         with:
@@ -62,6 +69,7 @@ jobs:
         run: npm run fixture:cln:down
   gitleaks:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
         with:
