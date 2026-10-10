@@ -4,13 +4,17 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } f
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createFixture } from './fixture/fixture.mjs';
+import { createPrivateDirectory } from '../scripts/private-scratch.mjs';
 
 const base = resolve(process.env.MACWARDEN_TEST_TMP || join(tmpdir(), 'macwarden-test-tmp'));
 const roots: string[] = [];
 
-function temp(): string {
+// Owner-only like the product's own scratch roots: a directory from mkdtemp is owned by the
+// Administrators group on an elevated session (GitHub's Windows runners), which validateRoots
+// refuses before the behaviour under test is reached.
+async function temp(): Promise<string> {
   mkdirSync(base, { recursive: true });
-  const root = mkdtempSync(join(base, 'cp004-timeout-'));
+  const root = await createPrivateDirectory(base, 'cp004-timeout-');
   roots.push(root);
   return root;
 }
@@ -29,7 +33,7 @@ afterEach(() => {
 // for its timer) and far below a stall. The test timeout only guards against a hang.
 const STALL_CEILING_MS = 10_000;
 it('CP-004/fixture-pinned stalled getinfo response is aborted and the owned fixture is cleaned', async () => {
-  const root = temp();
+  const root = await temp();
   const fixtureDir = join(root, 'macwarden-fixture');
   const calls: string[] = [];
   let destroyed = false;
@@ -68,7 +72,7 @@ it('CP-004/fixture-pinned stalled getinfo response is aborted and the owned fixt
 }, 30_000);
 
 it('CP-004/fixture-pinned Docker startup and copies share the deadline and timeout cleanup removes copied files', async () => {
-  const root = temp();
+  const root = await temp();
   const fixtureDir = join(root, 'macwarden-fixture');
   const calls: string[] = [];
   const budgets: number[] = [];
@@ -116,7 +120,7 @@ it('CP-004/fixture-pinned Docker startup and copies share the deadline and timeo
 });
 
 it('CP-004/fixture-pinned a stalled Docker up call reaches cleanup without polling getinfo', async () => {
-  const root = temp();
+  const root = await temp();
   const calls: string[] = [];
   const budgets: number[] = [];
   let now = 0;
