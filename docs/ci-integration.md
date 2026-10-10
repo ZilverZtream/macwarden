@@ -19,13 +19,14 @@ jobs:
   scan:
     runs-on: ubuntu-latest
     steps:
+      # The action tags here are illustrative: pin each action to a commit SHA in a real workflow.
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0            # full history for --git-history
       - uses: actions/setup-node@v5
         with:
           node-version: 22
-      - run: npx --yes macwarden@1.2.0 scan . --git-history --format sarif > macwarden.sarif
+      - run: npx --yes macwarden@1.2.1 scan . --git-history --format sarif > macwarden.sarif
         continue-on-error: true     # upload the results even when credentials were found
       - uses: github/codeql-action/upload-sarif@v3
         with:
@@ -38,7 +39,7 @@ Each result carries `partialFingerprints.macwardenFingerprint/v1`, so an alert k
 ## GitHub annotations (free on private repositories)
 
 ```yaml
-      - run: npx --yes macwarden@1.2.0 scan . --git-history --fail-on READ --format github
+      - run: npx --yes macwarden@1.2.1 scan . --git-history --fail-on READ --format github
 ```
 
 Each finding becomes an inline `::error`, `::warning` or `::notice` annotation on the file and line. `--fail-on READ` makes the job fail when any credential is found.
@@ -49,12 +50,12 @@ Each finding becomes an inline `::error`, `::warning` or `::notice` annotation o
 
 ## Pre-commit
 
-As a [pre-commit](https://pre-commit.com) hook, so a credential never reaches a commit. The hook runs an installed `macwarden` (`npm install -g macwarden@1.2.0`). Create an empty `.macwardenignore` at the repository root first.
+As a [pre-commit](https://pre-commit.com) hook, so a credential never reaches a commit. The hook runs an installed `macwarden` (`npm install -g macwarden@1.2.1`). Create an empty `.macwardenignore` at the repository root first.
 
 ```yaml
 repos:
   - repo: https://github.com/ZilverZtream/macwarden
-    rev: v1.2.0
+    rev: v1.2.1
     hooks:
       - id: macwarden-scan
 ```
