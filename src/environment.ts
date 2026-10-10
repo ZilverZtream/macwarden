@@ -1,5 +1,10 @@
 /** The Node versions package.json's engines field allows: ^22.23.2 || ^24.18.1 || >=26.5.1 (July 2026 security releases). */
 export const SUPPORTED_NODE = '22.23.2 or later 22.x, 24.18.1 or later 24.x, or 26.5.1 or later';
+/** The warning watch raises on a Node release outside the supported ranges, or null. */
+export function nodeVersionWarning(version: string): { code: 'unsupported-node'; message: string } | null {
+  if (supportedNode(version)) return null;
+  return { code: 'unsupported-node', message: `Node ${version} is outside the supported releases (${SUPPORTED_NODE}); watch's HTTP/2 client depends on their fixes` };
+}
 export function supportedNode(version: string): boolean {
   const match = /^(\d+)\.(\d+)\.(\d+)/.exec(version);
   if (!match) return false;

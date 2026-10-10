@@ -114,7 +114,6 @@ it('PAYADAPTER/list-payments refuses invalid responses and queries, and bounds t
     { payments: [lndPayment({ creation_time_ns: '-1' })] },
     { payments: [lndPayment({ creation_time_ns: '100000000000000000000' })] },
     { payments: [lndPayment({ payment_index: '18446744073709551616' })] },
-    { payments: [lndPayment({ htlcs: Array.from({ length: 1_001 }, () => ({ status: 'FAILED', route: { total_fees_msat: '0', total_amt_msat: '1' } })) })] },
     { payments: [], last_index_offset: '18446744073709551616' },
     { payments: 'none' },
     { payments: [lndPayment(), lndPayment()], last_index_offset: '2' },

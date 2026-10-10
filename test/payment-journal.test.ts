@@ -575,3 +575,27 @@ it('PAYJ/budget a flood of 64 KiB payloads never blocks the event loop for long:
   const read = await readJournal(path);
   expect(read.records.filter(item => item.type === 'drop').length).toBeGreaterThan(0);
 }, 60_000);
+
+// 1.2.1 (owner finding): a coverage marker carries the time of the event, not of the queue turn
+// that wrote it; a backlog once moved an unregistered and the next registered to the same instant.
+it('PAYJ/marker-time registration changes are journaled at the time they happened, however late the queue writes them', async () => {
+  const dir = scratch();
+  const path = join(dir, 'marker-time.journal');
+  let now = Date.parse('2026-10-09T10:00:00.000Z');
+  const clock = () => new Date(now);
+  const journal = await openJournal(path, { clock });
+  now += 1_000; journal.registered();
+  // The stream drops at second 10 and comes back at second 30, while the queue is still busy
+  // with payloads captured before: both markers must keep their own time.
+  now += 9_000; journal.unregistered('stream-lost');
+  now += 20_000; journal.registered();
+  now += 5_000;
+  const stats = await journal.close();
+  expect(stats.stopped).toBeNull();
+  const read = await readJournal(path);
+  const times = read.records.filter(item => item.type === 'registered' || item.type === 'unregistered').map(item => `${item.type}@${item.time}`);
+  expect(times).toEqual(['registered@2026-10-09T10:00:01.000Z', 'unregistered@2026-10-09T10:00:10.000Z', 'registered@2026-10-09T10:00:30.000Z',
+    'unregistered@2026-10-09T10:00:35.000Z']);
+  const coverage = journalCoverage(read.records, NODE, Date.parse('2026-10-09T10:00:00.000Z'), Date.parse('2026-10-09T10:00:35.000Z'));
+  expect(coverage.gaps.map(gap => [gap.reason, (gap.to - gap.from) / 1_000])).toEqual([['not-registered', 1], ['not-registered', 20]]);
+});

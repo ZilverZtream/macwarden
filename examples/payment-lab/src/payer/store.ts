@@ -436,7 +436,8 @@ export class PayerStore {
     const statement = this.db.prepare(`INSERT INTO htlc_attempts (payment_hash, attempt_id, status, principal_msat, fee_msat, hops, route,
         failure_code, failure_source_index, attempt_time_ns, resolve_time_ns) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (payment_hash, attempt_id) DO UPDATE SET status = excluded.status, failure_code = excluded.failure_code,
-        failure_source_index = excluded.failure_source_index, resolve_time_ns = excluded.resolve_time_ns`);
+        failure_source_index = excluded.failure_source_index, resolve_time_ns = excluded.resolve_time_ns
+        WHERE htlc_attempts.status NOT IN ('SUCCEEDED', 'FAILED')`);
     for (const attempt of payment.htlcs) {
       statement.run(payment.paymentHash, attempt.attemptId, attempt.status, attempt.principalMsat, attempt.route.totalFeesMsat,
         attempt.route.hops.length, attempt.route.hops.map(hop => hop.chanId).join('>'), attempt.failureCode ?? null,
@@ -492,14 +493,13 @@ export class PayerStore {
       }
       // IN_FLIGHT or INITIATED: LND holds the payment. Not terminal.
       if (record.state === 'succeeded') return { state: 'succeeded', completed: false, failed: false };
+      // A failed payment stays failed: an IN_FLIGHT snapshot that arrives after the failure is stale
+      // (a concurrent tracker, an older page), and reopening the operation would leave its
+      // reservation released while the payment looked live. A retry goes through prepareRetry.
+      if (record.state === 'failed') return { state: 'failed', completed: false, failed: false };
       const result = this.db.prepare(`UPDATE payments SET state = 'in_flight', uncertain_reason = NULL, lnd_payment_index = ?, updated_at = ?
         WHERE payment_hash = ? AND state <> 'in_flight'`).run(payment.paymentIndex, now, payment.paymentHash);
-      if (changes(result) === 1) {
-        if (record.state === 'failed') {
-          this.db.prepare(`UPDATE operations SET state = 'open', updated_at = ? WHERE operation_id = ? AND state = 'failed'`).run(now, record.operationId);
-        }
-        this.#event(payment.paymentHash, 'in-flight', { source, status: payment.status, htlcAttempts: payment.htlcs.length });
-      }
+      if (changes(result) === 1) this.#event(payment.paymentHash, 'in-flight', { source, status: payment.status, htlcAttempts: payment.htlcs.length });
       return { state: 'in_flight', completed: false, failed: false };
     });
   }

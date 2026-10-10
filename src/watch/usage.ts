@@ -192,12 +192,14 @@ export class UsageStore {
     }
     this.coverages.set(nodePubkey, existing ? { ...existing, sessions: existing.sessions + 1, lastEnd: later(existing.lastEnd, now) }
       : { nodePubkey, firstStart: now, lastEnd: now, coveredSeconds: 0, sessions: 1 });
-    this.covering.set(nodePubkey, at.getTime());
     // A new span, starting no earlier than the last one ended (a clock stepping back never
-    // makes spans overlap); one starting exactly where the last ended continues it.
+    // makes spans overlap); one starting exactly where the last ended continues it. The seconds
+    // counter starts there too (1.2.1): it once started at the raw clock and, after a step back
+    // and the correction, counted time the spans already held.
     const spans = existing ? this.spans.get(nodePubkey) ?? [] : [];
     const last = spans.at(-1);
     const from = Math.max(at.getTime(), last?.[1] ?? -Infinity);
+    this.covering.set(nodePubkey, from);
     if (!last || from > last[1]) {
       spans.push([from, from]);
       if (spans.length > SPAN_LIMIT) spans.shift();

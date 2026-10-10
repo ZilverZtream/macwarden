@@ -1,5 +1,5 @@
 import { Cancelled, withCancellation } from './cancellation.js';
-import { SUPPORTED_NODE, supportedNode, unsafeNodeFlags } from './environment.js';
+import { nodeVersionWarning, unsafeNodeFlags } from './environment.js';
 import { readFileSync } from 'node:fs';
 import { handlers } from './commands/handlers.js';
 import { error, render, renderChunks, warning, type Mode, type OutputResult } from './output/index.js';
@@ -205,14 +205,12 @@ export async function main(argv: string[], runtime: { execArgv?: readonly string
       // the flags could expose what the command handles, and watch's HTTP/2 client depends on
       // the fixed Node releases package.json names.
       if (runtime.execArgv && unsafeNodeFlags(runtime.execArgv)) { await write(failure(2, null, 'unsafe Node diagnostic settings (node flags)', command), mode); return 2; }
-      if (command === 'watch' && runtime.nodeVersion !== undefined && !supportedNode(runtime.nodeVersion)) {
-        await write(failure(2, null, `unsupported Node version: watch needs Node ${SUPPORTED_NODE}`, command), mode);
-        return 2;
-      }
+      const unsupported = command === 'watch' && runtime.nodeVersion !== undefined ? nodeVersionWarning(runtime.nodeVersion) : null;
       // watch streams events while it runs, so it alone keeps --json to format them.
       const args = argv.slice(1).filter((arg, index) => arg !== '--json' || command === 'watch' ||
         (boundary >= 0 && index + 1 > boundary));
       const result = await withProcessErrorContext(context, () => withCancellation(controller.signal, () => handler(args)));
+      if (unsupported && result.warnings) result.warnings.unshift(unsupported);
       if (internalFailure) {
         await write(failure(8, 'internal', internalErrorMessage(context), command), mode);
         return 8;

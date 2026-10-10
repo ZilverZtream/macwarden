@@ -98,7 +98,8 @@ export function createOutputQueue(writeChunk: ChunkWriter, limitBytes = OUTPUT_L
     }, () => {
       busy = false;
       closed = true;
-      dropped += queue.length;
+      // The batch being written is lost with everything still queued (1.2.1).
+      dropped += parts.length + queue.length;
       queue.length = 0;
       queued = 0;
       idle();

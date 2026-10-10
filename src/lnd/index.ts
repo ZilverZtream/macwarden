@@ -345,7 +345,7 @@ export type LndPayment = {
   valueMsat: bigint;
   feeMsat: bigint;
   /** One per HTLC attempt: its status, the amount it delivers and its route's fees. */
-  /** HTLC attempts LND reports (at most 1,000) and their amounts by status, summed while parsing; the attempts themselves are not kept (audit 1.2.1). */
+  /** HTLC attempts LND reports and their amounts by status, summed while parsing; the attempts themselves are not kept (audit 1.2.1). */
   attempts: number;
   succeededAttempts: number;
   succeededMsat: bigint;
@@ -377,8 +377,6 @@ const MAX_UINT64 = (1n << 64n) - 1n;
 const NOT_INITIATED = /payment isn'?t initiated|payment not initiated/i;
 type HtlcStatus = 'succeeded' | 'failed' | 'in-flight' | 'unknown';
 const HTLC_STATUS: Record<string, HtlcStatus> = { IN_FLIGHT: 'in-flight', SUCCEEDED: 'succeeded', FAILED: 'failed' };
-/** LND's MaxPartsUpperLimit: more attempts than this in one payment is not an LND record. */
-const MAX_ATTEMPTS = 1_000;
 const MAX_INT64 = (1n << 63n) - 1n;
 // Nanoseconds that Date#toISOString renders with a four-digit year (before the year 10000).
 const MAX_CREATION_NS = 253_402_300_799_999n * 1_000_000n;
@@ -401,7 +399,9 @@ function paymentLookup(call: ReturnType<typeof transport>['call'], read: ReturnT
     const hash = string(item.payment_hash, stage).toLowerCase();
     if (!/^[0-9a-f]{64}$/.test(hash)) throw new LndError(5, stage, 'invalid LND response');
     const htlcs = item.htlcs === undefined || item.htlcs === null ? [] : item.htlcs;
-    if (!Array.isArray(htlcs) || htlcs.length > MAX_ATTEMPTS) throw new LndError(5, stage, 'invalid LND response');
+    // The attempt count is bounded by the response size only: LND keeps every failed attempt of a
+    // retried payment, so one can hold far more than its concurrent parts limit.
+    if (!Array.isArray(htlcs)) throw new LndError(5, stage, 'invalid LND response');
     // Amounts and times outside LND's own types are not an LND record (audit 1.2.1): they would
     // reach the output outside its schema.
     const createdAtNs = integer(item.creation_time_ns, stage);

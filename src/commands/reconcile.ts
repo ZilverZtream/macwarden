@@ -192,6 +192,7 @@ async function runSteps(args: string[], deps: Deps): Promise<ReconcileOutput> {
   const firstMine = mine.length ? Date.parse(mine[0].time) : null;
   const until = untilFlag ?? now;
   const since = sinceFlag ?? Math.min(firstMine ?? until, until);
+  if (since > until) return fail(2, 'Q1', '--since must not be after --until (now when --until is not given)');
   const inWindow = (ms: number) => ms >= since && ms <= until;
   const payments = mine.filter((record): record is PaymentRecord => record.type === 'payment');
   const deletionRecords = mine.filter((record): record is DeletionRecord => record.type === 'deletion' && inWindow(Date.parse(record.time)));

@@ -940,3 +940,19 @@ it('WATCH/schema every --json event type and the final document validate against
   const failed = await watchUntil([...s.args, '--json', '--until', '0s'], fakeRegister(script), async () => undefined);
   expect(failed.result).toMatchObject({ ok: false, error: { code: 2, step: 'W1' } });
 });
+
+// 1.2.1 (owner finding): an explicit :443 is 443, not the empty default the URL parser leaves.
+it('WATCH/grpc-port an explicit gRPC port 443 is kept', async () => {
+  const s = setup();
+  let opened!: () => void;
+  const registering = new Promise<void>(resolve => { opened = resolve; });
+  const silent: Register = (() => {
+    let end!: (value: MiddlewareEnd) => void;
+    const ended = new Promise<MiddlewareEnd>(resolve => { end = resolve; });
+    opened();
+    return { ended, close: () => end({ registered: false, code: 4, stage: 'middleware-stream', message: 'closed', disabled: false }) };
+  }) as Register;
+  const { result } = await watchUntil([...s.args, '--lnd-grpc', 'localhost:443'], silent, async stop => { await registering; await settle(); stop(); });
+  expect(result.error!.message).toContain('localhost:443 (from --lnd-grpc)');
+  expect(result.error!.message).not.toContain('localhost:0');
+});

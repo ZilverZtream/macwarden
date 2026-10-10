@@ -120,9 +120,10 @@ export class LndRestClient {
       const timer = setTimeout(() => finish(new TransportError(`${this.label}: no complete response within ${options.timeoutMs ?? DEFAULT_UNARY_TIMEOUT_MS} ms`, phase())),
         options.timeoutMs ?? DEFAULT_UNARY_TIMEOUT_MS);
       const onAbort = (): void => finish(new TransportError(`${this.label}: call aborted`, phase()));
+      // The error listener comes first: finish() destroys the request, which emits ECONNRESET.
+      req.on('error', error => finish(new TransportError(`${this.label}: ${error.message}`, phase(), { cause: error })));
       if (options.signal?.aborted) { onAbort(); return; }
       options.signal?.addEventListener('abort', onAbort, { once: true });
-      req.on('error', error => finish(new TransportError(`${this.label}: ${error.message}`, phase(), { cause: error })));
       req.on('response', (res: IncomingMessage) => {
         const chunks: Buffer[] = [];
         let size = 0;
@@ -174,9 +175,10 @@ export class LndRestClient {
       const connectTimer = setTimeout(() => { if (!connected()) finish(new TransportError(`${this.label}: no connection within ${CONNECT_TIMEOUT_MS} ms`, 'connect')); },
         CONNECT_TIMEOUT_MS);
       const onAbort = (): void => finish(new TransportError(`${this.label}: stream aborted by the caller`, phase()));
+      // The error listener comes first: finish() destroys the request, which emits ECONNRESET.
+      req.on('error', error => finish(new TransportError(`${this.label}: ${error.message}`, phase(), { cause: error })));
       if (options.signal?.aborted) { onAbort(); return; }
       options.signal?.addEventListener('abort', onAbort, { once: true });
-      req.on('error', error => finish(new TransportError(`${this.label}: ${error.message}`, phase(), { cause: error })));
       req.on('response', (res: IncomingMessage) => {
         responded = true;
         if (res.statusCode !== 200) {

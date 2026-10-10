@@ -355,3 +355,10 @@ it('RECONCILE/attribution an earlier request by another credential shares the ha
   expect(text).toContain('(historical: LND\'s record is older than every journaled request)');
   expect(text).toContain('1 with an LND record older than any journaled request');
 });
+
+// 1.2.1 (owner finding): the window is ordered after --until defaults to now.
+it('RECONCILE/window a --since after now is refused, never a negative window reported as complete', async () => {
+  const s = setup([start(0), line('registered', 1, { session: 1 }), line('alive', 100)]);
+  const output = await reconcile([...s.args, '--since', at(7_200)], fakeLnd({}), at(3_600));
+  expect(output).toMatchObject({ ok: false, error: { code: 2, step: 'Q1', message: expect.stringContaining('--since must not be after') } });
+});

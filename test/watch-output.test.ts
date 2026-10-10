@@ -41,7 +41,8 @@ it('WATCH/output-queue a write error (closed pipe) stops output quietly and coun
   queue.push('two\n');
   queue.push('three\n', true);
   expect(calls).toBe(1);
-  expect(queue.dropped()).toBe(2);
+  // The line whose write failed is lost too (1.2.1), with the two refused after the pipe closed.
+  expect(queue.dropped()).toBe(3);
 });
 
 const varint = (value: number) => { const out: number[] = []; do { let b = value & 0x7f; value = Math.floor(value / 128); if (value) b |= 0x80; out.push(b); } while (value); return Buffer.from(out); };
@@ -120,3 +121,14 @@ it('WATCH/output-stall intercept feedback keeps flowing while nobody reads the w
     server.close();
   }
 }, 90_000);
+
+// 1.2.1 (owner finding): the batch whose write failed is lost too, and counts as dropped.
+it('WATCH/output-queue a write that fails counts the batch it was writing as dropped', async () => {
+  const queue = createOutputQueue(async () => { throw Object.assign(new Error('broken pipe'), { code: 'EPIPE' }); });
+  queue.push('one\n');
+  queue.push('two\n');
+  expect(await queue.drain(1_000)).toBe(true);
+  expect(queue.dropped()).toBe(2);
+  queue.push('three\n');
+  expect(queue.dropped()).toBe(3);
+});

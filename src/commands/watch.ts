@@ -120,7 +120,8 @@ function hostPort(value: string): { host: string; port: number } | null {
   const url = endpoint(value);
   if (!url) return null;
   const parsed = new URL(url);
-  return { host: parsed.hostname.replace(/^\[|\]$/g, ''), port: Number(parsed.port) };
+  // URL drops the scheme's default port: an explicit :443 came back as an empty string (1.2.1).
+  return { host: parsed.hostname.replace(/^\[|\]$/g, ''), port: parsed.port === '' ? 443 : Number(parsed.port) };
 }
 
 function parse(args: string[], env: Deps['env']): Request | string {

@@ -7,7 +7,7 @@ import { expect, it } from 'vitest';
 import { main } from '../src/cli.js';
 import { run as inspect } from '../src/commands/inspect.js';
 import { run as scan } from '../src/commands/scan.js';
-import { SUPPORTED_NODE, supportedNode, unsafeNodeFlags } from '../src/environment.js';
+import { SUPPORTED_NODE, nodeVersionWarning, supportedNode, unsafeNodeFlags } from '../src/environment.js';
 import { captureMain } from './support/capture.js';
 
 // Audit 1.2.1: Node flags on the command line are the counterpart of NODE_OPTIONS; watch's
@@ -25,13 +25,17 @@ it('CLI/runtime node flags are refused before any command runs', async () => {
     expect(unsafeNodeFlags([flag]), flag).toBe(false);
 });
 
-it('CLI/runtime watch refuses a Node version outside the engines ranges; every other command does not check', async () => {
+it('CLI/runtime watch warns on a Node version outside the engines ranges; every other command does not check', async () => {
   for (const [version, ok] of [['22.23.2', true], ['22.23.1', false], ['22.30.0', true], ['23.9.0', false], ['24.18.1', true], ['24.17.9', false],
     ['24.20.0', true], ['25.0.0', false], ['26.5.1', true], ['26.5.0', false], ['27.0.0', true], ['garbage', false]] as const)
     expect(supportedNode(version), version).toBe(ok);
-  const refused = await captureMain(main, ['watch', '--json'], { nodeVersion: '22.23.1' });
-  expect(refused.code).toBe(2);
-  expect(JSON.parse(refused.stdout)).toMatchObject({ command: 'watch', ok: false, error: { code: 2, message: expect.stringContaining(SUPPORTED_NODE) } });
+  // watch on an unsupported release runs (engines already governs the install) but says so first.
+  // watch's output goes through its unattended writer (fd 1 directly), so the warning itself is checked here
+  // and the CLI's use of it by inspection: an unsupported release warns, a supported one does not.
+  expect(nodeVersionWarning('22.23.1')).toEqual({ code: 'unsupported-node', message: expect.stringContaining(SUPPORTED_NODE) });
+  expect(nodeVersionWarning('24.18.1')).toBeNull();
+  const warned = await captureMain(main, ['watch', '--json'], { nodeVersion: '22.23.1' });
+  expect(warned.code).toBe(2);
   // inspect runs on the same version: only watch depends on the fixed releases.
   const other = await captureMain(main, ['inspect', resolve('test/vectors/default-readonly.macaroon'), '--json'], { nodeVersion: '22.23.1' });
   expect(other.code).toBe(0);

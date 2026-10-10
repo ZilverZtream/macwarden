@@ -602,7 +602,7 @@ export class PaymentJournal {
     this.marker(time => ({ ...this.base(time), type: 'alive' }));
   }
 
-  private marker(make: (time: string) => JournalRecord, at = 0): void {
+  private marker(make: (time: string) => JournalRecord, at = this.clock().getTime()): void {
     if (this.stats.stopped) return;
     this.flushIntakeDrop();
     this.intake.push({ kind: 'marker', make, bytes: 0, at });
@@ -667,8 +667,10 @@ export class PaymentJournal {
       this.intakeBytes -= item.bytes;
       done += 1;
       try {
-        // A marker's time is never before the moment it describes (a drop's last call) nor before the run's previous record.
-        if (item.kind === 'marker') this.append(item.make(this.stamp(Math.max(item.at, this.clock().getTime()))), false);
+        // A marker's time is the moment it describes (a registration change, a drop's last call), never
+        // before the run's previous record; not the moment the queue reached it (1.2.1: a backlog
+        // once moved an unregistered and the next registered to the same instant, hiding the gap).
+        if (item.kind === 'marker') this.append(item.make(this.stamp(item.at)), false);
         else this.append(this.record(item), true);
       } catch { if (item.kind === 'call') this.lineDrop = this.note(this.lineDrop, Date.parse(this.stamp(item.at))); }
     }
