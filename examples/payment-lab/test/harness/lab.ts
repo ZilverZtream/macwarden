@@ -111,6 +111,31 @@ export interface Lab {
    * the reconcile predicate is not checked there.
    */
   cliMain: ((argv: string[], services: { payer(): PayerDeps; receiver(): ReceiverDeps }) => Promise<number>) | undefined;
+  /** `ledger verify` (src/ledger/verify.ts), when the source has the double-entry journal (1.3.0); undefined for older sources. */
+  verifyLedger: ((store: { db: unknown; book: 'payer' | 'receiver' }) => Promise<LedgerVerification>) | undefined;
+  /** The outbox worker and the effect files (src/outbox/), when the source has them (1.3.0); undefined for older sources. */
+  outbox: OutboxModules | undefined;
+}
+
+/** The parts of verifyLedger's result the oracle reads. */
+export interface LedgerVerification {
+  balanced: boolean;
+  unbalancedEntries: { entryId: number; reason: string }[];
+  invalidEntries: { entryId: number; reason: string }[];
+  firstDifference?: { account: string; entryId?: number; reason: string };
+}
+
+export interface EffectTarget { dir: string; key: Buffer }
+export interface OutboxRowView { outboxId: number; kind: string; idempotencyKey: string; subject: string; payload: Record<string, string | number | null> }
+
+export interface OutboxModules {
+  runPass(db: unknown, target: EffectTarget, options: { emit: (event: Record<string, unknown>) => void; owner?: string; leaseMs?: number;
+    clock?: () => number; hooks?: { afterClaim?(row: OutboxRowView): void; afterEffect?(row: OutboxRowView): void; afterAck?(row: OutboxRowView): void;
+      duringWrite?(tmpPath: string): void } }): { performed: number; alreadyPresent: number; failed: number; leaseLost: number; remaining: number };
+  labKey(labDir: string): Buffer;
+  effectPath(target: EffectTarget, subject: string): string;
+  effectFields(row: { kind: string; idempotencyKey: string; payload: Record<string, string | number | null> }): Record<string, string | number | null>;
+  readEffect(path: string, key: Buffer): { state: 'absent' } | { state: 'invalid'; reason: string } | { state: 'valid'; fields: Record<string, string | number | null> };
 }
 
 const loaded = new Map<string, Promise<Lab>>();
@@ -143,8 +168,16 @@ async function loadFrom(src: string): Promise<Lab> {
   const cliText = readFileSync(join(src, 'cli.ts'), 'utf8');
   const importable = /export async function main\(argv: string\[\], services/.test(cliText) && /if \(isEntryPoint\(\)\)/.test(cliText);
   const cli = importable ? await load<{ main: NonNullable<Lab['cliMain']> }>(src, 'cli.ts') : undefined;
+  const ledger = existsSync(join(src, 'ledger', 'verify.ts')) ? await load<{ verifyLedger: NonNullable<Lab['verifyLedger']> }>(src, 'ledger/verify.ts') : undefined;
+  let outbox: OutboxModules | undefined;
+  if (existsSync(join(src, 'outbox', 'worker.ts')) && existsSync(join(src, 'outbox', 'effects.ts'))) {
+    const worker = await load<Pick<OutboxModules, 'runPass'>>(src, 'outbox/worker.ts');
+    const effects = await load<Omit<OutboxModules, 'runPass'>>(src, 'outbox/effects.ts');
+    outbox = { runPass: worker.runPass, labKey: effects.labKey, effectPath: effects.effectPath, effectFields: effects.effectFields, readEffect: effects.readEffect };
+  }
   return { src, PayerStore: payerStore.PayerStore, ReceiverStore: receiverStore.ReceiverStore, LndError: errors.LndError,
     TransportError: errors.TransportError, recordIntent: payer.recordIntent, submit: payer.submit, reconcile: payer.reconcile,
     createInvoice: receiver.createInvoice, settleHoldInvoice: receiver.settleHoldInvoice, cancelHoldInvoice: receiver.cancelHoldInvoice,
-    reconcileInvoices: receiver.reconcileInvoices, listen: receiver.listen, cliMain: cli?.main };
+    reconcileInvoices: receiver.reconcileInvoices, listen: receiver.listen, cliMain: cli?.main,
+    verifyLedger: ledger?.verifyLedger, outbox };
 }

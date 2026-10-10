@@ -1,0 +1,90 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "effects-once",
+  "rule": "Every fulfilled order has exactly one fulfill-order row (its fulfillment's, with the settlement's amount and entry) and every completed operation one confirm-operation row (its first succeeded payment's); nothing else is enqueued; a done row has its receipt or confirmation, valid under the lab's key and carrying the row's fields; no effect is written twice, also when the worker is killed at any point; after the last pass every row is done.",
+  "message": "row op0:op0/i0 is done but its effect file is absent",
+  "seed": 2,
+  "case": 22,
+  "config": {
+    "scale": "small",
+    "budget": true,
+    "limit": "10000"
+  },
+  "failingStep": 7,
+  "originalSteps": 60,
+  "mutant": "effects-once.cjs",
+  "note": "An operation completes and the payer's outbox worker dies holding its confirm-operation row; on the mutant the next pass acknowledges the row without writing the confirmation, so a done row has no effect file.",
+  "events": [
+    {
+      "t": "intent",
+      "p": "p0",
+      "op": 0,
+      "inv": 0
+    },
+    {
+      "t": "submit",
+      "p": "p1",
+      "op": 0,
+      "inv": 0
+    },
+    {
+      "t": "send.arrive",
+      "pick": 0.5
+    },
+    {
+      "t": "lnd.payment",
+      "pick": 0.5,
+      "what": "succeed",
+      "amount": "exact"
+    },
+    {
+      "t": "reconcile",
+      "p": "p1",
+      "op": 0,
+      "inv": 0
+    },
+    {
+      "t": "track.deliver",
+      "pick": 0.5
+    },
+    {
+      "t": "outbox",
+      "p": "p0",
+      "side": "payer",
+      "crash": "during-write"
+    }
+  ],
+  "states": {
+    "after": {
+      "payer": {
+        "operations": {
+          "op0": "completed"
+        },
+        "outbox": [
+          {
+            "id": "1",
+            "kind": "confirm-operation",
+            "key": "op0:b8c3ff3fc281ae0c4cafacf4908ec862f7d640761699e22dbe51b7cd9114a565",
+            "subject": "op0",
+            "payload": {
+              "operationId": "op0",
+              "operationKind": "payout",
+              "paymentHash": "op0/i0",
+              "valueMsat": "1000",
+              "feeMsat": "10",
+              "ledgerEntryId": 2
+            },
+            "state": "done"
+          }
+        ]
+      },
+      "receiver": {
+        "orders": {},
+        "fulfillments": [],
+        "outbox": []
+      }
+    },
+    "written": {}
+  }
+}

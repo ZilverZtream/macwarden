@@ -11,6 +11,11 @@ import type { HtlcAttempt, Invoice, InvoiceApi, Lab, Payment, PayerApi, StreamDe
  * processes' calls can be produced and replayed. LND itself is truthful: a payment it reports
  * SUCCEEDED was initiated by a request that reached it, a NotFound means it holds no such payment or
  * invoice at that moment, and a definite refusal means the request was handled and nothing created.
+ *
+ * Faults are injected on purpose, each one a case a README rule is for: a lookup reporting an invoice
+ * canceled that is not (misreport), a payment or an invoice paid for another amount than the invoice's
+ * (over or under), a settled invoice reported again for another amount (resettle: a hostile or buggy
+ * node), and an invoice on the node that the receiver never created (foreign).
  */
 
 export type Proc = 'p0' | 'p1';
@@ -52,6 +57,8 @@ export interface Call {
   arrived: boolean;
   /** The client stopped waiting, and the request may still reach LND (it is in transit). */
   inTransit: boolean;
+  /** A lookup's answer as the client received it: the invoice state, or not-found (undefined: no answer, or an error). */
+  answered?: string;
   onUpdate: ((value: never) => StreamDecision) | undefined;
   resolve: (value?: unknown) => void;
   reject: (error: unknown) => void;
@@ -105,6 +112,12 @@ export interface LndHooks {
 export const sha256Hex = (hex: string): string => createHash('sha256').update(Buffer.from(hex, 'hex')).digest('hex');
 const DESTINATION = `02${'11'.repeat(32)}`;
 const FEE_PER_SHARD_MSAT = 10n;
+/** How far a payment or an invoice paid for another amount is off: over or under by this much. */
+const PAYMENT_SKEW_MSAT = 100n;
+const INVOICE_SKEW_MSAT = 500n;
+export type AmountVariant = 'exact' | 'over' | 'under';
+const skewed = (amount: bigint, variant: AmountVariant | undefined, skew: bigint): bigint =>
+  variant === 'over' ? amount + skew : variant === 'under' ? amount - skew : amount;
 
 export class FakeLnd {
   readonly lab: Lab;
@@ -122,6 +135,7 @@ export class FakeLnd {
   #addIndex = 0n;
   #settleIndex = 0n;
   #creates = new Map<string, number>();
+  #foreign = 0;
 
   constructor(lab: Lab, hooks: LndHooks) {
     this.lab = lab;
@@ -130,6 +144,10 @@ export class FakeLnd {
 
   labelOf(hash: string): string {
     return this.paymentLabels.get(hash)?.label ?? this.invoiceLabels.get(hash) ?? hash.slice(0, 12);
+  }
+
+  addIndexes(): bigint[] {
+    return [...this.invoices.values()].map(item => item.addIndex).sort((a, b) => (a < b ? -1 : 1));
   }
 
   settleIndexes(): bigint[] {
@@ -382,7 +400,7 @@ export class FakeLnd {
   }
 
   /** LND's own progress on an in-flight payment: a new HTLC attempt, a failed attempt, the payment failing or succeeding. */
-  paymentEvent(hash: string, what: 'attempt' | 'attempt-fail' | 'fail' | 'succeed'): boolean {
+  paymentEvent(hash: string, what: 'attempt' | 'attempt-fail' | 'fail' | 'succeed', amount?: AmountVariant): boolean {
     const payment = this.payments.get(hash);
     if (payment === undefined || payment.status !== 'IN_FLIGHT') return false;
     const inFlight = payment.htlcs.filter(item => item.status === 'IN_FLIGHT');
@@ -402,6 +420,8 @@ export class FakeLnd {
         payment.failureReason = 'FAILURE_REASON_NO_ROUTE';
         break;
       case 'succeed': {
+        // LND reports the value it paid; a fault reports another than the invoice's amount (the record's amount-mismatch event).
+        payment.valueMsat = skewed(payment.valueMsat, amount, PAYMENT_SKEW_MSAT);
         const shards = inFlight.length > 0 ? inFlight : [this.#attempt(payment, 'IN_FLIGHT')];
         if (inFlight.length === 0) payment.htlcs.push(shards[0] as HtlcAttempt);
         for (const item of shards) Object.assign(item, { status: 'SUCCEEDED', resolveTimeNs: item.attemptTimeNs + 1n });
@@ -482,6 +502,7 @@ export class FakeLnd {
       case 'ok': {
         const answer = this.#handle(call);
         this.#close(call);
+        if (call.kind === 'lookup') call.answered = answer.error === undefined ? (answer.value as Invoice).state : 'not-found';
         if (answer.error !== undefined) call.reject(answer.error);
         else call.resolve(answer.value);
         return true;
@@ -501,6 +522,7 @@ export class FakeLnd {
         if (call.kind !== 'lookup') return false;
         this.#close(call);
         const seen = call.request.seen;
+        call.answered = seen === undefined || seen === null ? 'not-found' : seen.state;
         if (seen === undefined || seen === null) call.reject(this.notFound('unable to locate invoice'));
         else call.resolve(seen);
         return true;
@@ -519,6 +541,20 @@ export class FakeLnd {
     }
   }
 
+  /** An invoice someone else created on the node (the receiver has no record of it), announced to the subscribers. */
+  foreignInvoice(): string {
+    const n = ++this.#foreign;
+    const hash = sha256Hex(createHash('sha256').update(`payment-lab-harness:foreign:${n}`).digest('hex'));
+    const label = `foreign#${n}`;
+    this.invoiceLabels.set(hash, label);
+    const item: LndInvoice = { hash, label, hold: false, state: 'OPEN', valueMsat: 4000n, amtPaidMsat: 0n, addIndex: ++this.#addIndex, settleIndex: 0n,
+      misreported: false };
+    this.invoices.set(hash, item);
+    this.#notifySubscribers(item);
+    this.hooks.progress();
+    return hash;
+  }
+
   /** A create request in transit reaches LND late: the invoice exists although its creator stopped waiting. */
   arriveLate(call: Call): boolean {
     if (call.kind !== 'create' || !call.inTransit || call.arrived) return false;
@@ -527,13 +563,18 @@ export class FakeLnd {
   }
 
   /** What happens to an invoice outside the receiver: a payer pays it, a held HTLC times out, it expires. */
-  invoiceEvent(hash: string, what: 'pay' | 'htlc-timeout' | 'expire' | 'misreport'): boolean {
+  invoiceEvent(hash: string, what: 'pay' | 'htlc-timeout' | 'expire' | 'misreport' | 'resettle', amount?: AmountVariant): boolean {
     const item = this.invoices.get(hash);
     if (item === undefined) return false;
     if (what === 'misreport' && (item.state === 'OPEN' || item.state === 'ACCEPTED') && !item.misreported) {
       item.misreported = true;
+    } else if (what === 'resettle' && item.state === 'SETTLED') {
+      // A hostile or buggy node reports the settled invoice again, for another amount: under the invoice's amount
+      // when it was paid in full, the full amount when it was underpaid.
+      item.amtPaidMsat = item.amtPaidMsat >= item.valueMsat ? item.valueMsat - INVOICE_SKEW_MSAT : item.valueMsat;
+      this.#notifySubscribers(item);
     } else if (what === 'pay' && item.state === 'OPEN') {
-      item.amtPaidMsat = item.valueMsat;
+      item.amtPaidMsat = skewed(item.valueMsat, amount, INVOICE_SKEW_MSAT);
       if (item.hold) item.state = 'ACCEPTED';
       else {
         item.state = 'SETTLED';
