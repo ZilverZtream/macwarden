@@ -9,6 +9,7 @@
 import * as nodeFs from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { dirname } from 'node:path';
 import { macaroonId } from '../decode/index.js';
 import { PrivateFileError, reserveOwnerOnly, verifyOwnerOnly } from '../private-file.js';
 import type { MiddlewareCall } from '../lnd/index.js';
@@ -281,12 +282,17 @@ export type Coverage = { covered: [number, number][]; gaps: Gap[]; coveredMs: nu
  * when a run has neither (watch still running, killed or crashed), its last record
  * (`unconfirmed`). A `drop` record removes [first, last] from coverage (`dropped`, with its
  * count; listed even when it lasted no measurable time). Before the node's first run the gap
- * is `before-journal`.
+ * is `before-journal`. An end reason survives even when nothing covered precedes it: a run that
+ * ends (`run-end`, `full`) without a registration, or a registered span a drop consumed whole,
+ * still changes the reason of the gap from that time on.
  */
 export function journalCoverage(records: JournalRecord[], node: string, from: number, to: number): Coverage {
   type Span = { from: number; to: number; end: GapReason };
   const spans: Span[] = [];
   const drops: Gap[] = [];
+  // Reason changes with no covered piece before them; the sweep below applies each one only
+  // where it changes the reason, so a marker never splits a gap in two with the same reason.
+  const markers: { at: number; end: GapReason }[] = [];
   let current: string | null = null;
   let start: number | null = null;
   let last = 0;
@@ -306,8 +312,8 @@ export function journalCoverage(records: JournalRecord[], node: string, from: nu
     switch (record.type) {
       case 'registered': start = at; break;
       case 'unregistered': close(record.reason === 'stopping' ? 'not-running' : 'not-registered', at); break;
-      case 'full': close('journal-full', at); current = null; break;
-      case 'run-end': close('not-running', at); current = null; break;
+      case 'full': if (start === null) markers.push({ at, end: 'journal-full' }); close('journal-full', at); current = null; break;
+      case 'run-end': if (start === null) markers.push({ at, end: 'not-running' }); close('not-running', at); current = null; break;
       case 'drop': drops.push({ from: Date.parse(record.first), to: Date.parse(record.last), reason: 'dropped', dropped: record.count }); break;
       default: break;
     }
@@ -352,7 +358,11 @@ export function journalCoverage(records: JournalRecord[], node: string, from: nu
     // ends where the `full` record is, 1.2.1): the gap that follows keeps the reason that ended
     // the span (`journal-full`), and the drop is listed as its own gap with its count below.
     else if (covered.length > pieces) covered[covered.length - 1].end = span.end;
+    // A drop consumed the whole span: coverage never began, the drop is listed below, and the
+    // reason that ended the span (`journal-full`, `not-running`, …) applies from its end.
+    else markers.push({ at: span.from, end: 'dropped' }, { at: span.to, end: span.end });
   }
+  markers.sort((a, b) => a.at - b.at);
   const pieces = covered.map(span => ({ ...span, from: Math.max(span.from, from), to: Math.min(span.to, to) }))
     .filter(span => span.from < span.to);
   // Touching pieces merge back: a drop that lasted no measurable time split a span in two.
@@ -368,14 +378,29 @@ export function journalCoverage(records: JournalRecord[], node: string, from: nu
   let cursor = from;
   let reason: GapReason = firstRun === null || from < firstRun ? 'before-journal' : 'not-registered';
   // The reason for a gap that starts the window: whatever ended the last span before it.
-  let before: Span | undefined;
+  let before: { to: number; end: GapReason } | undefined;
   for (const span of covered) if (span.to <= from && (!before || span.to >= before.to)) before = span;
+  for (const marker of markers) if (marker.at <= from && (!before || marker.at >= before.to)) before = { to: marker.at, end: marker.end };
   if (before) reason = before.end;
+  let marker = 0;
+  while (marker < markers.length && markers[marker].at <= from) marker += 1;
+  // Markers up to `limit` (and before `to`) in time order; one inside covered time is moot.
+  const mark = (limit: number) => {
+    for (; marker < markers.length && markers[marker].at <= limit && markers[marker].at < to; marker += 1) {
+      const { at, end } = markers[marker];
+      if (at < cursor || end === reason) continue;
+      if (at > cursor) gaps.push({ from: cursor, to: at, reason, dropped: 0 });
+      cursor = at;
+      reason = end;
+    }
+  };
   for (const span of clipped) {
+    mark(span.from);
     if (span.from > cursor) gaps.push({ from: cursor, to: span.from, reason, dropped: 0 });
     cursor = Math.max(cursor, span.to);
     reason = span.end;
   }
+  mark(to);
   if (cursor < to) gaps.push({ from: cursor, to, reason, dropped: 0 });
   // Drop records inside the window are listed with their counts, merged with the gap they form:
   // each record's count is listed only when that record touches the window (a merged window
@@ -491,6 +516,7 @@ export class PaymentJournal {
   private registeredSession: number | null = null;
   private aliveTimer: ReturnType<typeof setInterval> | undefined;
   private closing = false;
+  private closed: Promise<JournalStats> | null = null;
   readonly stats: JournalStats;
 
   private constructor(private readonly handle: nodeFs.FileHandle, private size: number, private readonly release: () => Promise<void>,
@@ -589,6 +615,8 @@ export class PaymentJournal {
       const text = `${newline ? '\n' : ''}${JSON.stringify(first)}\n`;
       try { await writeAll(handle, text); await handle.sync(); }
       catch { throw new JournalError('cannot write payment journal'); }
+      // A new journal's name is durable only once its directory entry is, as for --out files.
+      if (created) await syncDirectory(target, fs, platform);
       journal.size += Buffer.byteLength(text);
       journal.aliveTimer = setInterval(() => journal.keepAlive(), Math.min(JOURNAL_ALIVE_MS, 60_000));
       journal.aliveTimer.unref?.();
@@ -920,8 +948,13 @@ export class PaymentJournal {
    * `run-end` are appended and synced, the file is closed and the lock released. Captures after
    * this are counted as dropped. Returns the run's statistics.
    */
-  async close(): Promise<JournalStats> {
-    if (this.closing) return this.stats;
+  close(): Promise<JournalStats> {
+    // One drain: a second close waits for the first instead of returning before the run-end is synced.
+    this.closed ??= this.closeOnce();
+    return this.closed;
+  }
+
+  private async closeOnce(): Promise<JournalStats> {
     clearInterval(this.aliveTimer);
     this.unregistered('stopping');
     this.flushIntakeDrop();
@@ -939,4 +972,16 @@ export class PaymentJournal {
     await this.release().catch(() => undefined);
     return this.stats;
   }
+}
+
+// POSIX needs the directory synced for a new name to survive a power loss. Best effort: some file
+// systems refuse to sync a directory, and Windows has no such call. The file itself is synced.
+async function syncDirectory(path: string, fs: typeof nodeFs, platform: NodeJS.Platform): Promise<void> {
+  if (platform === 'win32') return;
+  let directory: nodeFs.FileHandle | undefined;
+  try {
+    directory = await fs.open(dirname(path), 'r');
+    await directory.sync();
+  } catch { /* EISDIR, EINVAL, EPERM and similar: nothing more can be done. */ }
+  finally { await directory?.close().catch(() => undefined); }
 }

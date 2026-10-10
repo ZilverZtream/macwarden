@@ -71,7 +71,9 @@ it.each(['dry-run', 'declined', 'yes'])(
     absent(f); const before = readFileSync(f.registry);
     if (kind === 'declined') f.prompt.mockResolvedValueOnce('wrong');
     const result = await invoke(f, kind === 'dry-run' ? ['--dry-run'] : kind === 'yes' ? ['--yes'] : []);
-    expect(f.calls).toEqual([...prefix, `Check:${newId}`]); expect(f.lnd.deleteMacaroonId).not.toHaveBeenCalled();
+    // After the confirmation (or --yes) the repair lists IDs again and re-proves the replacement (N01, N09).
+    expect(f.calls).toEqual([...prefix, `Check:${newId}`, ...(kind === 'yes' ? ['ListMacaroonIDs', `Check:${newId}`] : [])]);
+    expect(f.lnd.deleteMacaroonId).not.toHaveBeenCalled();
     if (kind === 'dry-run') {
       expect(result.error).toBeNull(); expect(result.result).toMatchObject({ dryRun: true, stage: 'finish', old: f.old,
         permissions: f.old.permissions, grade: 'RECEIVE' });
@@ -219,7 +221,8 @@ it('CP-029/F11-F12 normal finish save failure reports exact repair and rerun pro
     unchanged(f, before); released(f); expect(f.ids).not.toContain(oldId);
     f.state.registryFails = false; f.calls.length = 0; f.lnd.deleteMacaroonId.mockClear();
     success(f, await invoke(f), 'by-id-only', true);
-    expect(f.calls).toEqual([...prefix, `Check:${newId}`]); expect(f.lnd.deleteMacaroonId).not.toHaveBeenCalled();
+    expect(f.calls).toEqual([...prefix, `Check:${newId}`, 'ListMacaroonIDs', `Check:${newId}`]);
+    expect(f.lnd.deleteMacaroonId).not.toHaveBeenCalled();
   }));
 
 it('CP-029/abandon numeric revoke of staged ID preserves old authority and removes pending inventory', async () => scratch(async f => {

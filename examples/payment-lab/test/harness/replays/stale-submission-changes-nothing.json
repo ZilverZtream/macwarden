@@ -1,0 +1,134 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "stale-submission-changes-nothing",
+  "rule": "An update or call outcome (other than SUCCEEDED) for a superseded submission changes neither the payment, its operation nor its reservation.",
+  "message": "markNotInitiated markNotInitiated for superseded submission 1 of op0/i0 (record at submission 2, closed 0) moved it submitting -> intent, held reservations 1 -> 1",
+  "seed": 3,
+  "case": 2,
+  "config": {
+    "scale": "huge",
+    "budget": true,
+    "limit": "9223372036854775807"
+  },
+  "failingStep": 6,
+  "originalSteps": 60,
+  "events": [
+    {
+      "t": "intent",
+      "p": "p0",
+      "op": 0,
+      "inv": 0
+    },
+    {
+      "t": "submit",
+      "p": "p0",
+      "op": 0,
+      "inv": 0
+    },
+    {
+      "t": "reconcile",
+      "p": "p1",
+      "op": 0,
+      "inv": 0
+    },
+    {
+      "t": "reconcile",
+      "p": "p0",
+      "op": 0,
+      "inv": 0
+    },
+    {
+      "t": "track.deliver",
+      "pick": 0.25
+    },
+    {
+      "t": "submit",
+      "p": "p0",
+      "op": 0,
+      "inv": 0
+    },
+    {
+      "t": "track.deliver",
+      "pick": 0.5
+    }
+  ],
+  "states": {
+    "call": {
+      "proc": "p0",
+      "method": "markNotInitiated",
+      "args": [
+        "op0/i0",
+        "TrackPaymentV2: payment isn't initiated"
+      ]
+    },
+    "before": {
+      "payments": {
+        "op0/i0": {
+          "op": "op0",
+          "state": "submitting",
+          "subs": 2,
+          "amount": "4611686018427387904"
+        }
+      },
+      "operations": {
+        "op0": "open"
+      },
+      "reservations": [
+        {
+          "id": "1",
+          "budget": "B",
+          "hash": "op0/i0",
+          "principal": "4611686018427387904",
+          "allowance": "1000",
+          "state": "held"
+        }
+      ],
+      "ledger": [],
+      "events": {
+        "op0/i0": [
+          "intent-recorded",
+          "submit",
+          "not-initiated"
+        ]
+      },
+      "budgets": {
+        "B": "9223372036854775807"
+      }
+    },
+    "after": {
+      "payments": {
+        "op0/i0": {
+          "op": "op0",
+          "state": "intent",
+          "subs": 2,
+          "amount": "4611686018427387904"
+        }
+      },
+      "operations": {
+        "op0": "open"
+      },
+      "reservations": [
+        {
+          "id": "1",
+          "budget": "B",
+          "hash": "op0/i0",
+          "principal": "4611686018427387904",
+          "allowance": "1000",
+          "state": "held"
+        }
+      ],
+      "ledger": [],
+      "events": {
+        "op0/i0": [
+          "intent-recorded",
+          "submit",
+          "not-initiated"
+        ]
+      },
+      "budgets": {
+        "B": "9223372036854775807"
+      }
+    }
+  }
+}

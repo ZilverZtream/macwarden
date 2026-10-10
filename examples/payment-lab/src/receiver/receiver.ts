@@ -496,9 +496,11 @@ function delay(ms: number, signal: AbortSignal): Promise<void> {
  * settlement after a non-zero settle index), reconnects with backoff, and runs
  * lookups for unresolved invoices on start and every `reconcileIntervalMs`:
  * a subscription is a fast path, the lookups are the ground truth, and LND
- * replays nothing for a cursor of zero.
+ * replays nothing for a cursor of zero. `afterReconcile` (the outbox worker's pass, in the CLI)
+ * runs after every reconciliation pass, whether or not the pass succeeded.
  */
-export async function listen(deps: ReceiverDeps, options: { reconcileIntervalMs: number; signal: AbortSignal }): Promise<void> {
+export async function listen(deps: ReceiverDeps, options: { reconcileIntervalMs: number; signal: AbortSignal;
+  afterReconcile?: () => void }): Promise<void> {
   const { signal } = options;
   const reconcileTick = async (): Promise<void> => {
     try {
@@ -506,6 +508,13 @@ export async function listen(deps: ReceiverDeps, options: { reconcileIntervalMs:
       deps.emit({ event: 'reconcile-pass', ...result });
     } catch (error) {
       deps.emit({ event: 'reconcile-pass-failed', error: describeError(error) });
+    }
+    if (options.afterReconcile !== undefined && !signal.aborted) {
+      try {
+        options.afterReconcile();
+      } catch (error) {
+        deps.emit({ event: 'outbox-pass-failed', error: describeError(error) });
+      }
     }
   };
   let reconciling: Promise<void> | undefined;

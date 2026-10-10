@@ -1,6 +1,11 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { Invoice } from '../lnd/types.ts';
-import { changes, immediate, int, nowIso, openDatabase, optionalInt, optionalText, text, type Row } from '../store/sqlite.ts';
+import { entriesFor, legsFor, post, type JournalEntry } from '../ledger/journal.ts';
+import { migrateReceiverLedger } from '../ledger/migrate.ts';
+import { migrateReceiverOutbox } from '../outbox/migrate.ts';
+import { enqueue, fulfillOrder, outboxRows, type OutboxRow } from '../outbox/outbox.ts';
+import { invoiceSettled, receiverDoublePayment, underpaidSettlement } from '../ledger/postings.ts';
+import { changes, immediate, int, nowIso, openDatabase, optionalInt, optionalText, text, type Migration, type Row } from '../store/sqlite.ts';
 
 /**
  * The receiver's durable records (the merchant's order book, or a customer
@@ -10,7 +15,10 @@ import { changes, immediate, int, nowIso, openDatabase, optionalInt, optionalTex
  * - payment_hash   the invoice LND tracks for it
  * - deliveries     every invoice update received, from any source, repeats included
  * - fulfillments   the business effect, at most once per (payment_hash, order_id)
- * - ledger_entries the accounting entry, at most once per (order_id, payment_hash, account)
+ * - journal        the double-entry ledger (src/ledger/): an invoice-settled entry at most once per
+ *                  payment hash, posted in the transaction that records the settlement
+ * - outbox         the fulfillment's effect (src/outbox/): a fulfill-order row enqueued in the same
+ *                  transaction as the fulfillments row, performed later by the outbox worker
  *
  * The preimage is generated and stored here before the invoice is created, so
  * the payment hash is known before LND is called and an uncertain creation is
@@ -18,7 +26,7 @@ import { changes, immediate, int, nowIso, openDatabase, optionalInt, optionalTex
  * production keep this file as protected as a credential.
  */
 
-const MIGRATIONS = [`
+const MIGRATIONS: Migration[] = [`
 CREATE TABLE orders (
   order_id TEXT PRIMARY KEY CHECK (length(order_id) BETWEEN 1 AND 128),
   amount_msat INTEGER NOT NULL CHECK (amount_msat > 0),
@@ -77,6 +85,16 @@ INSERT INTO subscription_cursor (name, add_index, settle_index, updated_at) VALU
 -- call reached LND late). The record keeps not-created while the order has another live invoice;
 -- this column says what LND holds, so reconciliation can cancel it (resolveLateInvoice in receiver.ts).
 ALTER TABLE invoices ADD COLUMN late_lnd_state TEXT;
+`,
+// 3: the double-entry journal (src/ledger/). ledger_entries' single-leg 'sales' rows become balanced
+// entries and the table is dropped; see migrateReceiverLedger for the counter-account.
+migrateReceiverLedger,
+// 4: the transactional outbox (src/outbox/); a fulfill-order row for every fulfillment already recorded.
+migrateReceiverOutbox, `
+-- 5: lookup indexes. invoicesForOrder (show, explain, reconcile --order) scanned invoices and sorted them;
+-- deliveries (the timeline) scanned every delivery. Both now read in their output order.
+CREATE INDEX IF NOT EXISTS invoices_by_order ON invoices (order_id, created_at);
+CREATE INDEX IF NOT EXISTS deliveries_by_payment ON deliveries (payment_hash, delivery_id);
 `];
 
 export type InvoiceRecordState = 'creating' | 'open' | 'accepted' | 'settled' | 'canceled' | 'not-created';
@@ -109,9 +127,12 @@ export interface OrderRecord {
  * (the order has another live invoice, or no longer awaits payment); it is to be canceled in LND.
  * `second-payment`: an invoice of an order already fulfilled by another invoice was paid; the
  * money is posted, the order is not fulfilled again, and the payment is to be returned.
+ * `settlement-amount-conflict`: LND reported the invoice settled again for an amount other than
+ * the settlement already posted for its payment hash (a hostile or buggy node); the first
+ * settlement recorded wins, and nothing but this delivery is recorded.
  */
 export type DeliveryOutcome = 'fulfilled' | 'duplicate' | 'state-updated' | 'unchanged' | 'unknown-invoice' | 'underpaid'
-  | 'late-invoice' | 'second-payment';
+  | 'late-invoice' | 'second-payment' | 'settlement-amount-conflict';
 
 function invoiceFrom(row: Row): InvoiceRecord {
   return {
@@ -150,6 +171,8 @@ const LND_RANK: Record<string, number> = { OPEN: 1, ACCEPTED: 1, CANCELED: 3, SE
 
 export class ReceiverStore {
   readonly db: DatabaseSync;
+  /** Which book this is, for verifyLedger (src/ledger/verify.ts). */
+  readonly book = 'receiver' as const;
 
   constructor(path: string) {
     this.db = openDatabase(path, MIGRATIONS);
@@ -241,9 +264,23 @@ export class ReceiverStore {
     return Number(int(this.db.prepare('SELECT COUNT(*) AS n FROM fulfillments WHERE order_id = ?').get(orderId) ?? {}, 'n'));
   }
 
+  /**
+   * The order's sales: one row per invoice-settled entry (the amount LND reports paid), in posting
+   * order. This is the 1.2 ledger_entries view, read from the journal.
+   */
   ledger(orderId: string): { paymentHash: string; amountMsat: bigint; postedAt: string }[] {
-    return this.db.prepare('SELECT * FROM ledger_entries WHERE order_id = ? ORDER BY entry_id').all(orderId)
-      .map(row => ({ paymentHash: text(row, 'payment_hash'), amountMsat: int(row, 'amount_msat'), postedAt: text(row, 'posted_at') }));
+    return legsFor(this.db, orderId, 'invoice-settled')
+      .map(item => ({ paymentHash: item.paymentHash, amountMsat: item.amountMsat, postedAt: item.postedAt }));
+  }
+
+  /** The order's journal entries with their lines (settlements, double payments, underpaid settlements). */
+  journal(orderId: string): JournalEntry[] {
+    return entriesFor(this.db, orderId);
+  }
+
+  /** The order's outbox rows (its fulfill-order effect, once the order is fulfilled). */
+  outbox(orderId?: string): OutboxRow[] {
+    return outboxRows(this.db, orderId);
   }
 
   cursor(): { addIndex: bigint; settleIndex: bigint } {
@@ -317,6 +354,15 @@ export class ReceiverStore {
       .run(nowIso(), paymentHash, createdBefore ?? null, createdBefore ?? null)) === 1);
   }
 
+  /** The amount of the settlement posted for this payment hash (invoice-settled or underpaid-settlement), if any. */
+  #settledMsat(paymentHash: string): bigint | undefined {
+    const row = this.db.prepare(`SELECT journal_lines.amount_msat FROM journal_entries
+      JOIN journal_lines ON journal_lines.entry_id = journal_entries.entry_id AND journal_lines.line_no = 1
+      WHERE journal_entries.reference = ? AND journal_entries.event IN ('invoice-settled', 'underpaid-settlement')
+      ORDER BY journal_entries.entry_id LIMIT 1`).get(paymentHash);
+    return row === undefined ? undefined : int(row, 'amount_msat');
+  }
+
   /** Whether a not-created record may not become its order's live invoice: another one is live, or the order is decided. */
   #mayNotAdopt(record: InvoiceRecord): boolean {
     return this.db.prepare(`SELECT 1 AS n FROM invoices WHERE order_id = ? AND payment_hash <> ?
@@ -327,8 +373,9 @@ export class ReceiverStore {
   /**
    * Applies one invoice update in one transaction: the delivery is logged, the
    * invoice state moves forward, and for a settlement the fulfillment and the
-   * accounting entry are inserted keyed on (payment_hash, order_id). A repeat
-   * of the same settlement finds both keys present and changes nothing else.
+   * journal entry are inserted, keyed on (payment_hash, order_id) and on the
+   * payment hash, with the fulfill-order outbox row keyed on order_id:payment_hash. A repeat of the same settlement finds both keys present and
+   * changes nothing else.
    * Only subscription deliveries move the cursor, because only the
    * subscription delivers settlements in settle-index order.
    */
@@ -351,6 +398,14 @@ export class ReceiverStore {
     if (record === undefined) return 'unknown-invoice';
     const next = LND_TO_RECORD[invoice.state];
     if (next === undefined) return 'unchanged';
+    // One settlement per payment hash, whichever event posted it: invoice-settled and
+    // underpaid-settlement have different (event, reference) keys, so posting idempotency alone
+    // would let LND reporting a second, different amount post both (and fulfill an underpaid order).
+    // The first settlement recorded wins; a differing one changes no record, order or ledger.
+    if (next === 'settled') {
+      const settledMsat = this.#settledMsat(invoice.paymentHash);
+      if (settledMsat !== undefined && settledMsat !== invoice.amtPaidMsat) return 'settlement-amount-conflict';
+    }
     let outcome: DeliveryOutcome = 'unchanged';
     // A record marked not-created that LND reports after all moves to LND's state (it is adopted),
     // unless the order has another live invoice by now or no longer awaits payment: the move would
@@ -386,23 +441,30 @@ export class ReceiverStore {
       }
     }
     if (next !== 'settled') return outcome;
-    if (invoice.amtPaidMsat < record.amountMsat) return 'underpaid';
+    const posting = { orderId: record.orderId, paymentHash: invoice.paymentHash, amtPaidMsat: invoice.amtPaidMsat, postedAt: now };
+    // LND reports the invoice settled for less than the order: the money arrived, so it is posted
+    // (to suspense, to be returned), and the order is not fulfilled.
+    if (invoice.amtPaidMsat < record.amountMsat) {
+      post(this.db, underpaidSettlement(posting));
+      return 'underpaid';
+    }
     // One fulfillment per order. Another invoice of the order that was paid anyway (one that
     // turned up in LND after it was recorded not created, paid before its cancel reached LND)
     // is posted, because the money arrived, and reported; it does not fulfill the order again.
     const fulfilledByOther = this.db.prepare('SELECT 1 AS n FROM fulfillments WHERE order_id = ? AND payment_hash <> ?')
       .get(record.orderId, invoice.paymentHash) !== undefined;
     if (fulfilledByOther) {
-      const posted = changes(this.db.prepare(`INSERT INTO ledger_entries (order_id, payment_hash, account, amount_msat, posted_at)
-        VALUES (?, ?, 'sales', ?, ?) ON CONFLICT (order_id, payment_hash, account) DO NOTHING`)
-        .run(record.orderId, invoice.paymentHash, invoice.amtPaidMsat, now)) === 1;
+      const posted = post(this.db, invoiceSettled(posting)) !== undefined;
+      if (posted) post(this.db, receiverDoublePayment(posting));
       return posted ? 'second-payment' : 'duplicate';
     }
     const fulfilled = changes(this.db.prepare(`INSERT INTO fulfillments (payment_hash, order_id, fulfilled_at) VALUES (?, ?, ?)
       ON CONFLICT (payment_hash, order_id) DO NOTHING`).run(invoice.paymentHash, record.orderId, now)) === 1;
     if (!fulfilled) return 'duplicate';
-    this.db.prepare(`INSERT INTO ledger_entries (order_id, payment_hash, account, amount_msat, posted_at) VALUES (?, ?, 'sales', ?, ?)`)
-      .run(record.orderId, invoice.paymentHash, invoice.amtPaidMsat, now);
+    const entryId = post(this.db, invoiceSettled(posting));
+    // The effect is recorded with the fulfillment, in this transaction: no crash can leave one without the other.
+    enqueue(this.db, fulfillOrder({ orderId: record.orderId, paymentHash: invoice.paymentHash, amountMsat: invoice.amtPaidMsat,
+      settleIndex: invoice.settleIndex, ledgerEntryId: entryId }), now);
     this.db.prepare(`UPDATE orders SET state = 'fulfilled', fulfilled_at = ? WHERE order_id = ?`).run(now, record.orderId);
     return 'fulfilled';
   }

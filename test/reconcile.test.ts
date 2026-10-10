@@ -516,3 +516,34 @@ it('RECONCILE/coverage a payment at an instantaneous recorded drop is a gap, and
   expect(result.unattributed.map(item => [item.paymentHash, item.coverage])).toEqual([
     [H('at-drop'), 'gap'], [H('near-drop'), 'boundary'], [H('far'), 'covered']]);
 });
+
+it('RECONCILE/default window starts at the earliest record, so a run after a clock set back is included (N14)', async () => {
+  // The first run was written under a clock ahead; the second starts earlier after the correction.
+  const s = setup([start(1_000), line('registered', 1_001, { session: 1 }), line('unregistered', 1_100, { session: 1, reason: 'stopping' }),
+    line('run-end', 1_100, { payments: 0, deletions: 0, dropped: 0 }),
+    start(100, RUN2), line('registered', 101, { session: 1 }, RUN2), payment(200, C1, '1', H('after-correction'), '5', {}, RUN2)]);
+  const output = await reconcile(s.args, fakeLnd({ listed: [lnd(H('after-correction'), 200, 'succeeded', [htlc('succeeded', 5n, 0n)])] }), at(400));
+  expectSchemaValid(output);
+  expect(output.error).toBeNull();
+  const result = output.result as ReconcileResult;
+  expect(result.window).toEqual({ since: at(100), until: at(400) });
+  expect(result.payments.map(item => [item.paymentHash, item.settlement.status])).toEqual([[H('after-correction'), 'succeeded']]);
+});
+
+it('RECONCILE/no default window refuses rather than reporting an empty one (N14)', async () => {
+  // Every record for this node is after now: the clock is behind the journal.
+  const ahead = setup([start(1_000), line('registered', 1_001, { session: 1 }), payment(1_010, C1, '1', H('ahead'), '5')]);
+  const behind = await reconcile(ahead.args, fakeLnd({}), at(400));
+  expectSchemaValid(behind);
+  expect(behind.error).toMatchObject({ code: 2, step: 'Q1' });
+  expect(behind.error!.message).toContain(`earliest record for this node (${at(1_000)}) is after now`);
+  // An explicit window still reconciles.
+  const explicit = await reconcile([...ahead.args, '--since', at(900), '--until', at(1_100)], fakeLnd({ listed: [] }), at(400));
+  expect(explicit.error).toBeNull();
+  // A journal with no record for this node has no default window either.
+  const other = setup([start(0, RUN, OTHER_NODE), line('run-end', 6, { payments: 0, deletions: 0, dropped: 0 })]);
+  const none = await reconcile(other.args, fakeLnd({}), at(400));
+  expectSchemaValid(none);
+  expect(none.error).toMatchObject({ code: 2, step: 'Q1' });
+  expect(none.error!.message).toContain('no record for this node');
+});

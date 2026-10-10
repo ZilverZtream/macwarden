@@ -1,6 +1,6 @@
 {
   "name": "macwarden",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "description": "Lightning credential hygiene for LND: inspect, scan (incl. git history), inventory, bake, revoke, rotate and attenuate macaroons",
   "keywords": [
     "lightning",
@@ -62,7 +62,8 @@
     "prefuzz:runes": "npm run build",
     "fuzz:runes": "node scripts/fuzz-runes.mjs",
     "prefuzz:payments": "npm run build",
-    "fuzz:payments": "node scripts/payment-fuzz.mjs"
+    "fuzz:payments": "node scripts/payment-fuzz.mjs",
+    "fuzz:lab": "node examples/payment-lab/test/harness/run.mjs"
   },
   "devDependencies": {
     "typescript": "6.0.3",

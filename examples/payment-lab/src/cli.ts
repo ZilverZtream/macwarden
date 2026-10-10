@@ -1,5 +1,7 @@
 import { mkdirSync, realpathSync } from 'node:fs';
+import { join } from 'node:path';
 import { createInterface } from 'node:readline';
+import type { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { diagnose } from './analysis/diagnose.ts';
@@ -8,7 +10,12 @@ import {
   NODE_NAMES, PAYER_PROFILES, RECEIVER_PROFILES, databasePath, invoiceApi, loadLab, payerApi, readApi,
   type Lab, type NodeName, type PayerProfile, type ReceiverProfile,
 } from './config.ts';
+import { verifyLedger, type LedgerStore, type LndLedgerSource } from './ledger/verify.ts';
+import { explainCommand } from './explain/command.ts';
 import { describeError } from './lnd/errors.ts';
+import { labKey, type EffectTarget } from './outbox/effects.ts';
+import { outboxStatus } from './outbox/outbox.ts';
+import { runOutbox, runPass } from './outbox/worker.ts';
 import { decodeInvoice, reconcile, recordIntent, submit, type Fault, type PayOutcome, type PayerDeps } from './payer/payer.ts';
 import { PayerStore, type OperationKind, type PaymentRecord } from './payer/store.ts';
 import { cancelHoldInvoice, createInvoice, listen, reconcileInvoices, settleHoldInvoice, type ReceiverDeps } from './receiver/receiver.ts';
@@ -30,16 +37,34 @@ import { parseAmount } from './util/money.ts';
  * 1 that applies to any of them, else 0.
  *
  * Arguments are validated before anything is recorded: a usage error never
- * leaves a durable change behind.
+ * leaves a durable change behind. An option the command does not take (one
+ * another command takes included) is a usage error, before anything is opened.
+ *
+ * payer reconcile runs one outbox pass after its own, unless it was stopped
+ * (SIGINT, SIGTERM or --timeout-s): it then reports outbox-pass-skipped.
+ *
+ * ledger-verify has its own reading of 0, 1 and 75: 0 the books balance and agree with
+ * LND; 1 they do not (an unbalanced entry, a stored balance, the records or LND differ);
+ * 75 they balance but LND could not be compared (no list call, an error, more pages than
+ * the bound, or a payment or settlement the records have not learned yet).
+ *
+ * outbox-status exits 0, or 75 when a row is not done more than --deadline-s (default 300) after it
+ * was enqueued. outbox-run --once exits 0 when every row is done after the pass, else 75 (a row
+ * failed and is in backoff, or another worker holds it); without --once it runs until SIGINT or
+ * SIGTERM and exits 0.
+ *
+ * explain (payer and receiver) exits 0 when the subject is in the records, 3 when it is not, and 4 when a
+ * --refresh lookup failed (the explanation from the records is printed all the same, with a warning).
  */
 
 const EXIT = { ok: 0, failed: 1, usage: 2, refused: 3, error: 4, unresolved: 75 } as const;
 
 class UsageError extends Error {}
 
+const bigintAsText = (_key: string, value: unknown): unknown => typeof value === 'bigint' ? value.toString() : value;
+
 function emit(event: Record<string, unknown>): void {
-  process.stdout.write(`${JSON.stringify({ at: new Date().toISOString(), ...event },
-    (_key, value: unknown) => typeof value === 'bigint' ? value.toString() : value)}\n`);
+  process.stdout.write(`${JSON.stringify({ at: new Date().toISOString(), ...event }, bigintAsText)}\n`);
 }
 
 function required(values: Record<string, unknown>, name: string): string {
@@ -81,6 +106,61 @@ function nodeName(value: string): NodeName {
   return value as NodeName;
 }
 
+type Component = 'payer' | 'receiver' | 'analysis';
+
+/** Options every command of a component takes: --lab, and --as for payer and receiver. */
+const GLOBAL_OPTIONS: Record<Component, readonly string[]> = { payer: ['as', 'lab'], receiver: ['as', 'lab'], analysis: ['lab'] };
+
+/**
+ * The options each command takes besides the global ones, as USAGE lists them. A component's parseArgs knows the union of its
+ * commands' options (it validates their values, strict); a flag that belongs to another command is refused here, before
+ * anything is opened, rather than ignored.
+ */
+const COMMAND_OPTIONS: Record<Component, Readonly<Record<string, readonly string[]>>> = {
+  payer: {
+    pay: ['operation', 'kind', 'invoice', 'fee-limit-msat', 'max-parts', 'timeout-s', 'budget', 'wait-for-go', 'fault'],
+    retry: ['operation', 'timeout-s'],
+    reconcile: ['payment-hash', 'timeout-s'],
+    show: ['operation'],
+    'budget-set': ['budget', 'limit-msat'],
+    'budget-show': ['budget'],
+    'ledger-verify': ['json'],
+    'outbox-run': ['once', 'interval-s'],
+    'outbox-status': ['json', 'deadline-s'],
+    explain: ['operation', 'payment-hash', 'json', 'refresh'],
+  },
+  receiver: {
+    'create-invoice': ['order', 'amount-msat', 'hold', 'memo', 'expiry-s'],
+    settle: ['order'],
+    cancel: ['order'],
+    show: ['order'],
+    reconcile: ['order'],
+    listen: ['reconcile-interval-s'],
+    'cursor-set': ['settle-index', 'add-index'],
+    'ledger-verify': ['json'],
+    'outbox-run': ['once', 'interval-s'],
+    'outbox-status': ['json', 'deadline-s'],
+    explain: ['order', 'payment-hash', 'json', 'refresh'],
+  },
+  analysis: {
+    payments: ['node', 'payment-hash'],
+    diagnose: ['node', 'payer', 'operation'],
+  },
+};
+
+/** A usage error for an unknown command, or for the first option given that the command does not take. */
+function checkOptions(component: Component, command: string, tokens: readonly { kind: string; name?: string }[]): void {
+  const table = COMMAND_OPTIONS[component];
+  const allowed = Object.hasOwn(table, command) ? table[command] : undefined;
+  if (allowed === undefined) throw new UsageError(`unknown ${component} command ${command}`);
+  for (const token of tokens) {
+    if (token.kind !== 'option' || token.name === undefined) continue;
+    if (!GLOBAL_OPTIONS[component].includes(token.name) && !allowed.includes(token.name)) {
+      throw new UsageError(`unknown option --${token.name} for ${component} ${command}`);
+    }
+  }
+}
+
 function seconds(values: Record<string, unknown>, name: string, fallback: number): number {
   const value = values[name];
   if (value === undefined) return fallback;
@@ -111,12 +191,95 @@ function openReceiver(lab: Lab, profile: ReceiverProfile): ReceiverDeps {
 export interface Services {
   payer(labDir: string | undefined, profile: PayerProfile): PayerDeps;
   receiver(labDir: string | undefined, profile: ReceiverProfile): ReceiverDeps;
+  /**
+   * What ledger-verify compares with: ListPayments for a payer (its pay-only credential cannot
+   * list payments, so the lab reads them with its node's read-only credential), ListInvoices for
+   * a receiver (undefined: the profile's own invoice-only API, which has invoices:read).
+   */
+  ledgerSource?(labDir: string | undefined, component: 'payer' | 'receiver', profile: string): LndLedgerSource | undefined;
+  /**
+   * Where the outbox worker writes its effects and the HMAC key it signs them with: `<lab>/receipts`
+   * (receiver) or `<lab>/confirmations` (payer), and the lab's `outbox.key`. Undefined: no worker runs
+   * (`payer reconcile` and `receiver listen` skip it; `outbox-run` is a configuration error).
+   */
+  outbox?(labDir: string | undefined, component: 'payer' | 'receiver'): EffectTarget | undefined;
 }
 
 const LAB_SERVICES: Services = {
   payer: (labDir, profile) => openPayer(loadLab(labDir), profile),
   receiver: (labDir, profile) => openReceiver(loadLab(labDir), profile),
+  ledgerSource: (labDir, component, profile) => {
+    if (component !== 'payer') return undefined;
+    const lab = loadLab(labDir);
+    const credential = lab.manifest.credentials[PAYER_PROFILES[profile as PayerProfile].credential];
+    if (credential === undefined) throw new Error(`unknown credential for payer profile ${profile}`);
+    return readApi(lab, credential.node);
+  },
+  outbox: (labDir, component) => {
+    const lab = loadLab(labDir);
+    return { dir: join(lab.dir, component === 'receiver' ? 'receipts' : 'confirmations'), key: labKey(lab.dir) };
+  },
 };
+
+function outboxTarget(services: Services, labDir: string | undefined, component: 'payer' | 'receiver'): EffectTarget {
+  const target = services.outbox?.(labDir, component);
+  if (target === undefined) throw new Error(`no outbox target for the ${component}: this service has no lab directory`);
+  return target;
+}
+
+/** One worker pass after another command's own work (payer reconcile, the listener); a failure is reported, not raised. */
+function outboxPassAfter(services: Services, labDir: string | undefined, component: 'payer' | 'receiver', db: DatabaseSync): void {
+  try {
+    const target = services.outbox?.(labDir, component);
+    if (target !== undefined) emit({ event: 'outbox-pass', ...runPass(db, target, { emit }) });
+  } catch (error) {
+    emit({ event: 'outbox-pass-failed', error: describeError(error) });
+  }
+}
+
+/** outbox-run: passes over the due rows, once or every --interval-s until stopped (exit codes in the header). */
+async function outboxRun(services: Services, values: Record<string, unknown>, component: 'payer' | 'receiver', db: DatabaseSync): Promise<number> {
+  const once = values.once === true;
+  const intervalMs = seconds(values, 'interval-s', 5) * 1000;
+  const target = outboxTarget(services, values.lab as string | undefined, component);
+  const result = await runOutbox(db, target, { emit, once, intervalMs, signal: once ? new AbortController().signal : stopSignal() });
+  return once && result.remaining > 0 ? EXIT.unresolved : EXIT.ok;
+}
+
+/** outbox-status: counts per state and the oldest pending age, as an event or one JSON object with --json. */
+function outboxStatusCommand(values: Record<string, unknown>, db: DatabaseSync): number {
+  const status = outboxStatus(db, Date.now(), seconds(values, 'deadline-s', 300));
+  if (values.json === true) process.stdout.write(`${JSON.stringify(status)}\n`);
+  else emit({ event: 'outbox-status', ...status });
+  return status.overdueCount > 0 ? EXIT.unresolved : EXIT.ok;
+}
+
+/** "… N more" when a capped list (the first LIST_LIMIT) leaves entries out, else nothing. */
+function more(listed: number, count: number): string | undefined {
+  return count > listed ? `… ${count - listed} more` : undefined;
+}
+
+/**
+ * ledger-verify: the report as events (or one JSON object with --json) and the exit code (see the header).
+ * Both list at most the first LIST_LIMIT unbalanced and malformed entries, with their totals; the
+ * text summary adds "… N more" for each list that leaves entries out.
+ */
+async function ledgerVerify(store: LedgerStore, source: LndLedgerSource | undefined, json: boolean): Promise<number> {
+  const result = await verifyLedger(store, source);
+  if (json) {
+    process.stdout.write(`${JSON.stringify(result, bigintAsText)}\n`);
+  } else {
+    for (const account of result.accounts) emit({ event: 'ledger-account', ...account });
+    emit({ event: 'ledger-verify', book: result.book, balanced: result.balanced, entries: result.entries,
+      unbalancedEntries: result.unbalancedEntries, unbalancedEntryCount: result.unbalancedEntryCount,
+      unbalancedEntriesMore: more(result.unbalancedEntries.length, result.unbalancedEntryCount),
+      invalidEntries: result.invalidEntries, invalidEntryCount: result.invalidEntryCount,
+      invalidEntriesMore: more(result.invalidEntries.length, result.invalidEntryCount),
+      lnd: result.lnd, lndDetail: result.lndDetail, firstDifference: result.firstDifference });
+  }
+  if (!result.balanced) return EXIT.failed;
+  return result.lnd === 'compared' ? EXIT.ok : EXIT.unresolved;
+}
 
 function codeFor(outcome: PayOutcome): number {
   switch (outcome.kind) {
@@ -151,6 +314,15 @@ async function waitForGo(): Promise<void> {
   throw new UsageError('stdin closed before "go"');
 }
 
+/** explain's subject: exactly one of --<idOption> and --payment-hash (a usage error otherwise). */
+function explainSubject(values: Record<string, unknown>, idOption: 'operation' | 'order'): { id?: string; paymentHash?: string } {
+  const id = values[idOption];
+  const hash = values['payment-hash'];
+  if ((id === undefined) === (hash === undefined)) throw new UsageError(`explain needs exactly one of --${idOption} and --payment-hash`);
+  if (typeof hash === 'string') return { paymentHash: hashArg(hash, '--payment-hash').toLowerCase() };
+  return { id: identifier(required(values, idOption), `--${idOption}`) };
+}
+
 function showPayment(deps: PayerDeps, operationId: string): void {
   const operation = deps.store.operation(operationId);
   const payment = deps.store.paymentForOperation(operationId);
@@ -160,19 +332,24 @@ function showPayment(deps: PayerDeps, operationId: string): void {
     payment: payment ?? null,
     attempts: payment === undefined ? [] : deps.store.attempts(payment.paymentHash),
     ledger: deps.store.ledger(operationId),
+    journal: deps.store.journal(operationId),
     events: payment === undefined ? [] : deps.store.events(payment.paymentHash),
     budget: operation?.budgetId === undefined ? null : deps.store.budgetStatus(operation.budgetId) ?? null,
+    outbox: deps.store.outbox(operationId),
   });
 }
 
 async function payer(command: string, args: string[], services: Services): Promise<number> {
-  const { values } = parseArgs({ args, options: {
+  const { values, tokens } = parseArgs({ args, options: {
     as: { type: 'string' }, operation: { type: 'string' }, kind: { type: 'string' }, invoice: { type: 'string' },
     'fee-limit-msat': { type: 'string' }, 'max-parts': { type: 'string' }, 'timeout-s': { type: 'string' }, budget: { type: 'string' },
     'limit-msat': { type: 'string' }, 'payment-hash': { type: 'string' }, fault: { type: 'string' }, 'wait-for-go': { type: 'boolean' },
-    lab: { type: 'string' },
-  }, strict: true });
-  const deps = services.payer(values.lab, payerProfile(required(values, 'as')));
+    lab: { type: 'string' }, json: { type: 'boolean' }, once: { type: 'boolean' }, 'interval-s': { type: 'string' },
+    'deadline-s': { type: 'string' }, refresh: { type: 'boolean' },
+  }, strict: true, tokens: true });
+  checkOptions('payer', command, tokens);
+  const profile = payerProfile(required(values, 'as'));
+  const deps = services.payer(values.lab, profile);
   try {
     switch (command) {
       case 'pay': {
@@ -221,7 +398,12 @@ async function payer(command: string, args: string[], services: Services): Promi
           : [hashArg(values['payment-hash'], '--payment-hash')];
         const signal = stopSignal(timeoutSeconds);
         emit({ event: 'reconcile-started', payments: targets.length });
-        return exitForAll(await Promise.all(targets.map(hash => reconcile(deps, hash, signal))));
+        const outcomes = await Promise.all(targets.map(hash => reconcile(deps, hash, signal)));
+        // Then the effects of operations completed so far (this pass's and earlier ones'); they do not change the exit code.
+        // Not once stopped (SIGINT, SIGTERM, --timeout-s), as the listener does not: stopping means stop.
+        if (signal.aborted) emit({ event: 'outbox-pass-skipped', reason: 'reconcile was stopped' });
+        else outboxPassAfter(services, values.lab, 'payer', deps.store.db);
+        return exitForAll(outcomes);
       }
       case 'show':
         showPayment(deps, identifier(required(values, 'operation'), '--operation'));
@@ -236,6 +418,17 @@ async function payer(command: string, args: string[], services: Services): Promi
         const budgetId = identifier(required(values, 'budget'), '--budget');
         emit({ event: 'budget', status: deps.store.budgetStatus(budgetId) ?? null, refusals: deps.store.refusals(budgetId) });
         return EXIT.ok;
+      }
+      case 'ledger-verify':
+        return await ledgerVerify(deps.store, services.ledgerSource?.(values.lab, 'payer', profile) ?? {}, values.json === true);
+      case 'outbox-run':
+        return await outboxRun(services, values, 'payer', deps.store.db);
+      case 'outbox-status':
+        return outboxStatusCommand(values, deps.store.db);
+      case 'explain': {
+        const subject = explainSubject(values, 'operation');
+        return await explainCommand({ component: 'payer', store: deps.store, api: deps.api,
+          subject: { operationId: subject.id, paymentHash: subject.paymentHash } }, { json: values.json === true, refresh: values.refresh === true });
       }
       default:
         throw new UsageError(`unknown payer command ${command}`);
@@ -322,12 +515,15 @@ async function reconcileOrReport(deps: PayerDeps, paymentHash: string, state: st
 }
 
 async function receiver(command: string, args: string[], services: Services): Promise<number> {
-  const { values } = parseArgs({ args, options: {
+  const { values, tokens } = parseArgs({ args, options: {
     as: { type: 'string' }, order: { type: 'string' }, 'amount-msat': { type: 'string' }, hold: { type: 'boolean' },
     memo: { type: 'string' }, 'expiry-s': { type: 'string' }, 'settle-index': { type: 'string' }, 'add-index': { type: 'string' },
-    'reconcile-interval-s': { type: 'string' }, lab: { type: 'string' },
-  }, strict: true });
-  const deps = services.receiver(values.lab, receiverProfile(required(values, 'as')));
+    'reconcile-interval-s': { type: 'string' }, lab: { type: 'string' }, json: { type: 'boolean' }, once: { type: 'boolean' },
+    'interval-s': { type: 'string' }, 'deadline-s': { type: 'string' }, 'payment-hash': { type: 'string' }, refresh: { type: 'boolean' },
+  }, strict: true, tokens: true });
+  checkOptions('receiver', command, tokens);
+  const profile = receiverProfile(required(values, 'as'));
+  const deps = services.receiver(values.lab, profile);
   try {
     switch (command) {
       case 'create-invoice': {
@@ -357,7 +553,9 @@ async function receiver(command: string, args: string[], services: Services): Pr
       }
       case 'listen': {
         const interval = seconds(values, 'reconcile-interval-s', 10);
-        await listen(deps, { reconcileIntervalMs: interval * 1000, signal: stopSignal() });
+        // The outbox worker runs after every reconciliation pass (and so once at start).
+        await listen(deps, { reconcileIntervalMs: interval * 1000, signal: stopSignal(),
+          afterReconcile: () => { outboxPassAfter(services, values.lab, 'receiver', deps.store.db); } });
         emit({ event: 'stopped' });
         return EXIT.ok;
       }
@@ -377,8 +575,20 @@ async function receiver(command: string, args: string[], services: Services): Pr
           paymentRequest: item.paymentRequest }));
         emit({ event: 'order-record', order: deps.store.order(orderId) ?? null, invoices,
           deliveries: invoices.flatMap(item => deps.store.deliveries(item.paymentHash)),
-          fulfillments: deps.store.fulfillmentCount(orderId), ledger: deps.store.ledger(orderId), cursor: deps.store.cursor() });
+          fulfillments: deps.store.fulfillmentCount(orderId), outbox: deps.store.outbox(orderId), ledger: deps.store.ledger(orderId), journal: deps.store.journal(orderId),
+          cursor: deps.store.cursor() });
         return EXIT.ok;
+      }
+      case 'ledger-verify':
+        return await ledgerVerify(deps.store, services.ledgerSource?.(values.lab, 'receiver', profile) ?? deps.api, values.json === true);
+      case 'outbox-run':
+        return await outboxRun(services, values, 'receiver', deps.store.db);
+      case 'outbox-status':
+        return outboxStatusCommand(values, deps.store.db);
+      case 'explain': {
+        const subject = explainSubject(values, 'order');
+        return await explainCommand({ component: 'receiver', store: deps.store, api: deps.api,
+          subject: { orderId: subject.id, paymentHash: subject.paymentHash } }, { json: values.json === true, refresh: values.refresh === true });
       }
       default:
         throw new UsageError(`unknown receiver command ${command}`);
@@ -389,10 +599,11 @@ async function receiver(command: string, args: string[], services: Services): Pr
 }
 
 async function analysis(command: string, args: string[]): Promise<number> {
-  const { values } = parseArgs({ args, options: {
+  const { values, tokens } = parseArgs({ args, options: {
     node: { type: 'string' }, 'payment-hash': { type: 'string' }, payer: { type: 'string' }, operation: { type: 'string' },
     lab: { type: 'string' },
-  }, strict: true });
+  }, strict: true, tokens: true });
+  checkOptions('analysis', command, tokens);
   const lab = loadLab(values.lab);
   const read = readApi(lab, nodeName(required(values, 'node')));
   switch (command) {
@@ -431,14 +642,23 @@ const USAGE = `usage: node src/cli.ts <component> <command> [options]
   payer show --as <profile> --operation <id>
   payer budget-set --as <profile> --budget <id> --limit-msat <n>
   payer budget-show --as <profile> --budget <id>
+  payer ledger-verify --as <profile> [--json]
+  payer outbox-run --as <profile> [--once] [--interval-s <n>]
+  payer outbox-status --as <profile> [--json] [--deadline-s <n>]
+  payer explain --as <profile> --operation <id> | --payment-hash <hex> [--json] [--refresh]
   receiver create-invoice --as <merchant|customer> --order <id> --amount-msat <n> [--hold] [--memo <text>] [--expiry-s <n>]
   receiver settle|cancel|show --as <profile> --order <id>
   receiver reconcile --as <profile> [--order <id>]
   receiver listen --as <profile> [--reconcile-interval-s <n>]
   receiver cursor-set --as <profile> --settle-index <n> [--add-index <n>]
+  receiver ledger-verify --as <profile> [--json]
+  receiver outbox-run --as <profile> [--once] [--interval-s <n>]
+  receiver outbox-status --as <profile> [--json] [--deadline-s <n>]
+  receiver explain --as <profile> --order <id> | --payment-hash <hex> [--json] [--refresh]
   analysis payments --node <customer|router|merchant> --payment-hash <hex>
   analysis diagnose --node <node> --payer <profile> --operation <id>
-All commands accept --lab <dir> (default: the run named in runtime/current.json).`;
+All commands accept --lab <dir> (default: the run named in runtime/current.json); otherwise a command takes only
+the options listed for it, and any other is a usage error.`;
 
 export async function main(argv: string[], services: Services = LAB_SERVICES): Promise<number> {
   const [component, command, ...rest] = argv;

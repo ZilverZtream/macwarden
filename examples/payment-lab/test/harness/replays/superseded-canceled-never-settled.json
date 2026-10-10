@@ -1,0 +1,91 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "superseded-canceled-never-settled",
+  "rule": "SettleInvoice is never called for an invoice of an order fulfilled by another invoice; after reconciliation every superseded or late invoice is canceled in LND, so no order has two payable invoices.",
+  "message": "after reconciliation order o2 (awaiting-payment) has 2 invoice(s) payable in LND: o2#1 OPEN, o2#2 OPEN",
+  "seed": 3,
+  "case": 2,
+  "config": {
+    "scale": "huge",
+    "budget": true,
+    "limit": "9223372036854775807"
+  },
+  "failingStep": 7,
+  "originalSteps": 60,
+  "events": [
+    {
+      "t": "create",
+      "p": "p1",
+      "order": 2,
+      "hold": true
+    },
+    {
+      "t": "answer",
+      "kind": "create",
+      "pick": 0.5,
+      "mode": "ambiguous-pending"
+    },
+    {
+      "t": "answer",
+      "kind": "lookup",
+      "pick": 0.5,
+      "mode": "ok"
+    },
+    {
+      "t": "create",
+      "p": "p1",
+      "order": 2,
+      "hold": true
+    },
+    {
+      "t": "create.arrive",
+      "pick": 0.5
+    },
+    {
+      "t": "answer",
+      "kind": "create",
+      "pick": 0.5,
+      "mode": "ambiguous-pending"
+    },
+    {
+      "t": "create.arrive",
+      "pick": 0.5
+    }
+  ],
+  "states": {
+    "after": {
+      "invoices": {
+        "o2#1": {
+          "order": "o2",
+          "state": "not-created",
+          "amount": "7000"
+        },
+        "o2#2": {
+          "order": "o2",
+          "state": "open",
+          "amount": "7000"
+        }
+      },
+      "orders": {
+        "o2": "awaiting-payment"
+      },
+      "fulfillments": [],
+      "ledger": [],
+      "cursor": {
+        "settle": "0",
+        "add": "0"
+      }
+    },
+    "lnd": [
+      {
+        "label": "o2#1",
+        "state": "OPEN"
+      },
+      {
+        "label": "o2#2",
+        "state": "OPEN"
+      }
+    ]
+  }
+}

@@ -213,13 +213,20 @@ async function runSteps(args: string[], deps: Deps, warnings: OutputResult['warn
   let ids: bigint[];
   try { ids = await listIds(lnd); }
   catch (error) { return lndFailure(error, 'V7', warnings); }
-  const repaired = !ids.includes(id);
+  let repaired = !ids.includes(id);
   if (repaired && entry?.status !== 'active')
     return fail(5, 'V7', 'root key ID is absent; nothing to revoke', warnings);
-  let proof: RevokePlan['proof'] = 'by-id-only';
-  if (!repaired && target && usable(target, deps.clock())) {
+  let proof = 'by-id-only' as RevokePlan['proof'];
+  // V8 baseline; returns a refusal, or null to continue.
+  const baseline = async (): Promise<RevokeOutput | null> => {
+    if (!target || !usable(target, deps.clock())) return null;
     try { if ((await lnd.checkMacaroon(target.secret, target.facts.permissions)).valid === true) proof = 'rejected'; }
     catch (error) { return lndFailure(error, 'V8', warnings); }
+    return null;
+  };
+  if (!repaired) {
+    const refused = await baseline();
+    if (refused) return refused;
   }
   const plan: RevokePlan = { dryRun: request.dryRun, rootKeyId: id.toString(),
     label: entry?.label ?? null, grade: entry?.grade ?? null, proof };
@@ -246,6 +253,18 @@ async function runSteps(args: string[], deps: Deps, warnings: OutputResult['warn
       // Retain the lock owner while preserving unrelated entries from the reread.
       registry.reload(current.entries);
     } catch { return fail(3, 'V10', 'unreadable or invalid registry on reread; nothing sent to LND', warnings); }
+    // The V7 absence is as old as the confirmation prompt: a node restore (or another operator)
+    // may have put the root key back meanwhile. Observe LND again before recording a revocation
+    // by absence; an ID listed again takes the normal V8 baseline and V11 deletion.
+    if (repaired) {
+      try { ids = await listIds(lnd); }
+      catch (error) { return lndFailure(error, 'V7', warnings); }
+      if (ids.includes(id)) {
+        repaired = false;
+        const refused = await baseline();
+        if (refused) return refused;
+      }
+    }
     if (!repaired) {
       let deleted = false;
       let uncertain = false;

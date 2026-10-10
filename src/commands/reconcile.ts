@@ -210,9 +210,22 @@ async function runSteps(args: string[], deps: Deps): Promise<ReconcileOutput> {
   for (const record of contents.records) if (record.type === 'run-start') runNodes.set(record.run, record.node);
   const mine = contents.records.filter(record => runNodes.get(record.run) === node.pubkey);
   const otherNodeRecords = contents.records.length - mine.length;
-  const firstMine = mine.length ? Date.parse(mine[0].time) : null;
+  // The default window starts at the earliest record time for this node, not the first appended
+  // record: times never go back within a run, but a clock set back between runs makes a later run
+  // start earlier, and its payments would fall before the first record's time.
+  let earliestMine: number | null = null;
+  for (const record of mine) {
+    const ms = Date.parse(record.time);
+    if (earliestMine === null || ms < earliestMine) earliestMine = ms;
+  }
   const until = untilFlag ?? now;
-  const since = sinceFlag ?? Math.min(firstMine ?? until, until);
+  // A default window with no width would report nothing as if nothing happened: refuse it instead.
+  if (sinceFlag === null && earliestMine === null) return fail(2, 'Q1',
+    'no default window: the journal holds no record for this node; give --since to reconcile LND\'s payments against it', warnings);
+  if (sinceFlag === null && earliestMine !== null && earliestMine > until) return fail(2, 'Q1',
+    `no default window: the journal's earliest record for this node (${new Date(earliestMine).toISOString()}) is after ` +
+    `${untilFlag === null ? 'now (the clock may be behind the journal)' : '--until'}; give --since and --until explicitly`, warnings);
+  const since = sinceFlag ?? earliestMine!;
   if (since > until) return fail(2, 'Q1', '--since must not be after --until (now when --until is not given)');
   const inWindow = (ms: number) => ms >= since && ms <= until;
   // Requests journaled after the window never establish who initiated a payment in it, nor change

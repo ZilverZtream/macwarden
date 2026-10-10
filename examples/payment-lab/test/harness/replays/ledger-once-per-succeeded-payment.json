@@ -1,0 +1,181 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "ledger-once-per-succeeded-payment",
+  "rule": "A payment LND reports succeeded is recorded succeeded and posted exactly once (principal = value, routing fee = fee); nothing else is posted; the operation is completed iff a payment succeeded; two succeeded payments of one operation are both flagged double-payment.",
+  "message": "LND reported op0/i0 succeeded and the store refused to record it: UNIQUE constraint failed: payments.operation_id",
+  "seed": 3,
+  "case": 168,
+  "config": {
+    "scale": "small",
+    "budget": true,
+    "limit": "2200"
+  },
+  "failingStep": 8,
+  "originalSteps": 60,
+  "events": [
+    {
+      "t": "intent",
+      "p": "p0",
+      "op": 0,
+      "inv": 0
+    },
+    {
+      "t": "submit",
+      "p": "p1",
+      "op": 0,
+      "inv": 0
+    },
+    {
+      "t": "send.end",
+      "pick": 0.5,
+      "mode": "ambiguous-502"
+    },
+    {
+      "t": "send.arrive",
+      "pick": 0.5
+    },
+    {
+      "t": "lnd.payment",
+      "pick": 0.5,
+      "what": "succeed"
+    },
+    {
+      "t": "reconcile",
+      "p": "p1",
+      "op": 0,
+      "inv": 0
+    },
+    {
+      "t": "track.deliver",
+      "pick": 0.25
+    },
+    {
+      "t": "intent",
+      "p": "p1",
+      "op": 0,
+      "inv": 1
+    },
+    {
+      "t": "track.deliver",
+      "pick": 0.5
+    }
+  ],
+  "states": {
+    "call": {
+      "proc": "p1",
+      "method": "applyUpdate",
+      "args": [
+        {
+          "paymentHash": "op0/i0",
+          "status": "SUCCEEDED",
+          "htlcs": 1
+        },
+        "TrackPaymentV2"
+      ],
+      "error": "UNIQUE constraint failed: payments.operation_id"
+    },
+    "before": {
+      "payments": {
+        "op0/i0": {
+          "op": "op0",
+          "state": "failed",
+          "subs": 1,
+          "amount": "1000"
+        },
+        "op0/i1": {
+          "op": "op0",
+          "state": "intent",
+          "subs": 0,
+          "amount": "1000"
+        }
+      },
+      "operations": {
+        "op0": "open"
+      },
+      "reservations": [
+        {
+          "id": "1",
+          "budget": "B",
+          "hash": "op0/i0",
+          "principal": "1000",
+          "allowance": "100",
+          "state": "released"
+        },
+        {
+          "id": "2",
+          "budget": "B",
+          "hash": "op0/i1",
+          "principal": "1000",
+          "allowance": "100",
+          "state": "held"
+        }
+      ],
+      "ledger": [],
+      "events": {
+        "op0/i0": [
+          "intent-recorded",
+          "submit",
+          "failed"
+        ],
+        "op0/i1": [
+          "intent-recorded"
+        ]
+      },
+      "budgets": {
+        "B": "2200"
+      }
+    },
+    "after": {
+      "payments": {
+        "op0/i0": {
+          "op": "op0",
+          "state": "failed",
+          "subs": 1,
+          "amount": "1000"
+        },
+        "op0/i1": {
+          "op": "op0",
+          "state": "intent",
+          "subs": 0,
+          "amount": "1000"
+        }
+      },
+      "operations": {
+        "op0": "open"
+      },
+      "reservations": [
+        {
+          "id": "1",
+          "budget": "B",
+          "hash": "op0/i0",
+          "principal": "1000",
+          "allowance": "100",
+          "state": "released"
+        },
+        {
+          "id": "2",
+          "budget": "B",
+          "hash": "op0/i1",
+          "principal": "1000",
+          "allowance": "100",
+          "state": "held"
+        }
+      ],
+      "ledger": [],
+      "events": {
+        "op0/i0": [
+          "intent-recorded",
+          "submit",
+          "failed"
+        ],
+        "op0/i1": [
+          "intent-recorded"
+        ]
+      },
+      "budgets": {
+        "B": "2200"
+      }
+    }
+  }
+}

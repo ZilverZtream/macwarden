@@ -1,0 +1,138 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "settlement-posted-once",
+  "rule": "Every settlement LND reports is posted exactly once (one ledger entry for the amount paid, however often it is delivered); settled is final; an order has at most one fulfillment, and is fulfilled iff it has one.",
+  "message": "LND reported o1#1 settled (via subscription) and the store refused it: UNIQUE constraint failed: invoices.order_id",
+  "seed": 3,
+  "case": 47,
+  "config": {
+    "scale": "small",
+    "budget": false,
+    "limit": "10000"
+  },
+  "failingStep": 10,
+  "originalSteps": 60,
+  "events": [
+    {
+      "t": "create",
+      "p": "p1",
+      "order": 1,
+      "hold": false
+    },
+    {
+      "t": "rreconcile",
+      "p": "p0",
+      "order": null,
+      "cli": true
+    },
+    {
+      "t": "answer",
+      "kind": "lookup",
+      "pick": 0.5,
+      "mode": "ok"
+    },
+    {
+      "t": "create",
+      "p": "p0",
+      "order": 1,
+      "hold": false
+    },
+    {
+      "t": "listen",
+      "p": "p1"
+    },
+    {
+      "t": "answer",
+      "kind": "create",
+      "pick": 0.75,
+      "mode": "ok"
+    },
+    {
+      "t": "sub.deliver",
+      "pick": 0.5
+    },
+    {
+      "t": "answer",
+      "kind": "create",
+      "pick": 0.5,
+      "mode": "ok"
+    },
+    {
+      "t": "invoice",
+      "what": "pay",
+      "pick": 0.5
+    },
+    {
+      "t": "listen",
+      "p": "p0"
+    },
+    {
+      "t": "sub.deliver",
+      "pick": 0.75
+    }
+  ],
+  "states": {
+    "call": {
+      "proc": "p0",
+      "method": "applyInvoice",
+      "args": [
+        {
+          "paymentHash": "o1#1",
+          "state": "SETTLED",
+          "settleIndex": "1",
+          "amtPaidMsat": "6000",
+          "htlcs": 0
+        },
+        "subscription"
+      ],
+      "error": "UNIQUE constraint failed: invoices.order_id"
+    },
+    "before": {
+      "invoices": {
+        "o1#1": {
+          "order": "o1",
+          "state": "not-created",
+          "amount": "6000"
+        },
+        "o1#2": {
+          "order": "o1",
+          "state": "open",
+          "amount": "6000"
+        }
+      },
+      "orders": {
+        "o1": "awaiting-payment"
+      },
+      "fulfillments": [],
+      "ledger": [],
+      "cursor": {
+        "settle": "0",
+        "add": "1"
+      }
+    },
+    "after": {
+      "invoices": {
+        "o1#1": {
+          "order": "o1",
+          "state": "not-created",
+          "amount": "6000"
+        },
+        "o1#2": {
+          "order": "o1",
+          "state": "open",
+          "amount": "6000"
+        }
+      },
+      "orders": {
+        "o1": "awaiting-payment"
+      },
+      "fulfillments": [],
+      "ledger": [],
+      "cursor": {
+        "settle": "0",
+        "add": "1"
+      }
+    }
+  }
+}

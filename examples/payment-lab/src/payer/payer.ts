@@ -105,7 +105,10 @@ export async function submit(deps: PayerDeps, paymentHash: string, options: { ti
   if (record === undefined) return { kind: 'refused', reason: `no payment ${paymentHash}` };
   if (record.state === 'succeeded') return { kind: 'succeeded', paymentHash, feeMsat: record.feeMsat ?? 0n };
   if (!deps.store.claimForSubmission(paymentHash)) {
-    return { kind: 'refused', paymentHash, reason: `payment is ${record.state}, not intent; it is reconciled, never submitted again` };
+    // The claim withdraws an intent whose operation another payment completed: report what the record says now.
+    const now = deps.store.payment(paymentHash);
+    if (now?.state === 'failed') return { kind: 'failed', paymentHash, reason: now.failureReason ?? 'unknown' };
+    return { kind: 'refused', paymentHash, reason: `payment is ${now?.state ?? record.state}, not intent; it is reconciled, never submitted again` };
   }
   // The submission this call is: the claim counted it.
   const submission = deps.store.payment(paymentHash)?.submissions;
@@ -164,6 +167,13 @@ function superseded(deps: PayerDeps, paymentHash: string, submission: number | u
   return { kind: 'unresolved', paymentHash, state, reason };
 }
 
+/** LND never had the payment and another payment completed its operation: the store withdrew it (failed, reservation released). */
+function withdrawn(deps: PayerDeps, paymentHash: string): PayOutcome {
+  const reason = deps.store.payment(paymentHash)?.failureReason ?? 'WITHDRAWN';
+  deps.emit({ event: 'withdrawn', paymentHash, reason });
+  return { kind: 'failed', paymentHash, reason };
+}
+
 /** The call for `submission` ended without a terminal state: the record becomes uncertain, unless the submission is superseded. */
 function markUncertain(deps: PayerDeps, paymentHash: string, submission: number | undefined, reason: string): PayOutcome {
   const marked = deps.store.markUncertain(paymentHash, reason, submission);
@@ -195,6 +205,7 @@ async function afterSubmitError(deps: PayerDeps, paymentHash: string, error: unk
     // record goes back to intent; a later submission is not this call's business.
     const reverted = deps.store.markNotInitiated(paymentHash, `connection not established: ${error.message}`, submission);
     if (reverted === 'superseded') return superseded(deps, paymentHash, submission, `connection not established: ${error.message}`);
+    if (reverted === 'withdrawn') return withdrawn(deps, paymentHash);
     deps.emit({ event: 'not-submitted', paymentHash, reason: error.message });
     return { kind: 'not-submitted', paymentHash, reason: error.message };
   }
@@ -286,6 +297,7 @@ export async function reconcile(deps: PayerDeps, paymentHash: string, signal?: A
         const reverted = deps.store.markNotInitiated(paymentHash, `TrackPaymentV2: ${error.message}`, submission);
         // A submission claimed since this stream opened: this NotFound is not about it. Track the record as it is now.
         if (reverted === 'superseded') continue;
+        if (reverted === 'withdrawn') return withdrawn(deps, paymentHash);
         deps.emit({ event: reverted === 'reverted' ? 'not-initiated' : 'not-found-kept-unresolved', paymentHash, message: error.message });
         if (reverted === 'reverted') return { kind: 'not-submitted', paymentHash, reason: 'LND has no payment for this hash; it may be submitted with the same hash' };
         return { kind: 'unresolved', paymentHash, state: record.state, reason: 'LND reports no payment although attempts were recorded; operator review needed' };

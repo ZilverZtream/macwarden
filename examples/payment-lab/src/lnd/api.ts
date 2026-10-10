@@ -17,6 +17,19 @@ import {
  * - ReadApi     read-only preset: info, onchain, offchain, invoices and peers read access
  */
 
+export interface InvoicesPage {
+  invoices: Invoice[];
+  lastIndexOffset: bigint;
+}
+
+/** lnrpc.ListInvoices, oldest first from `indexOffset` (an add index), at most `maxInvoices`. Needs invoices:read. */
+async function listInvoicesPage(client: LndRestClient, indexOffset: bigint, maxInvoices: number): Promise<InvoicesPage> {
+  if (!Number.isSafeInteger(maxInvoices) || maxInvoices < 1 || maxInvoices > 1000) throw new Error('maxInvoices must be 1 to 1000');
+  const response = await client.call('GET',
+    `/v1/invoices?index_offset=${indexOffset}&num_max_invoices=${maxInvoices}&reversed=false&pending_only=false`);
+  return { invoices: array(response, 'invoices').map(parseInvoice), lastIndexOffset: integer(response, 'last_index_offset') };
+}
+
 export class PayerApi {
   readonly #client: LndRestClient;
   constructor(client: LndRestClient) { this.#client = client; }
@@ -104,6 +117,11 @@ export class InvoiceApi {
     return this.#client.stream('GET', path, undefined, message => onInvoice(parseInvoice(message)), { signal });
   }
 
+  /** lnrpc.ListInvoices, one page (ledger verify compares settled amounts with the receiver's journal). */
+  listInvoicesPage(indexOffset: bigint, maxInvoices: number): Promise<InvoicesPage> {
+    return listInvoicesPage(this.#client, indexOffset, maxInvoices);
+  }
+
   /** invoicesrpc.SubscribeSingleInvoice: every state change of one invoice, including ACCEPTED for a hold invoice. */
   subscribeSingleInvoice(paymentHash: string, onInvoice: (invoice: Invoice) => StreamDecision, signal?: AbortSignal): Promise<void> {
     return this.#client.stream('GET', `/v2/invoices/subscribe/${hexToUrlParam(assertHash(paymentHash))}`, undefined,
@@ -122,6 +140,10 @@ export class ReadApi {
 
   async getInfo(): Promise<GetInfo> {
     return parseGetInfo(await this.#client.call('GET', '/v1/getinfo'));
+  }
+
+  listInvoicesPage(indexOffset: bigint, maxInvoices: number): Promise<InvoicesPage> {
+    return listInvoicesPage(this.#client, indexOffset, maxInvoices);
   }
 
   async listPaymentsPage(indexOffset: bigint, maxPayments: number): Promise<PaymentsPage> {

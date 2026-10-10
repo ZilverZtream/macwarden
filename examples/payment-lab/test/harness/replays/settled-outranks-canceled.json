@@ -1,0 +1,119 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "settled-outranks-canceled",
+  "rule": "LND reporting SETTLED for an invoice recorded canceled makes the record settled.",
+  "message": "SETTLED for canceled invoice o1#1 left it canceled",
+  "seed": 3,
+  "case": 215,
+  "config": {
+    "scale": "small",
+    "budget": true,
+    "limit": "2200"
+  },
+  "failingStep": 6,
+  "originalSteps": 60,
+  "events": [
+    {
+      "t": "create",
+      "p": "p0",
+      "order": 1,
+      "hold": false
+    },
+    {
+      "t": "answer",
+      "kind": "create",
+      "pick": 0.5,
+      "mode": "ok"
+    },
+    {
+      "t": "listen",
+      "p": "p0"
+    },
+    {
+      "t": "invoice",
+      "what": "misreport",
+      "pick": 0.5
+    },
+    {
+      "t": "answer",
+      "kind": "lookup",
+      "pick": 0.5,
+      "mode": "ok"
+    },
+    {
+      "t": "invoice",
+      "what": "pay",
+      "pick": 0.5
+    },
+    {
+      "t": "sub.deliver",
+      "pick": 0.5
+    }
+  ],
+  "states": {
+    "call": {
+      "proc": "p0",
+      "method": "applyInvoice",
+      "args": [
+        {
+          "paymentHash": "o1#1",
+          "state": "SETTLED",
+          "settleIndex": "1",
+          "amtPaidMsat": "6000",
+          "htlcs": 0
+        },
+        "subscription"
+      ]
+    },
+    "before": {
+      "invoices": {
+        "o1#1": {
+          "order": "o1",
+          "state": "canceled",
+          "amount": "6000",
+          "amtPaid": "0"
+        }
+      },
+      "orders": {
+        "o1": "canceled"
+      },
+      "fulfillments": [],
+      "ledger": [],
+      "cursor": {
+        "settle": "0",
+        "add": "0"
+      }
+    },
+    "after": {
+      "invoices": {
+        "o1#1": {
+          "order": "o1",
+          "state": "canceled",
+          "amount": "6000",
+          "amtPaid": "0"
+        }
+      },
+      "orders": {
+        "o1": "fulfilled"
+      },
+      "fulfillments": [
+        {
+          "hash": "o1#1",
+          "order": "o1"
+        }
+      ],
+      "ledger": [
+        {
+          "hash": "o1#1",
+          "order": "o1",
+          "amount": "6000"
+        }
+      ],
+      "cursor": {
+        "settle": "1",
+        "add": "1"
+      }
+    }
+  }
+}
