@@ -274,7 +274,7 @@ it('O07/P5 classification grows linearly with the registry (replacement relation
   const base = 5_000_000n;
   const prepare = (size: number) => {
     // Originals, every second one with a staged (incomplete, so never read from disk) replacement.
-    const rows = [];
+    const rows: Entry[] = [];
     for (let i = 0; i < size; i++) {
       const id = String(base + BigInt(i) * 2n);
       rows.push({ ...template, rootKeyId: id, label: `L${i}` });
