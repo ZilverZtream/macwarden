@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { createHmac } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { createHash, createHmac } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -252,11 +252,11 @@ describe('payment lab outbox: the worker', () => {
     expect(lab.outbox.runPass(store.db, effects, { emit: event => events.push(event) })).toEqual({ performed: 1, alreadyPresent: 0, failed: 0,
       leaseLost: 0, remaining: 0 });
     expectExactlyOnce(store.outbox(), effects);
-    const receipt = readFile(join(effects.dir, 'ORD-W.json'));
+    const receipt = readFile(lab.outbox.effectPath(effects, 'ORD-W'));
     expect(receipt).toMatchObject({ kind: 'fulfill-order', idempotencyKey: `ORD-W:${hash}`, orderId: 'ORD-W', paymentHash: hash, amountMsat: '1000',
       settleIndex: '5', ledgerEntryId: store.journal('ORD-W')[0]?.entryId });
-    expect(lab.outbox.readEffect(join(effects.dir, 'ORD-W.json'), KEY)).toMatchObject({ state: 'valid' });
-    expect(lab.outbox.readEffect(join(effects.dir, 'ORD-W.json'), Buffer.alloc(32))).toMatchObject({ state: 'invalid', reason: 'HMAC does not match' });
+    expect(lab.outbox.readEffect(lab.outbox.effectPath(effects, 'ORD-W'), KEY)).toMatchObject({ state: 'valid' });
+    expect(lab.outbox.readEffect(lab.outbox.effectPath(effects, 'ORD-W'), Buffer.alloc(32))).toMatchObject({ state: 'invalid', reason: 'HMAC does not match' });
     expect(events).toEqual([expect.objectContaining({ event: 'outbox-done', effect: 'written', attempts: 1 })]);
     // Nothing is due any more.
     expect(lab.outbox.runPass(store.db, effects, { emit: quiet })).toMatchObject({ performed: 0, remaining: 0 });
@@ -267,7 +267,7 @@ describe('payment lab outbox: the worker', () => {
     const { store } = settledOrder('worker-idempotent.db', 'ORD-I');
     const effects = target('worker-idempotent-receipts');
     lab.outbox.runPass(store.db, effects, { emit: quiet });
-    const path = join(effects.dir, 'ORD-I.json');
+    const path = lab.outbox.effectPath(effects, 'ORD-I');
     const before = readFileSync(path, 'utf8');
     // The ack is undone, as if the worker had died after the effect: the row is performed again and finds the receipt.
     store.db.exec(`UPDATE outbox SET state = 'pending', acknowledged_at = NULL`);
@@ -278,12 +278,10 @@ describe('payment lab outbox: the worker', () => {
     expectExactlyOnce(store.outbox(), effects);
   });
 
-  it('a damaged receipt is replaced; a valid receipt for another key is a conflict, never overwritten, retried with backoff', () => {
+  it('a valid receipt for another idempotency key is a conflict, never overwritten, retried with backoff (a damaged file: see the last block)', () => {
     const { store } = settledOrder('worker-conflict.db', 'ORD-C');
     const effects = target('worker-conflict-receipts');
-    mkdirSync(effects.dir, { recursive: true });
-    const path = join(effects.dir, 'ORD-C.json');
-    writeFileSync(path, '{"kind":"fulfill-order","idempotencyKey":"ORD-C:');
+    const path = lab.outbox.effectPath(effects, 'ORD-C');
     expect(lab.outbox.runPass(store.db, effects, { emit: quiet })).toMatchObject({ performed: 1 });
     expectExactlyOnce(store.outbox(), effects);
 
@@ -293,10 +291,10 @@ describe('payment lab outbox: the worker', () => {
     const now = Date.now() + 1000;
     const events: Record<string, unknown>[] = [];
     expect(lab.outbox.runPass(store.db, effects, { emit: event => events.push(event), clock: () => now })).toMatchObject({ failed: 1, remaining: 1 });
-    expect(events[0]).toMatchObject({ event: 'outbox-failed', conflict: true, rescheduled: true });
+    expect(events[0]).toMatchObject({ event: 'outbox-failed', reason: 'conflict', conflict: true, rescheduled: true });
     expect(readFile(path)).toMatchObject(other);
     expect(store.outbox()[0]).toMatchObject({ state: 'pending', attempts: 1, nextAttemptAt: new Date(now + 1000).toISOString(),
-      lastError: expect.stringMatching(/holds a valid effect for ORD-C:other/) as string });
+      lastError: expect.stringMatching(/^conflict: .*holds a valid effect for ORD-C:other/) as string });
   });
 
   it('retries back off exponentially from 1 s, capped at 5 minutes, with the same idempotency key', () => {
@@ -466,7 +464,7 @@ writeFileSync(file + '.survived', 'yes');
       expect(leftBehind(store.outbox(), effects)).toEqual(left);
       expect(lab.outbox.runPass(store.db, effects, { emit: quiet })).toMatchObject({ ...restart, failed: 0, leaseLost: 0, remaining: 0 });
       expectExactlyOnce(store.outbox(), effects);
-      expect(readFile(join(effects.dir, `OP-${point}.json`))).toMatchObject({ kind: 'confirm-operation', operationId: `OP-${point}`,
+      expect(readFile(lab.outbox.effectPath(effects, `OP-${point}`))).toMatchObject({ kind: 'confirm-operation', operationId: `OP-${point}`,
         operationKind: 'refund', paymentHash, valueMsat: '1000', feeMsat: '10' });
       expectBalanced(await lab.verifyLedger(store));
     });
@@ -547,15 +545,17 @@ describe('payment lab outbox: bounds and names', () => {
     expect(readdirSync(labDir)).toEqual(['outbox.key']);
   });
 
-  it('file names: every character other than letters, digits, _ and - is percent-encoded; device names are escaped', () => {
-    expect(lab.outbox.fileBase('ORD-1_a')).toBe('ORD-1_a');
+  it('file names: every character other than lower-case letters, digits, _ and - is percent-encoded, upper-case letters included; device names are escaped', () => {
+    expect(lab.outbox.fileBase('ord-1_a')).toBe('ord-1_a');
+    expect(lab.outbox.fileBase('ORD-1_a')).toBe('%4F%52%44-1_a');
     expect(lab.outbox.fileBase('a:b.c')).toBe('a%3Ab%2Ec');
     expect(lab.outbox.fileBase('..')).toBe('%2E%2E');
-    expect(lab.outbox.fileBase('a%3A')).toBe('a%253A');
-    expect(lab.outbox.fileBase('CON')).toBe('%43ON');
+    expect(lab.outbox.fileBase('a%3A')).toBe('a%253%41');
+    expect(lab.outbox.fileBase('CON')).toBe('%43%4F%4E');
+    expect(lab.outbox.fileBase('con')).toBe('%63on');
     expect(lab.outbox.fileBase('nul')).toBe('%6Eul');
     expect(lab.outbox.fileBase('ä')).toBe('%C3%A4');
-    expect(lab.outbox.fileBase('é'.repeat(128))).toMatch(/^sha256-[0-9a-f]{64}$/);
+    expect(lab.outbox.fileBase('é'.repeat(128))).toMatch(/^=sha256-[0-9a-f]{64}$/);
   });
 });
 
@@ -643,5 +643,178 @@ describe('payment lab outbox: the command line', () => {
       afterReconcile: () => { lab.outbox.runPass(store.db, effects, { emit: quiet }); stop.abort(); } });
     await listening;
     expectExactlyOnce(store.outbox(), effects);
+  });
+});
+
+describe('payment lab outbox: names, keys, consistency, temporary files and the clock', () => {
+  const sha256 = (text: string): string => createHash('sha256').update(text, 'utf8').digest('hex');
+  const jsonFiles = (effects: EffectTarget): string[] => readdirSync(effects.dir).filter(name => name.endsWith('.json'));
+
+  /** Settles one order per ID in one receiver store, so each has a pending fulfill-order row. */
+  function settledOrders(file: string, orderIds: string[]): ReceiverStore {
+    const store = receiverStore(file);
+    for (const [index, orderId] of orderIds.entries()) {
+      const hash = openInvoice(store, orderId, `${file}:${index}`);
+      expect(store.applyInvoice(invoice(hash, 'SETTLED', VALUE, BigInt(index + 1)), 'subscription')).toBe('fulfilled');
+    }
+    return store;
+  }
+
+  it('names: subjects that differ only in letter case never share a file name, even on a case-insensitive file system; both rows are performed', () => {
+    const variants = ['Order1', 'order1', 'ORDER1', 'oRdEr1'];
+    expect(new Set(variants.map(subject => lab.outbox.fileBase(subject).toLowerCase())).size).toBe(variants.length);
+    const store = settledOrders('case.db', ['Order1', 'order1']);
+    const effects = target('case-receipts');
+    expect(lab.outbox.runPass(store.db, effects, { emit: quiet })).toMatchObject({ performed: 2, failed: 0, remaining: 0 });
+    expect(jsonFiles(effects)).toHaveLength(2);
+    for (const orderId of ['Order1', 'order1']) {
+      expect(lab.outbox.readEffect(lab.outbox.effectPath(effects, orderId), KEY)).toMatchObject({ state: 'valid', fields: { orderId } });
+    }
+  });
+
+  it('names: the hashed name of a long subject is never the name of another subject, such as one literally called sha256-<that hash>', () => {
+    const long = `x${'.'.repeat(70)}`;
+    const collider = `sha256-${sha256(long)}`;
+    expect(lab.outbox.fileBase(long).toLowerCase()).not.toBe(lab.outbox.fileBase(collider).toLowerCase());
+    const store = settledOrders('fallback.db', [long, collider]);
+    const effects = target('fallback-receipts');
+    expect(lab.outbox.runPass(store.db, effects, { emit: quiet })).toMatchObject({ performed: 2, failed: 0, remaining: 0 });
+    expect(jsonFiles(effects)).toHaveLength(2);
+  });
+
+  it('names: over 20,000 identifiers (case variants, long ones and sha256-<hash> look-alikes) give as many names, distinct when case is ignored', () => {
+    let seed = 0x2545f491;
+    const next = (): number => {
+      seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5;
+      return (seed >>> 0) / 0x1_0000_0000;
+    };
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-';
+    const subjects = new Set<string>();
+    while (subjects.size < 20_000) {
+      const length = 1 + Math.floor(next() ** 3 * 128);
+      let subject = alphabet[Math.floor(next() * 62)] ?? 'a';
+      while (subject.length < length) subject += alphabet[Math.floor(next() * alphabet.length)] ?? '.';
+      for (const variant of [subject, subject.toLowerCase(), subject.toUpperCase()]) {
+        subjects.add(variant);
+        if (variant.length > 66) subjects.add(`sha256-${sha256(variant)}`);
+      }
+    }
+    const names = new Set([...subjects].map(subject => lab.outbox.fileBase(subject).toLowerCase()));
+    expect(names.size).toBe(subjects.size);
+    for (const name of names) expect(name).toMatch(/^[a-z0-9_%=-]{1,200}$/);
+  });
+
+  it('a damaged file is not overwritten: the row fails as damaged and stays pending until the operator moves the file aside', () => {
+    const { store } = settledOrder('damaged.db', 'ord-d');
+    const effects = target('damaged-receipts');
+    mkdirSync(effects.dir, { recursive: true });
+    const path = lab.outbox.effectPath(effects, 'ord-d');
+    const partial = '{"kind":"fulfill-order","idempotencyKey":"ord-d:';
+    writeFileSync(path, partial);
+    const now = Date.now() + 1000;
+    const events: Record<string, unknown>[] = [];
+    expect(lab.outbox.runPass(store.db, effects, { emit: event => events.push(event), clock: () => now })).toMatchObject({ performed: 0, failed: 1,
+      remaining: 1 });
+    expect(events[0]).toMatchObject({ event: 'outbox-failed', reason: 'damaged', conflict: false, rescheduled: true });
+    expect(readFileSync(path, 'utf8')).toBe(partial);
+    expect(store.outbox()[0]).toMatchObject({ state: 'pending', lastError: expect.stringMatching(/^damaged: .*nothing is overwritten/) as string });
+    expect(lab.outbox.outboxStatus(store.db, now, 300)).toMatchObject({ pending: 1, done: 0 });
+    // The operator's action: move the file out of the directory. The next pass writes the receipt.
+    renameSync(path, dir.path('damaged-moved-aside.json'));
+    expect(lab.outbox.runPass(store.db, effects, { emit: quiet, clock: () => now + 1000 })).toMatchObject({ performed: 1, failed: 0, remaining: 0 });
+    expectExactlyOnce(store.outbox(), effects);
+  });
+
+  it('a receipt signed with another key (the key changed or was recreated) is not overwritten: the row fails as damaged', () => {
+    const { store } = settledOrder('rekey.db', 'ord-k');
+    const effects = target('rekey-receipts');
+    lab.outbox.runPass(store.db, effects, { emit: quiet });
+    const path = lab.outbox.effectPath(effects, 'ord-k');
+    const before = readFileSync(path, 'utf8');
+    store.db.exec(`UPDATE outbox SET state = 'pending', acknowledged_at = NULL`);
+    const events: Record<string, unknown>[] = [];
+    expect(lab.outbox.runPass(store.db, { dir: effects.dir, key: Buffer.alloc(32, 9) }, { emit: event => events.push(event) }))
+      .toMatchObject({ performed: 0, failed: 1, remaining: 1 });
+    expect(events[0]).toMatchObject({ event: 'outbox-failed', reason: 'damaged' });
+    expect(readFileSync(path, 'utf8')).toBe(before);
+    expect(store.outbox()[0]?.state).toBe('pending');
+  });
+
+  it('a missing key is not recreated while receipts or confirmations exist: the error names the key file, and nothing is created', () => {
+    for (const effectDir of ['receipts', 'confirmations']) {
+      const labDir = dir.path(`lost-key-${effectDir}`);
+      mkdirSync(join(labDir, effectDir), { recursive: true });
+      writeFileSync(join(labDir, effectDir, 'ord-1.json'), '{}');
+      expect(() => lab.outbox.labKey(labDir)).toThrow(`${join(labDir, 'outbox.key')} is missing`);
+      expect(readdirSync(labDir)).toEqual([effectDir]);
+    }
+    // Empty effect directories hold nothing signed: the key is created.
+    const fresh = dir.path('fresh-key-lab');
+    mkdirSync(join(fresh, 'receipts'), { recursive: true });
+    expect(lab.outbox.labKey(fresh)).toHaveLength(32);
+  });
+
+  it('a row whose ledger entry is missing, null or another payment\'s is not performed: it fails by name, stays pending, and no file is written', () => {
+    const { store, hash } = settledOrder('ghost.db', 'ord-real');
+    const realEntry = store.journal('ord-real')[0]?.entryId;
+    const now = new Date().toISOString();
+    const ghost = (subject: string, ledgerEntryId: number | null): void => {
+      store.db.prepare(`INSERT INTO outbox (kind, idempotency_key, subject, payload, state, attempts, next_attempt_at, created_at)
+        VALUES ('fulfill-order', ?, ?, ?, 'pending', 0, ?, ?)`).run(`${subject}:${'f'.repeat(64)}`, subject, JSON.stringify({ orderId: subject,
+        paymentHash: 'f'.repeat(64), amountMsat: '1', settleIndex: '9', ledgerEntryId }), now, now);
+    };
+    ghost('ghost-missing', 99_999);
+    ghost('ghost-null', null);
+    ghost('ghost-other', realEntry ?? 0);
+    const effects = target('ghost-receipts');
+    const events: Record<string, unknown>[] = [];
+    expect(lab.outbox.runPass(store.db, effects, { emit: event => events.push(event) })).toMatchObject({ performed: 1, failed: 3, remaining: 3 });
+    expect(events.filter(event => event.event === 'outbox-failed').map(event => event.reason))
+      .toEqual(['ledger-entry-missing', 'ledger-entry-missing', 'ledger-entry-mismatch']);
+    expect(jsonFiles(effects)).toEqual([`${lab.outbox.fileBase('ord-real')}.json`]);
+    const rows = store.outbox();
+    expect(rows.find(row => row.subject === 'ord-real')).toMatchObject({ state: 'done', payload: { paymentHash: hash } });
+    expect(rows.filter(row => row.subject.startsWith('ghost-')).map(row => [row.state, row.lastError?.split(':')[0]]))
+      .toEqual([['pending', 'ledger-entry-missing'], ['pending', 'ledger-entry-missing'], ['pending', 'ledger-entry-mismatch']]);
+    expect(rows.find(row => row.subject === 'ghost-missing')?.lastError).toMatch(/ledger entry 99999 does not exist in the journal/);
+  });
+
+  it('a stalled worker whose lease ran out is not failed by the worker that took its row: it finds the effect performed and loses its ack', () => {
+    const { store: a } = settledOrder('stalled.db', 'ord-s');
+    const b = receiverStore('stalled.db');
+    const effects = target('stalled-receipts');
+    const t0 = Date.now() + 1000;
+    const eventsA: Record<string, unknown>[] = [];
+    let resultB: unknown;
+    const resultA = lab.outbox.runPass(a.db, effects, { emit: event => eventsA.push(event), owner: 'worker-a', clock: () => t0, hooks: {
+      duringWrite: () => { resultB = lab.outbox.runPass(b.db, effects, { emit: quiet, owner: 'worker-b', clock: () => t0 + 61_000 }); } } });
+    expect(resultB).toMatchObject({ performed: 1, failed: 0 });
+    expect(resultA).toMatchObject({ performed: 0, failed: 0, leaseLost: 1 });
+    expect(eventsA).toEqual([expect.objectContaining({ event: 'outbox-lease-lost', effect: 'already-present' })]);
+    expectExactlyOnce(a.outbox(), effects);
+  });
+
+  it('temporary files: a worker removes its own leftovers and those of expired leases, never a live lease\'s', () => {
+    const { store } = settledOrder('tmp-owners.db', 'ord-t');
+    const effects = target('tmp-owners-receipts');
+    mkdirSync(effects.dir, { recursive: true });
+    const base = lab.outbox.fileBase('ord-t');
+    const live = join(effects.dir, `.${base}.json.${'0'.repeat(16)}.${Date.now() + 3_600_000}.tmp`);
+    const expired = join(effects.dir, `.${base}.json.${'1'.repeat(16)}.${Date.now() - 1}.tmp`);
+    writeFileSync(live, 'partial');
+    writeFileSync(expired, 'partial');
+    expect(lab.outbox.runPass(store.db, effects, { emit: quiet })).toMatchObject({ performed: 1 });
+    expect(existsSync(live)).toBe(true);
+    expect(existsSync(expired)).toBe(false);
+  });
+
+  it('acknowledged_at is never before created_at, even when the clock steps back between the claim and the ack', () => {
+    const { store } = settledOrder('clock-back.db', 'ord-clk');
+    const createdAt = store.outbox()[0]?.createdAt ?? '';
+    let now = Date.parse(createdAt);
+    lab.outbox.runPass(store.db, target('clock-back-receipts'), { emit: quiet, clock: () => now, hooks: { afterEffect: () => { now -= 600_000; } } });
+    const [row] = store.outbox();
+    expect(row?.state).toBe('done');
+    expect(row?.acknowledgedAt).toBe(createdAt);
   });
 });

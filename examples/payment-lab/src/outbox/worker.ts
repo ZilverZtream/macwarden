@@ -1,14 +1,17 @@
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import type { DatabaseSync } from 'node:sqlite';
-import { EffectConflict, effectFields, publish, type EffectHooks, type EffectTarget } from './effects.ts';
+import { text } from '../store/sqlite.ts';
+import { EffectError, effectFields, publish, type EffectHooks, type EffectTarget } from './effects.ts';
 import { acknowledge, claim, notDoneCount, retryLater, type OutboxRow } from './outbox.ts';
 
 /**
  * The outbox worker. One pass claims due rows one at a time, lowest outbox ID first, and for each:
  *
  *   claim (BEGIN IMMEDIATE: pending and due, or a lease that ran out -> leased to this worker, attempts + 1)
- *   effect (publish: an existing file with a valid HMAC over the same fields counts as performed)
+ *   check (the row's ledger entry exists and is its own; otherwise the row fails and nothing is written)
+ *   effect (publish: an existing file with a valid HMAC over the same fields counts as performed;
+ *           any other existing file is a named failure, never overwritten)
  *   ack (BEGIN IMMEDIATE: leased to this worker -> done, acknowledged_at, lease cleared, in one statement)
  *
  * A failed effect puts the row back to pending, due after 1 s, 2 s, 4 s, … capped at 5 minutes,
@@ -52,6 +55,30 @@ export function workerId(): string {
   return `${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`;
 }
 
+/** The journal entry a row's effect cites, by kind: the settlement of the order, or the success of the operation's payment. */
+const ENTRY_EVENT = { 'fulfill-order': 'invoice-settled', 'confirm-operation': 'payment-succeeded' } as const;
+
+/**
+ * The consistency check before an effect: the row's ledgerEntryId must name a journal entry of this
+ * database, and that entry must be the row's own (the settlement or success for its payment hash).
+ * A row that fails it is not performed and no file is written; it stays pending with a named error
+ * (ledger-entry-missing or ledger-entry-mismatch), visible in outbox-status.
+ */
+function checkLedgerEntry(db: DatabaseSync, row: OutboxRow): void {
+  const id = row.payload.ledgerEntryId;
+  if (typeof id !== 'number' || !Number.isSafeInteger(id)) {
+    throw new EffectError('ledger-entry-missing', `the row names no ledger entry (ledgerEntryId ${JSON.stringify(id ?? null)})`);
+  }
+  const entry = db.prepare('SELECT event, reference FROM journal_entries WHERE entry_id = ?').get(id);
+  if (entry === undefined) throw new EffectError('ledger-entry-missing', `ledger entry ${id} does not exist in the journal`);
+  const expected = ENTRY_EVENT[row.kind];
+  const event = text(entry, 'event');
+  const reference = text(entry, 'reference');
+  if (event !== expected || reference !== row.payload.paymentHash) {
+    throw new EffectError('ledger-entry-mismatch', `ledger entry ${id} is ${event} for ${reference}, not ${expected} for ${String(row.payload.paymentHash)}`);
+  }
+}
+
 /** One pass over the due rows. Synchronous: every step is a local transaction or a local file operation. */
 export function runPass(db: DatabaseSync, target: EffectTarget, options: WorkerOptions): PassResult {
   const owner = options.owner ?? workerId();
@@ -63,15 +90,18 @@ export function runPass(db: DatabaseSync, target: EffectTarget, options: WorkerO
     const row = claim(db, owner, clock(), leaseMs);
     if (row === undefined) break;
     hooks.afterClaim?.(row);
-    let outcome: 'written' | 'already-present' | 'replaced';
+    let outcome: 'written' | 'already-present';
     try {
-      outcome = publish(target, row.subject, effectFields(row), hooks);
+      checkLedgerEntry(db, row);
+      outcome = publish(target, row.subject, effectFields(row), hooks,
+        { owner, expiresAtMs: Date.parse(row.leaseExpiresAt ?? ''), nowMs: clock() });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const reason = error instanceof EffectError ? error.reason : 'error';
+      const message = `${reason}: ${error instanceof Error ? error.message : String(error)}`;
       const rescheduled = retryLater(db, row.outboxId, owner, message, clock());
       result.failed += 1;
       options.emit({ event: 'outbox-failed', outboxId: row.outboxId, kind: row.kind, idempotencyKey: row.idempotencyKey,
-        attempts: row.attempts, conflict: error instanceof EffectConflict, error: message, rescheduled });
+        attempts: row.attempts, reason, conflict: reason === 'conflict', error: message, rescheduled });
       continue;
     }
     hooks.afterEffect?.(row);

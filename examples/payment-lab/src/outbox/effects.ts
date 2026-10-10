@@ -1,6 +1,6 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import {
-  closeSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeSync,
+  closeSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, unlinkSync, writeSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import type { OutboxKind, PayloadValue } from './outbox.ts';
@@ -15,8 +15,12 @@ import type { OutboxKind, PayloadValue } from './outbox.ts';
  * Publication is exclusive: the content is written to a temporary file (created owner-only with
  * O_EXCL, written, fsynced), then hard-linked to the final name, which fails if the name exists.
  * A reader therefore never sees a partial file, and of two workers that both got this far only one
- * creates the file; the other finds it and checks its HMAC. A worker killed mid-write leaves only a
- * temporary file, which the next attempt for the same subject removes.
+ * creates the file; the other finds it and checks its HMAC. An existing file is never replaced: one
+ * that does not verify under the lab's key is reported as damaged and left for the operator.
+ *
+ * The temporary file's name carries a tag of the lease owner and the time its lease runs out. A
+ * worker killed mid-write leaves only that file; the next attempt for the same subject removes the
+ * leftovers of its own owner and of leases that have run out, never those of a lease still running.
  */
 
 export interface EffectTarget {
@@ -31,15 +35,27 @@ export type ReceiptFields = Record<string, PayloadValue>;
 /** Effect files are small; anything larger than this is not one of them and is not parsed. */
 export const MAX_RECEIPT_BYTES = 64 * 1024;
 const KEY_FILE = 'outbox.key';
+/** The lab's effect directories (receiver receipts, payer confirmations); src/cli.ts names them the same. */
+export const EFFECT_DIRS = ['receipts', 'confirmations'] as const;
+/** The lease a direct publish (outside the worker) assumes: 60 s, as the worker's default. */
+const DIRECT_LEASE_MS = 60_000;
 
 /**
  * The per-lab HMAC key: 32 random bytes as hex in `<lab>/outbox.key`, owner-only, created on first
  * use. Creation is exclusive (temporary file, then link), so concurrent first uses agree on one key.
+ * A missing key is created only while no receipt or confirmation exists: a new key would make every
+ * file signed with the old one fail verification, so a lost key is an error naming the key file.
  */
 export function labKey(labDir: string): Buffer {
   const path = join(labDir, KEY_FILE);
   const existing = readKey(path);
   if (existing !== undefined) return existing;
+  const signed = EFFECT_DIRS.flatMap(name => effectFiles(join(labDir, name)));
+  if (signed.length > 0) {
+    throw new Error(`${path} is missing, but ${signed.length} receipt or confirmation file(s) signed with it exist (${signed[0] ?? ''}); `
+      + `restore ${path} from your copy: a new key would make every one of them fail verification. To start the lab over, `
+      + `move ${EFFECT_DIRS.map(name => join(labDir, name)).join(' and ')} aside first`);
+  }
   const tmp = join(labDir, `.${KEY_FILE}.${process.pid}-${randomBytes(6).toString('hex')}.tmp`);
   const fd = openSync(tmp, 'wx', 0o600);
   try {
@@ -60,6 +76,16 @@ export function labKey(labDir: string): Buffer {
   return key;
 }
 
+/** The effect files (final names, not temporary ones) in a directory; none when it does not exist. */
+function effectFiles(dir: string): string[] {
+  try {
+    return readdirSync(dir).filter(name => name.endsWith('.json') && !name.startsWith('.')).map(name => join(dir, name));
+  } catch (error) {
+    if (['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) return [];
+    throw error;
+  }
+}
+
 function readKey(path: string): Buffer | undefined {
   let size: number;
   try { size = statSync(path).size; } catch (error) {
@@ -73,19 +99,28 @@ function readKey(path: string): Buffer | undefined {
 }
 
 const RESERVED = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])$/i;
+const MAX_BASE = 200;
+const hexByte = (byte: number): string => `%${byte.toString(16).toUpperCase().padStart(2, '0')}`;
 
 /**
- * The file name for a subject: letters, digits, '_' and '-' as they are, every other byte
- * percent-encoded ('.', ':', '/', '%' included), so the name is safe on every platform and
- * two subjects never share a name. A Windows device name (CON, NUL, COM1, …) has its first
- * letter encoded; an encoding longer than 200 characters becomes a SHA-256 of the subject.
+ * The file name for a subject, distinct for distinct subjects on every platform, including file
+ * systems that ignore letter case (Windows, macOS):
+ * - lower-case letters, digits, '_' and '-' stay as they are; every other byte is percent-encoded
+ *   with upper-case hex, upper-case letters included ('Order1' is '%4Frder1', 'order1' stays). A name
+ *   therefore holds letters only as lower-case literals or as hex digits after a '%', so two names
+ *   that differ only in case cannot both be produced;
+ * - a Windows device name (con, nul, com1, ...) has its first letter encoded, which no other
+ *   subject produces (a lower-case letter is otherwise never encoded);
+ * - an encoding longer than 200 characters becomes '=sha256-' and the SHA-256 of the subject. The
+ *   encoding never produces '=', so a hashed name is never the name of another subject (such as
+ *   one literally called 'sha256-<hash>'); two hashed names coincide only on a SHA-256 collision.
  */
 export function fileBase(subject: string): string {
   let base = [...Buffer.from(subject, 'utf8')]
-    .map(byte => /[A-Za-z0-9_-]/.test(String.fromCharCode(byte)) ? String.fromCharCode(byte) : `%${byte.toString(16).toUpperCase().padStart(2, '0')}`)
+    .map(byte => /[a-z0-9_-]/.test(String.fromCharCode(byte)) ? String.fromCharCode(byte) : hexByte(byte))
     .join('');
-  if (RESERVED.test(base)) base = `%${base.charCodeAt(0).toString(16).toUpperCase()}${base.slice(1)}`;
-  if (base.length > 200) base = `sha256-${createHash('sha256').update(subject, 'utf8').digest('hex')}`;
+  if (RESERVED.test(base)) base = `${hexByte(base.charCodeAt(0))}${base.slice(1)}`;
+  if (base.length > MAX_BASE) base = `=sha256-${createHash('sha256').update(subject, 'utf8').digest('hex')}`;
   return base;
 }
 
@@ -133,7 +168,29 @@ export function readEffect(path: string, key: Buffer): ReadResult {
   return { state: 'valid', fields };
 }
 
-export class EffectConflict extends Error {}
+/**
+ * Why an effect was not performed, named in the worker's outbox-failed event and the row's last_error:
+ * - conflict: a valid effect file for another idempotency key holds the name;
+ * - damaged: a file holds the name that does not verify under the lab's key (partial, edited, or
+ *   signed with another key); it is never overwritten: the operator inspects it and moves it aside;
+ * - ledger-entry-missing / ledger-entry-mismatch: the row's ledger entry is not in the journal, or is
+ *   not the entry of its payment (checked by the worker before the effect);
+ * - lease-expired: this worker's temporary file was removed after its lease ran out, and the effect
+ *   is not there.
+ */
+export type EffectFailure = 'conflict' | 'damaged' | 'ledger-entry-missing' | 'ledger-entry-mismatch' | 'lease-expired';
+
+export class EffectError extends Error {
+  readonly reason: EffectFailure;
+  constructor(reason: EffectFailure, message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.reason = reason;
+  }
+}
+
+export class EffectConflict extends EffectError {
+  constructor(message: string) { super('conflict', message); }
+}
 
 /** Hooks for the crash-point tests: called synchronously at that point of the effect. */
 export interface EffectHooks {
@@ -141,37 +198,65 @@ export interface EffectHooks {
   duringWrite?(tmpPath: string): void;
 }
 
+/** The lease the effect is performed under: its owner, when it runs out, and the worker's clock now. */
+export interface EffectLease {
+  owner: string;
+  expiresAtMs: number;
+  nowMs: number;
+}
+
+const ownerTag = (owner: string): string => createHash('sha256').update(owner, 'utf8').digest('hex').slice(0, 16);
+const TMP_SUFFIX = /^([0-9a-f]{16})\.(\d{1,16})\.tmp$/;
+
+/**
+ * Removes the temporary files a killed attempt for this name left: those of this lease owner, and
+ * those whose lease ran out (by the claiming worker's clock). A lease still running belongs to a
+ * worker that may still be writing, and its file is left alone.
+ */
+function removeLeftovers(dir: string, base: string, lease: EffectLease): void {
+  const prefix = `.${base}.json.`;
+  const mine = ownerTag(lease.owner);
+  for (const name of readdirSync(dir)) {
+    if (!name.startsWith(prefix)) continue;
+    const match = TMP_SUFFIX.exec(name.slice(prefix.length));
+    if (match === null || (match[1] !== mine && Number(match[2]) > lease.nowMs)) continue;
+    try { unlinkSync(join(dir, name)); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  }
+}
+
 /**
  * Performs the effect for `fields` at most once:
- * - `already-present`: the file exists with a valid HMAC over the same fields (an earlier attempt
- *   performed it and died before its acknowledgement); nothing is written;
- * - `written`: the file did not exist and was created exclusively;
- * - `replaced`: a file existed that is not a valid effect file (damaged, or not ours) and was replaced.
- * Throws EffectConflict when a valid effect file for other fields holds the name (another row's
- * receipt for the same subject): nothing is overwritten.
+ * - `already-present`: the file exists with a valid HMAC over the same fields (an earlier attempt,
+ *   or another worker that took over an expired lease, performed it); nothing is written;
+ * - `written`: the file did not exist and was created exclusively.
+ * Nothing is ever overwritten. Throws EffectError: `conflict` when a valid effect file for other
+ * fields holds the name (another row's receipt for the same subject), `damaged` when a file holds
+ * the name that does not verify under the key, `lease-expired` when this worker's temporary file
+ * was removed after its lease ran out and the effect is not there.
+ * `lease` defaults, for a direct call outside the worker, to a fresh owner and a 60 s lease.
  */
-export function publish(target: EffectTarget, subject: string, fields: ReceiptFields, hooks: EffectHooks = {}):
-  'written' | 'already-present' | 'replaced' {
+export function publish(target: EffectTarget, subject: string, fields: ReceiptFields, hooks: EffectHooks = {}, lease?: EffectLease):
+  'written' | 'already-present' {
+  const nowMs = Date.now();
+  const held = lease ?? { owner: `${process.pid}:${randomBytes(6).toString('hex')}`, expiresAtMs: nowMs + DIRECT_LEASE_MS, nowMs };
   mkdirSync(target.dir, { recursive: true, mode: 0o700 });
   const base = fileBase(subject);
   const path = join(target.dir, `${base}.json`);
-  for (const name of readdirSync(target.dir)) {
-    if (name.startsWith(`.${base}.json.`) && name.endsWith('.tmp')) {
-      try { unlinkSync(join(target.dir, name)); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-    }
-  }
+  removeLeftovers(target.dir, base, held);
   const expected = canonical(fields);
-  const check = (): 'absent' | 'same' | 'invalid' => {
+  const check = (): 'absent' | 'same' => {
     const found = readEffect(path, target.key);
     if (found.state === 'absent') return 'absent';
-    if (found.state === 'invalid') return 'invalid';
+    if (found.state === 'invalid') {
+      throw new EffectError('damaged', `${path} exists but is not a valid effect file under this lab's key (${found.reason}); nothing is overwritten: `
+        + 'inspect it and move it out of the directory, and the next attempt writes the effect');
+    }
     if (canonical(found.fields) === expected) return 'same';
     throw new EffectConflict(`${path} holds a valid effect for ${String(found.fields.idempotencyKey)}, not ${String(fields.idempotencyKey)}`);
   };
-  const before = check();
-  if (before === 'same') return 'already-present';
+  if (check() === 'same') return 'already-present';
   const content = `${JSON.stringify({ ...fields, hmacSha256: sign(target.key, fields) }, null, 2)}\n`;
-  const tmp = join(target.dir, `.${base}.json.${process.pid}-${randomBytes(6).toString('hex')}.tmp`);
+  const tmp = join(target.dir, `.${base}.json.${ownerTag(held.owner)}.${Math.max(0, Math.trunc(held.expiresAtMs))}.tmp`);
   const fd = openSync(tmp, 'wx', 0o600);
   try {
     const half = Math.floor(content.length / 2);
@@ -182,20 +267,20 @@ export function publish(target: EffectTarget, subject: string, fields: ReceiptFi
   } finally {
     closeSync(fd);
   }
-  if (before === 'invalid') {
-    renameSync(tmp, path);
-    syncDir(target.dir);
-    return 'replaced';
-  }
   try {
     linkSync(tmp, path);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') { unlinkSync(tmp); throw error; }
-    // Another worker published first (its lease ran out while it still worked): ours is the same or a conflict.
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') {
+      // Our temporary file is gone: our lease ran out and the worker that claimed the row next removed it.
+      if (check() === 'same') return 'already-present';
+      throw new EffectError('lease-expired', `${tmp} was removed after this worker's lease ran out, and ${path} is not there`, { cause: error });
+    }
     unlinkSync(tmp);
-    const after = check();
-    if (after === 'same') return 'already-present';
-    throw new Error(`${path} appeared while this worker wrote it, and is not a valid effect file`, { cause: error });
+    if (code !== 'EEXIST') throw error;
+    // Another worker published first (its lease ran out while it still worked, or ours did): the same effect, or a failure.
+    if (check() === 'same') return 'already-present';
+    throw new Error(`${path} appeared while this worker wrote it`, { cause: error });
   }
   unlinkSync(tmp);
   syncDir(target.dir);

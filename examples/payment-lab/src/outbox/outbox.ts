@@ -143,9 +143,14 @@ export function claim(db: DatabaseSync, owner: string, nowMs: number, leaseMs: n
   });
 }
 
-/** The effect is performed: done, acknowledged, lease cleared, in one statement. False when `owner` no longer holds the lease. */
+/**
+ * The effect is performed: done, acknowledged, lease cleared, in one statement. False when `owner` no longer holds the lease.
+ * acknowledged_at is the later of now and created_at: a clock that stepped back since the row was
+ * enqueued cannot record an acknowledgement before the row existed (both are ISO-8601 UTC text of
+ * one format, so SQLite's MAX compares them in time order).
+ */
 export function acknowledge(db: DatabaseSync, outboxId: number, owner: string, nowMs: number): boolean {
-  return immediate(db, () => changes(db.prepare(`UPDATE outbox SET state = 'done', acknowledged_at = ?, lease_owner = NULL,
+  return immediate(db, () => changes(db.prepare(`UPDATE outbox SET state = 'done', acknowledged_at = MAX(?, created_at), lease_owner = NULL,
     lease_expires_at = NULL, last_error = NULL WHERE outbox_id = ? AND state = 'leased' AND lease_owner = ?`)
     .run(iso(nowMs), outboxId, owner)) === 1);
 }
