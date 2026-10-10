@@ -1,4 +1,4 @@
-import { withCancellation } from './cancellation.js';
+import { Cancelled, withCancellation } from './cancellation.js';
 import { readFileSync } from 'node:fs';
 import { handlers } from './commands/handlers.js';
 import { error, render, renderChunks, warning, type Mode, type OutputResult } from './output/index.js';
@@ -235,7 +235,16 @@ export async function main(argv: string[]): Promise<number> {
       : argv[0].startsWith('-') ? 'unknown flag' : 'unknown command'), mode);
     if (mode === 'text') process.stderr.write(render(textResult(usage), 'text'));
     return 2;
-  } catch {
+  } catch (error) {
+    // An interrupt that a command did not turn into its own result (one that landed in its first LND
+    // calls) is still an interrupt, not an internal failure: exit 6, or 7 once a change may have reached LND.
+    if (error instanceof Cancelled) {
+      const interrupted = failure(context.mutationSent ? 7 : 6, 'cancelled', context.mutationSent
+        ? 'operation interrupted after mutation; completed state retained; run macwarden inventory to inspect state'
+        : 'interrupted', command);
+      await write(interrupted, mode);
+      return interrupted.error!.code;
+    }
     await write(failure(8, 'internal', internalErrorMessage(context), command), mode);
     return 8;
   } finally {

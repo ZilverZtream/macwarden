@@ -32,6 +32,7 @@
 ### Fixed
 
 - `scan` fails closed when its own analysis of a file throws: the scan stops with exit 8 (internal error) instead of recording the file as `unreadable` and exiting 0, which a CI gate would have read as a clean scan of a file that was never examined. Read failures are still skipped as `unreadable`.
+- An interrupt (SIGINT, SIGTERM or SIGHUP) that lands while `watch`, `inventory`, `recommend` or `respond` waits on its first LND calls (a slow or unreachable node) now exits 6 `cancelled` "interrupted", or 7 once a change may have reached LND, instead of exit 8 "unexpected failure".
 - Windows: writing an `--out` file (`bake`, `attenuate`, `rotate`, `respond`) could fail with exit 3 after about 20 seconds on machines where PowerShell has no module analysis cache (fresh machines, service accounts, CI runners): the owner-only file helper waited while PowerShell analysed every installed module before loading the one it needed. The helper now loads that module by name from the System32 module path, in well under a second.
 - Windows: the process-domain query behind stale-lock recovery had the same delay and a 5-second limit, so a stale registry lock could not be proven safe to recover. It loads its module by name and allows 15 seconds for a cold PowerShell start.
 - `npm run test:full` names the checks that failed and each failed command's output (redacted), or the reason it did not start, instead of exiting silently; it finds npm beside a Node installed by setup-node.

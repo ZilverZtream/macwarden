@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto';
 import * as nodeFs from 'node:fs/promises';
 import { hostname as nodeHostname } from 'node:os';
 import { resolve as resolvePath } from 'node:path';
-import { cancellationSignal } from '../cancellation.js';
+import { Cancelled, cancellationSignal } from '../cancellation.js';
 import { decodeMacaroon, macaroonId } from '../decode/index.js';
 import { unsafeNodeDiagnostics } from '../environment.js';
 import { createLndAdapter, registerMiddleware, type LndAdapter, type MiddlewareCall,
@@ -370,7 +370,11 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
   if (!adapter) return fail(8, 'internal', 'unexpected failure', warnings);
   let pubkey: string;
   try { pubkey = nodeInfo(await onlineAdapter(adapter).getInfo()).pubkey; }
-  catch (error) { const failure = failureDetails(error); return fail(failure.code, 'W5', failure.message, warnings); }
+  catch (error) {
+    // Interrupted before anything registered or was locked: nothing changed (exit 6, as SPEC 10).
+    if (error instanceof Cancelled) return fail(6, 'cancelled', 'interrupted', warnings);
+    const failure = failureDetails(error); return fail(failure.code, 'W5', failure.message, warnings);
+  }
   let known = labels(registry.entries, pubkey);
   let canaries = canaryEntries(registry.entries, canaryConfig, pubkey);
   // Re-reads labels and canaries, so a canary baked while watch runs is guarded without a
