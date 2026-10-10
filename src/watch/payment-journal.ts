@@ -795,8 +795,11 @@ export class PaymentJournal {
       this.queue({ text: `${JSON.stringify(drop)}\n`, type: 'drop', at: Date.parse(drop.time), calls: drop.count, first: drops.first }, false);
     }
     const at = Date.parse(record.time);
-    const calls = record.type === 'payment' || record.type === 'deletion' ? 1 : 0;
-    this.queue({ text, type: record.type, at, calls, first: at }, droppable);
+    // A `drop` that came through the intake (calls dropped at capture) stands for its count from
+    // its first call (1.2.1: it once stood for none, so losing it at the limit lost those calls).
+    const calls = record.type === 'drop' ? record.count : record.type === 'payment' || record.type === 'deletion' ? 1 : 0;
+    const first = record.type === 'drop' ? Math.min(at, Date.parse(record.first)) : at;
+    this.queue({ text, type: record.type, at, calls, first }, droppable);
     if (record.type === 'payment') this.stats.payments += 1;
     else if (record.type === 'deletion') this.stats.deletions += 1;
   }

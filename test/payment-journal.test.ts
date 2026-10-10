@@ -3,7 +3,10 @@ import * as fs from 'node:fs/promises';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
+import { run as reconcileRun } from '../src/commands/reconcile.js';
 import { addFirstPartyCaveat } from '../src/decode/index.js';
+import snapshot from '../src/grade/lnd-permissions.json' with { type: 'json' };
+import type { LndAdapter, MiddlewareCall, PaymentLookup } from '../src/lnd/index.js';
 import { Secret } from '../src/secret.js';
 import { JOURNAL_INTAKE_ITEMS, JOURNAL_LIMIT_BYTES, JOURNAL_RESERVE_BYTES, JOURNAL_START_ROOM_BYTES, JournalError, journalCoverage, parseRecord, readJournal,
   type JournalRecord } from '../src/watch/payment-journal.js';
@@ -691,4 +694,118 @@ it('PAYJ/full-drop payments discarded when the journal fills leave a drop record
     { from: Date.parse(at(10)), to: Date.parse(at(60)), reason: 'journal-full', dropped: 0 },
   ]);
   expect(coverage.coveredMs).toBe(9_000);
+});
+
+/**
+ * A journal with room for exactly JOURNAL_INTAKE_ITEMS payment lines, filled by one full intake
+ * captured at second 5; three more calls (`drop`, at seconds 10, 11 and 12) find the intake full
+ * and are dropped at capture. The drop record that reports them reaches the write queue only
+ * after the journal has no room left.
+ */
+async function intakeDropAtLimit(drop: (seconds: number) => MiddlewareCall) {
+  const dir = scratch();
+  const app = vector('preset-pay-only');
+  const fill = (id: bigint) => paymentCall(SEND, bytes(3, hash(`fill${id}`)), app, id);
+  // The length of one fill line (four-digit request IDs), measured by the real writer.
+  const calibrate = await openJournal(join(dir, 'calibrate.journal'), { clock: () => new Date(at(0)) });
+  calibrate.registered();
+  calibrate.capture(fill(1_000n));
+  await settle();
+  const line = Buffer.byteLength(`${readFileSync(join(dir, 'calibrate.journal'), 'utf8').split('\n').at(-2)!}\n`);
+  await calibrate.close();
+  const path = join(dir, 'intake-drop.journal');
+  const head = `${start(-1)}\n`;
+  const run = '00000000-0000-4000-8000-000000000000';
+  const opened = Buffer.byteLength(`${JSON.stringify({ v: 1, type: 'run-start', time: at(0), run, node: NODE, version: '1.2.0-test', repairedTail: true })}\n`)
+    + Buffer.byteLength(`${JSON.stringify({ v: 1, type: 'registered', time: at(1), run, session: 1 })}\n`);
+  const filler = JOURNAL_LIMIT_BYTES - JOURNAL_RESERVE_BYTES - JOURNAL_INTAKE_ITEMS * line - opened - Buffer.byteLength(head) - 1;
+  writeFileSync(path, Buffer.concat([Buffer.from(head), Buffer.alloc(filler, 0x78), Buffer.from('\n')]), { mode: 0o600 });
+  let now = Date.parse(at(0));
+  const stops: string[] = [];
+  const journal = await openJournal(path, { clock: () => new Date(now), onStop: reason => stops.push(reason) });
+  now = Date.parse(at(1));
+  journal.registered();
+  await settle();
+  const room = () => JOURNAL_LIMIT_BYTES - JOURNAL_RESERVE_BYTES - statSync(path).size;
+  expect(room()).toBe(JOURNAL_INTAKE_ITEMS * line);
+  now = Date.parse(at(5));
+  for (let i = 0; i < JOURNAL_INTAKE_ITEMS; i++) journal.capture(fill(BigInt(1_000 + i)));
+  for (const seconds of [10, 11, 12]) { now = Date.parse(at(seconds)); journal.capture(drop(seconds)); }
+  for (let turn = 0; turn < 400 && room() > 0; turn++) await settle();
+  expect(room()).toBe(0);
+  expect(stops).toEqual([]);
+  return { path, journal, stops, setNow: (seconds: number) => { now = Date.parse(at(seconds)); } };
+}
+
+/** reconcile over the journal with an LND that lists no payment: the dropped calls left none behind. */
+async function reconcileEmpty(path: string, since: number, until: number) {
+  const dir = scratch();
+  writeFileSync(join(dir, 'tls.cert'), 'not used by the fake adapter');
+  writeFileSync(join(dir, 'own.macaroon'), vector('default-readonly'));
+  writeFileSync(join(dir, 'registry.json'), JSON.stringify({ schema: 1, entries: [] }));
+  const unexpected = (): never => { throw new Error('unexpected adapter call'); };
+  const lnd = {
+    getInfo: async () => ({ pubkey: NODE, alias: 'fixture', network: 'regtest', version: '0.21.4-beta' }),
+    listPermissions: async () => snapshot.methods as Record<string, string[]>,
+    listMacaroonIds: unexpected, bakeMacaroon: unexpected, deleteMacaroonId: unexpected, checkMacaroon: unexpected,
+    listPayments: async ({ indexOffset }: { indexOffset: bigint }) => ({ payments: [], lastIndexOffset: indexOffset }),
+    trackPayment: async () => null,
+  } as unknown as LndAdapter & PaymentLookup;
+  return reconcileRun(['--payment-journal', path, '--lnd-rest', 'localhost:8080', '--tls-cert', join(dir, 'tls.cert'),
+    '--macaroon', join(dir, 'own.macaroon'), '--registry', join(dir, 'registry.json'), '--since', at(since), '--until', at(until)],
+  { lnd, fs, env: {}, clock: () => new Date('2026-10-09T12:00:00.000Z') });
+}
+
+it('PAYJ/full-drop a drop record of calls dropped at capture that is itself lost at the limit still counts them from their first capture', async () => {
+  const app = vector('preset-pay-only');
+  const j = await intakeDropAtLimit(seconds => paymentCall(SEND, bytes(3, hash(`intake-drop-${seconds}`)), app, BigInt(8_000 + seconds)));
+  // The next call flushes the intake drop (count 3, 10..12 s) into the queue ahead of it; neither fits.
+  j.setNow(20);
+  j.journal.capture(paymentCall(SEND, bytes(3, hash('lost-20')), app, 9_020n));
+  await settle();
+  j.setNow(30);
+  const stats = await j.journal.close();
+  expect(stats).toMatchObject({ payments: JOURNAL_INTAKE_ITEMS, dropped: 4, stopped: 'full' });
+  expect(j.stops).toEqual(['full']);
+  expect(statSync(j.path).size).toBeLessThanOrEqual(JOURNAL_LIMIT_BYTES);
+  const read = await readJournal(j.path);
+  expect(read.records.slice(-2)).toEqual([
+    { v: 1, type: 'drop', time: at(20), run: j.journal.run, count: 4, first: at(10), last: at(20), reason: 'overload' },
+    { v: 1, type: 'full', time: at(20), run: j.journal.run },
+  ]);
+  const coverage = journalCoverage(read.records, NODE, Date.parse(at(1)), Date.parse(at(30)));
+  expect(coverage.covered).toEqual([[Date.parse(at(1)), Date.parse(at(10))]]);
+  expect(coverage.gaps).toEqual([
+    { from: Date.parse(at(10)), to: Date.parse(at(20)), reason: 'dropped', dropped: 4 },
+    { from: Date.parse(at(10)), to: Date.parse(at(30)), reason: 'journal-full', dropped: 0 },
+  ]);
+  const output = await reconcileEmpty(j.path, 2, 11);
+  expect(output.exitCode).toBe(1);
+  expect((output.result as { coverage: { complete: boolean } }).coverage.complete).toBe(false);
+});
+
+it('PAYJ/full-drop a lost drop record followed only by markers still leaves a drop record: dropped DeletePayment calls never read as covered', async () => {
+  const app = vector('preset-pay-only');
+  const j = await intakeDropAtLimit(seconds => paymentCall('/lnrpc.Lightning/DeletePayment', bytes(1, hash(`deleted-${seconds}`)), app,
+    BigInt(8_000 + seconds)));
+  // close() flushes the intake drop, then unregistered and run-end at 30 s: none of them fits.
+  j.setNow(30);
+  const stats = await j.journal.close();
+  expect(stats).toMatchObject({ payments: JOURNAL_INTAKE_ITEMS, deletions: 0, dropped: 3, stopped: 'full' });
+  const read = await readJournal(j.path);
+  expect(read.records.slice(-2)).toEqual([
+    { v: 1, type: 'drop', time: at(30), run: j.journal.run, count: 3, first: at(10), last: at(30), reason: 'overload' },
+    { v: 1, type: 'full', time: at(30), run: j.journal.run },
+  ]);
+  const coverage = journalCoverage(read.records, NODE, Date.parse(at(1)), Date.parse(at(30)));
+  expect(coverage.covered).toEqual([[Date.parse(at(1)), Date.parse(at(10))]]);
+  expect(coverage.gaps).toEqual(expect.arrayContaining([
+    { from: Date.parse(at(10)), to: Date.parse(at(30)), reason: 'dropped', dropped: 3 },
+    { from: Date.parse(at(10)), to: Date.parse(at(30)), reason: 'journal-full', dropped: 0 },
+  ]));
+  expect(coverage.gaps).toHaveLength(2);
+  // LND lists nothing (the payments were deleted), so only coverage can say the window is incomplete.
+  const output = await reconcileEmpty(j.path, 2, 11);
+  expect(output.exitCode).toBe(1);
+  expect((output.result as { coverage: { complete: boolean } }).coverage.complete).toBe(false);
 });
