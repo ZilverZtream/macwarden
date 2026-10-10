@@ -27,7 +27,8 @@ function converted(db: DatabaseSync): boolean {
  * an order payment, refunds-payable, payouts-payable), against lnd-wallet-outgoing. A second
  * payment posted for the same operation also gets a double-payment entry (into suspense). Every
  * reservation still held gets a budget-held entry and every consumed one a budget-consumed
- * entry for principal plus actual fee, so each budget account starts at held plus consumed.
+ * entry for principal plus actual fee (two line pairs, so a sum above 2^63 - 1 still posts),
+ * so each budget account starts at held plus consumed.
  */
 export function migratePayerLedger(db: DatabaseSync): void {
   if (converted(db)) return;

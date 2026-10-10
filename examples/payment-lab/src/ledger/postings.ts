@@ -55,7 +55,9 @@ export function budgetReleased(input: ReservationRef & { amountMsat: bigint } & 
  * Payer: a reservation is consumed (LND reported success). The budget's commitment becomes
  * principal plus the actual fee: from a held reservation the entry moves the difference between
  * the allowance held and the fee paid (normally a release of the unused allowance); from a
- * released one (success after a recorded failure) it commits principal plus fee again.
+ * released one (success after a recorded failure) it commits principal plus fee again, as two
+ * pairs of lines, the principal and the fee, so that no line exceeds 2^63 - 1 even when their
+ * sum does (each is an int64 LND reported; their sum need not be one).
  */
 export function budgetConsumed(input: ReservationRef & { fromState: 'held' | 'released'; principalMsat: bigint;
   allowanceMsat: bigint; feeMsat: bigint } & Origin): Posting {
@@ -63,10 +65,11 @@ export function budgetConsumed(input: ReservationRef & { fromState: 'held' | 're
   const base = { event: 'budget-consumed' as const, reference: `reservation:${input.reservationId}`, operationId: input.operationId,
     paymentHash: input.paymentHash, origin: input.origin, postedAt: input.postedAt };
   if (input.fromState === 'released') {
-    const amount = input.principalMsat + input.feeMsat;
     return { ...base, lines: [
-      { account: budget, direction: 'debit', amountMsat: amount },
-      { account: ACCOUNT.budgetCommitments, direction: 'credit', amountMsat: amount },
+      { account: budget, direction: 'debit', amountMsat: input.principalMsat },
+      { account: ACCOUNT.budgetCommitments, direction: 'credit', amountMsat: input.principalMsat },
+      { account: budget, direction: 'debit', amountMsat: input.feeMsat },
+      { account: ACCOUNT.budgetCommitments, direction: 'credit', amountMsat: input.feeMsat },
     ] };
   }
   const unused = input.allowanceMsat - input.feeMsat;

@@ -22,6 +22,14 @@ import { EVENTS, isAccount, type LedgerEvent } from './accounts.ts';
 
 const EVENT_LIST = EVENTS.map(event => `'${event}'`).join(', ');
 
+/**
+ * A canonical signed decimal, what parseBalance reads: '0', or an optional minus and a digit 1-9
+ * followed by digits, at most 39 digits. '00', '-0', '0-' and '' are refused by the column.
+ */
+const canonicalDecimal = (column: string): string => `length(${column}) BETWEEN 1 AND 40 AND length(ltrim(${column}, '-')) <= 39 AND (${column} = '0'
+    OR (${column} GLOB '[1-9]*' AND ${column} NOT GLOB '*[^0-9]*')
+    OR (${column} GLOB '-[1-9]*' AND substr(${column}, 2) NOT GLOB '*[^0-9]*'))`;
+
 /** The schema step both stores' ledger migrations run first. */
 export const JOURNAL_SCHEMA = `
 CREATE TABLE IF NOT EXISTS journal_entries (
@@ -43,13 +51,13 @@ CREATE TABLE IF NOT EXISTS journal_lines (
   direction TEXT NOT NULL CHECK (direction IN ('debit', 'credit')),
   amount_msat INTEGER NOT NULL CHECK (amount_msat >= 0),
   leg TEXT CHECK (leg IN ('principal', 'routing-fee', 'sale')),
-  balance_after TEXT NOT NULL CHECK (length(balance_after) BETWEEN 1 AND 40 AND balance_after NOT GLOB '*[^0-9-]*'),
+  balance_after TEXT NOT NULL CHECK (${canonicalDecimal('balance_after')}),
   PRIMARY KEY (entry_id, line_no)
 );
 CREATE INDEX IF NOT EXISTS journal_lines_by_account ON journal_lines (account);
 CREATE TABLE IF NOT EXISTS balances (
   account TEXT PRIMARY KEY,
-  balance_msat TEXT NOT NULL CHECK (length(balance_msat) BETWEEN 1 AND 40 AND balance_msat NOT GLOB '*[^0-9-]*'),
+  balance_msat TEXT NOT NULL CHECK (${canonicalDecimal('balance_msat')}),
   last_entry_id INTEGER NOT NULL,
   updated_at TEXT NOT NULL
 );
