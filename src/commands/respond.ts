@@ -9,7 +9,7 @@ import { decodeMacaroon, type MacaroonFacts } from '../decode/index.js';
 import { isProtectedPath, outputNameProblem } from '../protected-path.js';
 import { unsafeNodeDiagnostics } from '../environment.js';
 import { canBake as mayBake, grade } from '../grade/index.js';
-import { hasCustomCaveat, isStagedReplacement, openRegistry, replacementLinkProblems, type RegistryEntry } from '../registry/index.js';
+import { hasCustomCaveat, openRegistry, replacementLinkProblems, type RegistryEntry } from '../registry/index.js';
 import type { Secret } from '../secret.js';
 import { writeRotatePrompt, type OutputResult } from '../output/index.js';
 import type { RespondItem, RespondProof, RespondResult } from '../command-result.js';
@@ -86,13 +86,49 @@ function parse(args: string[], env: Deps['env']): Request | string {
 
 const byId = (left: string, right: string) => { const a = BigInt(left), b = BigInt(right); return a < b ? -1 : a > b ? 1 : 0; };
 
-/** Active entries that are not themselves a staged replacement of another active entry (as rotate S3; RL-07). */
-function originals(entries: RegistryEntry[]): RegistryEntry[] {
-  return entries.filter(entry => entry.status === 'active' && !isStagedReplacement(entries, entry));
+/** The first entry per root key ID, as Array.find would return it; built once per registry snapshot. */
+function firstById(entries: RegistryEntry[]): Map<string, RegistryEntry> {
+  const byRootKeyId = new Map<string, RegistryEntry>();
+  for (const entry of entries) if (!byRootKeyId.has(entry.rootKeyId)) byRootKeyId.set(entry.rootKeyId, entry);
+  return byRootKeyId;
 }
 
-function stagedReplacement(entries: RegistryEntry[], old: RegistryEntry): RegistryEntry | undefined {
-  return entries.find(entry => entry.status === 'active' && entry.replaces === old.rootKeyId);
+/**
+ * Replacement relationships among one node's entries, indexed once per snapshot (as
+ * replacementLinkProblems does) so classification stays linear in a mature registry (1.2.1).
+ * `originals` are the active entries that are not themselves a staged replacement of another
+ * active entry (isStagedReplacement, as rotate S3; RL-07); `staged` maps an original's root key
+ * ID to the first active entry that replaces it; `activeLabels` counts active entries per label.
+ */
+function replacementIndex(mine: RegistryEntry[]) {
+  const activeIds = new Set<string>();
+  const staged = new Map<string, RegistryEntry>();
+  const activeLabels = new Map<string, number>();
+  for (const entry of mine) {
+    if (entry.status !== 'active') continue;
+    activeIds.add(entry.rootKeyId);
+    if (entry.replaces !== null && !staged.has(entry.replaces)) staged.set(entry.replaces, entry);
+    if (entry.label !== null) activeLabels.set(entry.label, (activeLabels.get(entry.label) ?? 0) + 1);
+  }
+  const originals = mine.filter(entry => entry.status === 'active' && !(entry.replaces !== null && activeIds.has(entry.replaces)));
+  return { originals, staged, activeLabels };
+}
+
+/**
+ * Generated replacement file names that differ only in case (labels Alice and alice, both valid
+ * on one node) name the same file on a case-insensitive file system (Windows, default macOS),
+ * where the second stage would fail on the first one's file and a rerun would fail again.
+ * Labels are ASCII ([A-Za-z][A-Za-z0-9._-]*), so ASCII lower case is the file systems' folding.
+ */
+function caseCollision(labels: string[]): [string, string] | null {
+  const seen = new Map<string, string>();
+  for (const label of labels) {
+    const folded = label.toLowerCase();
+    const earlier = seen.get(folded);
+    if (earlier !== undefined && earlier !== label) return [earlier, label];
+    seen.set(folded, label);
+  }
+  return null;
 }
 
 function connection(request: Request): string[] {
@@ -176,11 +212,12 @@ async function runSteps(args: string[], deps: Deps): Promise<RespondOutput> {
   // is tampering and is reported instead of trusted (it could hide a credential from the batch).
   // A chain or cycle of links would otherwise make originals() drop live credentials.
   const tampered = replacementLinkProblems(mine)[0];
+  const index = replacementIndex(mine);
   if (tampered) return fail(3, 'P5', `registry tampering: root key ID ${tampered.rootKeyId} claims to replace ${tampered.replaces}, but ${tampered.problem}; restore the registry from a trusted copy`, warnings);
   // Whether a credential is a canary is decided by its file, not by the editable registry caveat list:
   // a custom caveat the registry does not record would let the batch rotate a canary into an
   // ordinary credential. Refused before any mutation, like a forged replacement link.
-  for (const entry of originals(mine)) {
+  for (const entry of index.originals) {
     if (hasCustomCaveat(entry)) continue;
     const file = await readCredential(entry.outPath, deps);
     if (file && file.facts.fingerprint === entry.fingerprint && file.facts.caveats.some(caveat => caveat.type === 'lnd-custom'))
@@ -198,10 +235,10 @@ async function runSteps(args: string[], deps: Deps): Promise<RespondOutput> {
   };
   // revoke resolves a label among this node's active entries; where that is ambiguous, advice names the ID.
   const target = (entry: RegistryEntry) => entry.label !== null
-    && mine.filter(other => other.status === 'active' && other.label === entry.label).length === 1 ? entry.label : entry.rootKeyId;
+    && index.activeLabels.get(entry.label) === 1 ? entry.label : entry.rootKeyId;
   const items: RespondItem[] = [];
-  for (const entry of originals(mine).sort((a, b) => byId(a.rootKeyId, b.rootKeyId))) {
-    const staged = stagedReplacement(mine, entry);
+  for (const entry of [...index.originals].sort((a, b) => byId(a.rootKeyId, b.rootKeyId))) {
+    const staged = index.staged.get(entry.rootKeyId);
     const base = { label: entry.label, rootKeyId: entry.rootKeyId, grade: entry.grade,
       replacementRootKeyId: staged?.rootKeyId ?? null, replacementFingerprint: staged?.fingerprint ?? null,
       outPath: staged?.outPath ?? null, error: null, proof: null };
@@ -255,7 +292,9 @@ async function runSteps(args: string[], deps: Deps): Promise<RespondOutput> {
   const incomplete = items.filter(item => item.status === 'failed');
   for (const item of incomplete) result.unproven.push({ label: item.label, rootKeyId: item.rootKeyId,
     reason: `replacement root key ID ${item.replacementRootKeyId} incomplete: revoke it by ID, then stage again` });
-  const bakingFirst = (item: RespondItem) => baking.includes(item.rootKeyId) ? 0 : 1;
+  const bakingIds = new Set(baking);
+  const bakingFirst = (item: RespondItem) => bakingIds.has(item.rootKeyId) ? 0 : 1;
+  const mineById = firstById(mine);
   const selected = items.filter(item => item.action === (request.finish ? 'finish' : 'stage'))
     .sort((a, b) => bakingFirst(a) - bakingFirst(b) || byId(a.rootKeyId, b.rootKeyId));
   for (const item of items) {
@@ -268,9 +307,8 @@ async function runSteps(args: string[], deps: Deps): Promise<RespondOutput> {
       // A credential that already replaced a now-revoked one (an earlier finish, or a past
       // rotation) has nothing to finish; telling the operator to stage it would invite a
       // needless second rotation.
-      const entry = mine.find(candidate => candidate.rootKeyId === item.rootKeyId);
-      const replacedRevoked = entry?.replaces != null
-        && mine.some(old => old.rootKeyId === entry.replaces && old.status === 'revoked');
+      const entry = mineById.get(item.rootKeyId);
+      const replacedRevoked = entry?.replaces != null && revokedIds.has(entry.replaces);
       if (replacedRevoked) { item.status = 'finished-earlier'; item.note = `replaces root key ID ${entry!.replaces}, already revoked: nothing to finish`; }
       else { item.status = 'not-staged'; item.note = 'no replacement staged: run macwarden respond --out-dir <directory> first'; }
     }
@@ -289,6 +327,10 @@ async function runSteps(args: string[], deps: Deps): Promise<RespondOutput> {
     const outName = outputNameProblem(outDir)
       ?? selected.map(item => outputNameProblem(join(outDir, `${item.label}.macaroon`))).find(problem => problem !== null) ?? null;
     if (outName) return fail(3, 'P6', `output path refused: ${outName}`, warnings);
+    const collision = caseCollision(selected.map(item => item.label!));
+    if (collision) return fail(3, 'P6', `output path refused: labels ${collision[0]} and ${collision[1]} map to the same file ` +
+      `name on a case-insensitive file system (${collision[0]}.macaroon, ${collision[1]}.macaroon); nothing was staged. ` +
+      `Stage one of them on its own with macwarden rotate <label> --out <path>, then rerun this command`, warnings);
     try { await deps.fs.mkdir(outDir, { mode: 0o700 }); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return fail(3, 'P6', 'cannot create output directory', warnings); }
     try { if (!(await deps.fs.stat(outDir)).isDirectory()) return fail(3, 'P6', 'output path is not a directory', warnings); }
@@ -336,9 +378,10 @@ async function runSteps(args: string[], deps: Deps): Promise<RespondOutput> {
   if (request.finish && !interrupted) {
     const after = await listIds(lnd).then(list => new Set(list.map(id => id.toString())), () => null);
     const current = await openRegistry(request.registry, { fs: deps.fs, env: deps.env }).then(view => view.entries).catch(() => mine);
+    const currentById = firstById(current.filter(entry => entry.nodePubkey.toLowerCase() === pubkey));
     for (const item of selected.filter(entry => entry.status === 'finished')) {
-      const old = current.find(entry => entry.nodePubkey.toLowerCase() === pubkey && entry.rootKeyId === item.rootKeyId);
-      const next = current.find(entry => entry.nodePubkey.toLowerCase() === pubkey && entry.rootKeyId === item.replacementRootKeyId);
+      const old = currentById.get(item.rootKeyId);
+      const next = item.replacementRootKeyId === null ? undefined : currentById.get(item.replacementRootKeyId);
       const oldCredential = await verdict(lnd, await readCredential(old?.outPath ?? null, deps), old?.fingerprint ?? null);
       const newCredential = await verdict(lnd, await readCredential(next?.outPath ?? null, deps), next?.fingerprint ?? null);
       const oldAbsent = after === null ? null : !after.has(item.rootKeyId);

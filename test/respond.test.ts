@@ -251,3 +251,46 @@ it('RESPOND/MW110-09 planning checks ListPermissions for snapshot drift itself, 
   expect((await respond(['--dry-run', ...flags], f.deps)).error).toMatchObject({ code: 4, step: 'P2' });
   expect(f.lnd.calls).toEqual([]);
 });
+
+it('F13/P6 labels that differ only in case (Alice, alice) are refused before anything is staged, naming both', async () => {
+  const { f, outDir } = setup(f => [f.old, entry(bobId, 'alice')]);
+  const before = readFileSync(f.registry);
+  const output = await respond(['--out-dir', outDir, '--yes', ...f.flags], f.deps);
+  expect(output.error).toMatchObject({ code: 3, step: 'P6' });
+  expect(output.error!.message).toContain('labels Alice and alice map to the same file name on a case-insensitive file system');
+  expect(output.error!.message).toContain('nothing was staged');
+  // Refused before the output directory or any replacement exists, and before any LND change.
+  expect(existsSync(outDir)).toBe(false);
+  expect(mutations(f)).toEqual([]);
+  expect(readFileSync(f.registry).equals(before)).toBe(true);
+  // The dry-run plan still lists both credentials; only staging both in one batch is refused.
+  const plan = result(await respond(['--dry-run', ...f.flags], f.deps));
+  expect(plan.items.map(item => item.label)).toEqual(['Alice', 'alice']);
+});
+
+it('O07/P5 classification grows linearly with the registry (replacement relationships indexed once per snapshot)', async () => {
+  const { f } = setup();
+  const template = { ...f.old, outPath: null };
+  const base = 5_000_000n;
+  const prepare = (size: number) => {
+    // Originals, every second one with a staged (incomplete, so never read from disk) replacement.
+    const rows = [];
+    for (let i = 0; i < size; i++) {
+      const id = String(base + BigInt(i) * 2n);
+      rows.push({ ...template, rootKeyId: id, label: `L${i}` });
+      if (i % 2 === 0) rows.push({ ...template, rootKeyId: String(base + BigInt(i) * 2n + 1n), label: `L${i}`, replaces: id,
+        verified: false, fingerprint: null });
+    }
+    const ids = [0n, ownId, ...rows.map(row => BigInt(row.rootKeyId))];
+    return async () => {
+      f.save(rows);
+      f.lnd.ids = ids;
+      const output = await runRespond(['--dry-run', ...f.flags], f.deps);
+      expect(output.error).toBeNull();
+    };
+  };
+  const { growth, LINEAR_4X } = await import('./helpers/growth.js');
+  // At this size the earlier whole-registry searches measured a ratio near 12 (quadratic); indexed, near 4.
+  const measured = await growth(prepare, 2500, 4);
+  expect(measured.ratio, measured.summary).toBeLessThan(LINEAR_4X);
+}, 120_000);

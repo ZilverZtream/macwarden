@@ -273,3 +273,24 @@ it('CP-027/revoke-live-flow command root-zero refusal remains before all LND cal
   const before = bytes(f); failure(await invoke(f, ['--yes', '--unregistered'], '0'), 2, 'V1');
   expect(f.calls).toEqual([]); unchanged(f, before); released(f);
 }));
+
+it.each(['rejected', 'by-id-only'] as const)(
+  'F12/V13 a recorded-revoked root key held again by LND (backup restore) is re-revoked with this run\'s time and evidence (old evidence %s)',
+  async oldEvidence => scratch(async f => {
+    const earlier = '2026-09-02T00:00:00.000Z';
+    // The registry already records the revocation; LND holds the root key again.
+    save(f, [{ ...f.target, status: 'revoked', revokedAt: earlier, revokeEvidence: oldEvidence }, f.other]);
+    f.lnd.deleteMacaroonId.mockImplementation(async id => {
+      f.calls.push('DeleteMacaroonID'); f.ids.splice(f.ids.indexOf(String(id)), 1); return { deleted: true };
+    });
+    // This run cannot prove rejection (an unreadable default file): evidence differs from the old record.
+    f.lnd.checkMacaroon.mockImplementation(async () => { f.calls.push('CheckMacaroonPermissions'); return { valid: false, reason: 'other', message: 'x' } as never; });
+    const result = await invoke(f, ['--yes'], maxId);
+    success(f, result, 'by-id-only');
+    expect(f.lnd.deleteMacaroonId).toHaveBeenCalledTimes(1);
+    const row = result.result!.entry as Record<string, unknown>;
+    expect(row).toMatchObject({ revokedAt: instant, revokeEvidence: 'by-id-only' });
+    expect(row.revokeEvidence).toBe(result.result!.evidence);
+    expect(result.warnings).toContainEqual({ code: 'revoked-but-present',
+      message: expect.stringContaining(`recorded revoked at ${earlier} (evidence ${oldEvidence})`) });
+  }));

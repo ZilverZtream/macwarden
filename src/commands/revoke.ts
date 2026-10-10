@@ -289,6 +289,16 @@ async function runSteps(args: string[], deps: Deps, warnings: OutputResult['warn
       const existing = registry.find(pubkey, id.toString());
       if (existing) {
         if (existing.status === 'active') registry.markRevoked(pubkey, id.toString(), revokedAt, proof);
+        else if (existing.status === 'revoked' && !repaired) {
+          // Revoked but present (a node backup restored the root key, 1.2.1): this run deleted it
+          // again, so the entry records this run's time and evidence, matching the result; the
+          // earlier event is kept in the warning. The registry lock is held (V10).
+          warnings.push({ code: 'revoked-but-present', message: `root key ID ${id.toString()} was recorded revoked at ` +
+            `${existing.revokedAt ?? 'an unknown time'} (evidence ${existing.revokeEvidence ?? 'unknown'}) but LND held it ` +
+            `again; this run deleted it and the entry now records this revocation` });
+          existing.revokedAt = revokedAt;
+          existing.revokeEvidence = proof;
+        }
         revokedEntry = existing;
       } else {
         const facts = target?.facts;

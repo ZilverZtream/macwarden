@@ -1,4 +1,5 @@
 import * as fs from 'node:fs/promises';
+import { Cancelled } from '../cancellation.js';
 import { unsafeNodeDiagnostics } from '../environment.js';
 import type { Readable } from 'node:stream';
 import { decodeL402, decodeMacaroon, decodeNwc, decodeRune, isL402Container, isL402Macaroon, isNwcContainer, isRuneContainer,
@@ -112,6 +113,9 @@ export async function run(args: string[], deps: Deps): Promise<OutputResult> {
     const result = macaroonResult(secret, deps.clock());
     return { command: 'inspect', ok: true, warnings, result, error: null };
   } catch (error) {
+    // An interrupt while waiting on stdin or a file is not a failure of this command: the CLI
+    // reports it as exit 6 (1.2.1).
+    if (error instanceof Cancelled) throw error;
     if (error instanceof UsageError) return fail(2, null, error.message, warnings);
     if (error instanceof InputError) return fail(3, error.stage, error.message, warnings);
     if (error instanceof DecodeError) return fail(3, error.stage, error.message, warnings);
