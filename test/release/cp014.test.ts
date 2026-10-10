@@ -174,9 +174,12 @@ it('CP-014/B5 CI keeps its triggers and pins and tests the supported platforms a
   const unit = entries.filter(job => ['ubuntu-latest', 'windows-latest'].every(platform => job.includes(platform)));
   expect(unit).toHaveLength(1);
   for (const node of ['22.23.2', '22.x', '24.18.1', '24.x']) expect(unit[0]).toContain(`'${node}'`);
-  const steps = ['npm ci', 'npm run lint', 'npm run build', 'npm test'].map(step => unit[0].indexOf(`run: ${step}`));
+  // npm test builds first (pretest), then the harness-docs project runs: both Vitest projects gate CI.
+  const steps = ['npm ci', 'npm run lint', 'npm test', 'npm run test:harness'].map(step => unit[0].indexOf(`run: ${step}`));
   expect(steps.every(at => at >= 0)).toBe(true);
   expect([...steps].sort((a, b) => a - b)).toEqual(steps);
+  expect(unit[0]).not.toContain('run: npm run build');
+  expect(packageJson().scripts.pretest).toBe('npm run build');
   expect(text).not.toMatch(/macos/i);
   expect(entries.some(job => job.includes('ubuntu-latest') &&
     job.indexOf('npm run fixture:up') >= 0 &&

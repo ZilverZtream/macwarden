@@ -32,8 +32,10 @@ jobs:
           node-version: ${{ matrix.node }}
       - run: npm ci
       - run: npm run lint
-      - run: npm run build
+      # npm test builds first (pretest), so the tests always run against a fresh dist.
       - run: npm test
+      # The harness, documentation and configuration contracts are a separate Vitest project.
+      - run: npm run test:harness
   oracle:
     runs-on: ubuntu-latest
     timeout-minutes: 60

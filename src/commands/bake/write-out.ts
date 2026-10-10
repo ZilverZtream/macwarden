@@ -1,5 +1,6 @@
 import { revealSecret } from '../../secret-capability.js';
 import * as nodeFs from 'node:fs/promises';
+import { dirname } from 'node:path';
 import type { Secret } from '../../secret.js';
 import { outputNameProblem } from '../../protected-path.js';
 import { PrivateFileError, reserveOwnerOnly } from '../../private-file.js';
@@ -43,6 +44,7 @@ export async function reserveOut(path: string, fs: typeof nodeFs = nodeFs): Prom
         await handle.sync();
         await handle.close();
         written = true;
+        await syncDirectory(path, fs);
       },
       async discard() {
         if (written) return;
@@ -51,4 +53,17 @@ export async function reserveOut(path: string, fs: typeof nodeFs = nodeFs): Prom
       },
     },
   };
+}
+
+// The new name is durable only once its directory entry is, as for the registry save
+// (src/registry/index.ts): POSIX needs the directory synced. Best effort: some file systems
+// refuse to sync a directory, and Windows has no such call. The file itself is already synced.
+async function syncDirectory(path: string, fs: typeof nodeFs): Promise<void> {
+  if (process.platform === 'win32') return;
+  let directory: nodeFs.FileHandle | undefined;
+  try {
+    directory = await fs.open(dirname(path), 'r');
+    await directory.sync();
+  } catch { /* EISDIR, EINVAL, EPERM and similar: nothing more can be done. */ }
+  finally { await directory?.close().catch(() => {}); }
 }

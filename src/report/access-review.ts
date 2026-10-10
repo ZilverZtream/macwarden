@@ -148,9 +148,10 @@ const COLUMNS: [string, (item: ReviewedCredential) => string][] = [
  * Columns after the credential columns: the controls that name this row, then report-level
  * fields repeated on every row, so the CSV stays one table with one header row.
  */
-const REPORT_COLUMNS: [string, (review: AccessReview, item: ReviewedCredential) => string][] = [
-  ['controls', (review, item) => naming(review, item).map(control => control.control).join('; ')],
-  ['control_observations', (review, item) => naming(review, item).map(control => `${control.control}: ${control.observation}`).join(' | ')],
+type Control = AccessReview['controls'][number];
+const REPORT_COLUMNS: [string, (review: AccessReview, item: ReviewedCredential, naming: readonly Control[]) => string][] = [
+  ['controls', (_review, _item, naming) => naming.map(control => control.control).join('; ')],
+  ['control_observations', (_review, _item, naming) => naming.map(control => `${control.control}: ${control.observation}`).join(' | ')],
   ['generated_at', review => review.generatedAt], ['macwarden_version', review => review.macwardenVersion],
   ['node_pubkey', review => review.node.pubkey], ['node_alias', review => review.node.alias],
   ['node_network', review => review.node.network], ['node_version', review => review.node.version],
@@ -158,8 +159,19 @@ const REPORT_COLUMNS: [string, (review: AccessReview, item: ReviewedCredential) 
   ['limitations', review => review.limitations],
 ];
 
-function naming(review: AccessReview, item: ReviewedCredential): AccessReview['controls'] {
-  return review.controls.filter(control => control.rootKeyIds.includes(item.rootKeyId));
+/**
+ * The controls that name each root key ID, in control order, indexed once per report: a
+ * search of every control's ID list for each row made a large CSV report quadratic.
+ */
+function controlsNaming(review: AccessReview): (item: ReviewedCredential) => readonly Control[] {
+  const index = new Map<string, Control[]>();
+  for (const control of review.controls) {
+    for (const id of new Set(control.rootKeyIds)) {
+      const naming = index.get(id);
+      if (naming) naming.push(control); else index.set(id, [control]);
+    }
+  }
+  return item => index.get(item.rootKeyId) ?? [];
 }
 
 /** RFC 4180 field; a leading formula character is neutralised so spreadsheets never evaluate it. */
@@ -178,9 +190,12 @@ function markdownCell(value: string): string {
 export function formatAccessReview(review: AccessReview, format: ReportFormat): string {
   const safe = cleanReview(review);
   if (format === 'json') return `${JSON.stringify(safe, null, 2)}\n`;
-  if (format === 'csv') return [[...COLUMNS, ...REPORT_COLUMNS].map(([name]) => name).join(','),
-    ...safe.credentials.map(item => [...COLUMNS.map(([, value]) => value(item)), ...REPORT_COLUMNS.map(([, value]) => value(safe, item))]
-      .map(csvField).join(','))].join('\r\n') + '\r\n';
+  if (format === 'csv') {
+    const naming = controlsNaming(safe);
+    return [[...COLUMNS, ...REPORT_COLUMNS].map(([name]) => name).join(','),
+      ...safe.credentials.map(item => [...COLUMNS.map(([, value]) => value(item)),
+        ...REPORT_COLUMNS.map(([, value]) => value(safe, item, naming(item)))].map(csvField).join(','))].join('\r\n') + '\r\n';
+  }
   const node = safe.node;
   const lines = [
     `# Lightning credential access review`, '',
