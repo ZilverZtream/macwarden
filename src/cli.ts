@@ -92,16 +92,21 @@ let interruptWritten = false;
 /** Whether this process wrote an interrupt result (exit 6 or 7, step `cancelled`). */
 export function interruptedCompletion(): boolean { return interruptWritten; }
 
-/** Resolves once stdout and stderr hold no unwritten output (or are closed). */
+/**
+ * Resolves once stdout and stderr hold no unwritten output (or are closed), or after
+ * FLUSH_LIMIT_MS. A write that stayed under the high-water mark emits no 'drain' when it
+ * completes (pipes write asynchronously on POSIX), so completion is observed by polling the
+ * queue length rather than by waiting for an event.
+ */
 export async function flushStandardStreams(): Promise<void> {
-  await Promise.all([process.stdout, process.stderr].map(stream => new Promise<void>(resolve => {
-    if (closedStreams.has(stream) || stream.destroyed || stream.writableLength === 0) { resolve(); return; }
-    const done = () => { stream.off('drain', done); stream.off('close', done); stream.off('error', done); resolve(); };
-    stream.once('drain', done);
-    stream.once('close', done);
-    stream.once('error', done);
-  })));
+  const deadline = Date.now() + FLUSH_LIMIT_MS;
+  const pending = (stream: NodeJS.WriteStream) => !closedStreams.has(stream) && !stream.destroyed && stream.writableLength > 0;
+  while ([process.stdout, process.stderr].some(pending) && Date.now() < deadline) {
+    await new Promise<void>(resolve => setTimeout(resolve, 5));
+  }
 }
+
+const FLUSH_LIMIT_MS = 2_000;
 
 async function write(result: OutputResult, mode: Mode): Promise<void> {
   if (result.error?.step === 'cancelled' && (result.error.code === 6 || result.error.code === 7)) interruptWritten = true;

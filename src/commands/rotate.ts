@@ -18,7 +18,8 @@ import { DecodeError, LndError, LndUncertainError, UsageError } from '../errors.
 import { Secret } from '../secret.js';
 import { rotateConfirmation, rotatePlanResult, writeRotateFinishPlan, writeRotateStagePlan, writeRotatePrompt,
   type OutputResult, type RotatePlan, type RotateStagedResult, type RotateFinishedResult } from '../output/index.js';
-import { namesRegistryFile, REGISTRY_OUT_REFUSAL, reserveOut, type ReservedOut } from './bake/write-out.js';
+import { namesRegistryFile, REGISTRY_OUT_REFUSAL } from './bake/out-registry.js';
+import { reserveOut, type ReservedOut } from './bake/write-out.js';
 import { reserveFailure } from './bake/out-errors.js';
 import { allocateRootKeyId } from './bake/allocate.js';
 

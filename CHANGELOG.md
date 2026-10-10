@@ -103,6 +103,10 @@ Security and robustness release from an external audit of 1.2.0 and a second aud
 - `watch`: `lastAttributionDrop` in the usage file takes watch's clock, like every other usage time, and never moves back when the clock steps back.
 - `scan --git-history`: `summary.dropped` no longer counts again a committed file that the work tree holds unchanged at the same path; the walk already counted it (walk 2, history 2, was 4).
 - Windows owner-only checks read the whole access list of a file through the helper with a 64 KiB output limit, so a file under a directory with hundreds of inherited entries failed as "cannot verify" (and a new file as "cannot reserve") although nothing was wrong with it. The limit is now 4 MiB, above the largest access list NTFS stores.
+- examples/payment-lab: only gRPC code 5 is LND's NotFound; a 404 without it (a proxy's `{"message":"Not Found"}`, Kong's "no Route matched") is neither NotFound nor a definite refusal, so it no longer fails or reverts an uncertain payment or decides a `creating` invoice.
+- examples/payment-lab: amounts and indexes above 2^63 − 1 are a usage error (exit 2) instead of a SQLite bind crash (exit 4); a fee limit whose sum with the amount passes 2^63 is a budget refusal (exit 3); budget totals are summed exactly; LND amounts, indexes and times outside int64 are an unreadable answer, while channel IDs keep the full uint64 range.
+- examples/payment-lab: `receiver reconcile` counts each invoice exactly once (resolved, open or unknown); a not-created invoice LND does not hold counts resolved; settled and canceled invoices count resolved also when the pass is stopped.
+- examples/payment-lab: an invoice recorded canceled that LND reports settled is recorded settled with its amount and settle index; canceled stays final for a replayed OPEN or ACCEPTED.
 
 
 ### Added

@@ -14,7 +14,8 @@ import { openRegistry, RegistryInputError, RegistryUsageError, type RegistryEntr
 import { DecodeError, LndError, LndUncertainError, UsageError } from '../../errors.js';
 import { Secret } from '../../secret.js';
 import type { OutputResult } from '../../output/index.js';
-import { namesRegistryFile, registryPath, REGISTRY_OUT_REFUSAL, reserveOut, type ReservedOut } from './write-out.js';
+import { namesRegistryFile, registryPath, REGISTRY_OUT_REFUSAL } from './out-registry.js';
+import { reserveOut, type ReservedOut } from './write-out.js';
 import { reserveFailure } from './out-errors.js';
 import { allocateRootKeyId } from './allocate.js';
 import { canaryCondition, canaryConfigPath, ensureCanaryConfig, newCondition } from '../../watch/canary.js';

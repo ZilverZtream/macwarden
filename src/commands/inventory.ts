@@ -12,7 +12,8 @@ import { inventoryResult, type InventoryResult, type OutputResult } from '../out
 import { readUsage, usagePath, type UsageStore } from '../watch/usage.js';
 import { buildAccessReview, formatAccessReview, REPORT_FORMATS, type ReportFormat } from '../report/access-review.js';
 import { macwardenVersion } from '../version.js';
-import { namesRegistryFile, registryPath, REGISTRY_OUT_REFUSAL, reserveOut } from './bake/write-out.js';
+import { namesRegistryFile, registryPath, REGISTRY_OUT_REFUSAL } from './bake/out-registry.js';
+import { reserveOut } from './bake/write-out.js';
 import { reserveFailure } from './bake/out-errors.js';
 
 type ReadLnd = LndAdapter;
