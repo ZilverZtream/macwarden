@@ -607,7 +607,7 @@ Each point is covered by a test that kills the worker with SIGKILL there, restar
 
 ## Ledger
 
-The lab's books are double-entry: every event that moves or commits money posts one journal entry whose debits equal its credits, in the same `BEGIN IMMEDIATE` transaction as the state change that caused it. The state change and its entry commit together or not at all; there is no point between them for a crash to land on. Each payer and receiver profile keeps its own journal in its own database file; both use one chart of accounts (`src/ledger/accounts.ts`).
+The lab's books are double-entry: every event that moves or commits money posts one journal entry whose debits equal its credits, in the same `BEGIN IMMEDIATE` transaction as the state change that caused it. The state change and its entry commit together or not at all; there is no point between them for a crash to land on. Each payer and receiver profile keeps its own journal in its own database file; both use one chart of accounts (`src/ledger/accounts.ts`). A payment hash gets one settlement entry, whichever comes first: if LND later reports the same invoice settled for a different amount, the receiver posts nothing, leaves the order as it was, and records the delivery as `settlement-amount-conflict`.
 
 | Account | What it carries |
 | --- | --- |
