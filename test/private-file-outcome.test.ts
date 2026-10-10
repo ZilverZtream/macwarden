@@ -7,7 +7,7 @@ type Prefix = 'CREATED ' | 'EXISTS';
 const later = <T>(value: T) => new Promise<T>(settle => setTimeout(() => settle(value), 5));
 const helper = (replies: Record<Prefix, Promise<string | null>>) => ({ next: (prefix: string) => replies[prefix as Prefix] });
 
-it('a helper that exits without a reply is a failure, whichever wait settles first', async () => {
+it('PRIVATE-FILE/helper-exit a helper that exits without a reply is a failure, whichever wait settles first', async () => {
   expect(await creationOutcome(helper({ 'EXISTS': Promise.resolve(null), 'CREATED ': later(null) }))).toEqual({ kind: 'failed' });
   expect(await creationOutcome(helper({ 'CREATED ': Promise.resolve(null), 'EXISTS': later(null) }))).toEqual({ kind: 'failed' });
   expect(await creationOutcome(helper({ 'CREATED ': Promise.resolve(null), 'EXISTS': Promise.resolve(null) }))).toEqual({ kind: 'failed' });

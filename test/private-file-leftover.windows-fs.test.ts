@@ -3,6 +3,7 @@
 // reserveOwnerOnly failed and left the empty file behind, so the next run refused the path with
 // "output file already exists". Now the file the helper evidently created (absent before the call,
 // a regular empty file after) is removed; anything that existed before, or holds data, is kept.
+// Windows variant (scripts/platform-variants.mjs): the helper exists only there.
 import { EventEmitter } from 'node:events';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -45,7 +46,7 @@ const failures: Array<[string, Plan]> = [
 ];
 
 for (const [name, steps] of failures) {
-  it.runIf(process.platform === 'win32')(`the helper's empty file is removed when ${name}`, async () => {
+  it(`the helper's empty file is removed when ${name}`, async () => {
     const path = join(dir(), 'out.macaroon');
     plan = () => steps;
     await expect(reserveOwnerOnly(path)).rejects.toBeInstanceOf(PrivateFileError);
@@ -53,7 +54,7 @@ for (const [name, steps] of failures) {
   });
 }
 
-it.runIf(process.platform === 'win32')('a file that existed before the call is never removed', async () => {
+it('a file that existed before the call is never removed', async () => {
   const path = join(dir(), 'out.macaroon');
   writeFileSync(path, '');
   plan = () => ({ lines: ['CREATED {"sid":"bogus"}'] });
@@ -61,7 +62,7 @@ it.runIf(process.platform === 'win32')('a file that existed before the call is n
   expect(existsSync(path)).toBe(true);
 });
 
-it.runIf(process.platform === 'win32')('a file that holds data is never removed', async () => {
+it('a file that holds data is never removed', async () => {
   const path = join(dir(), 'out.macaroon');
   plan = () => ({ create: 'not ours', lines: [] });
   await expect(reserveOwnerOnly(path)).rejects.toBeInstanceOf(PrivateFileError);
