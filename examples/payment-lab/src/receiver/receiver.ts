@@ -157,6 +157,7 @@ export async function createInvoice(deps: ReceiverDeps, input: { orderId: string
     const state = deps.store.markCreated(paymentHash, created.paymentRequest, created.addIndex);
     if (state === 'not-created') return await lateCreation(deps, paymentHash, undefined);
     deps.emit({ event: 'invoice-created', orderId: input.orderId, paymentHash, rpc: input.hold ? 'AddHoldInvoice' : 'AddInvoice' });
+    if (deps.store.isSuperseded(paymentHash)) return await supersededOnCreation(deps, paymentHash, undefined);
     return { kind: 'created', paymentHash, paymentRequest: created.paymentRequest };
   } catch (error) {
     return await resolveCreation(deps, paymentHash, error);
@@ -198,7 +199,87 @@ async function resolveCreation(deps: ReceiverDeps, paymentHash: string, error: u
     return await lateCreation(deps, paymentHash, found);
   }
   apply(deps, found, 'create-call');
+  if (deps.store.isSuperseded(paymentHash)) return await supersededOnCreation(deps, paymentHash, found);
   return { kind: 'created', paymentHash, paymentRequest: found.paymentRequest };
+}
+
+/** The order was fulfilled by another invoice while this one's create call was in flight: it is canceled as it turns up. */
+async function supersededOnCreation(deps: ReceiverDeps, paymentHash: string, found: Invoice | undefined): Promise<CreateOutcome> {
+  const record = deps.store.invoice(paymentHash);
+  const result = record === undefined ? 'failed' : await supersede(deps, record, found);
+  const what = `order ${record?.orderId} was fulfilled by another invoice while the create call for ${paymentHash} was in flight`;
+  if (result === 'canceled') return { kind: 'not-created', paymentHash, reason: `${what}; the invoice was canceled in LND` };
+  if (result === 'paid') return { kind: 'unresolved', paymentHash, reason: `${what}; it was paid before it could be canceled (second-payment)` };
+  return { kind: 'unresolved', paymentHash, reason: `${what}; canceling it in LND failed; run "receiver reconcile" to try again` };
+}
+
+/**
+ * One reconciliation pass: the invoices whose superseded cancel was already tried in
+ * it (one CancelInvoice per invoice per pass), and how many of those failed.
+ */
+interface Pass { handled: Set<string>; failed: number }
+
+/**
+ * A superseded invoice: its order was fulfilled by another invoice (an invoice recorded
+ * not-created that turned up late and was paid first), and it is still `creating`,
+ * `open` or `accepted` in the record. The rule: it is canceled in LND with
+ * CancelInvoice in the same step that fulfills the order (whichever invoice settles
+ * first fulfills it), so the customer cannot pay the order twice; an accepted HTLC
+ * returns to the payer. One whose create call is still in flight is canceled as soon
+ * as it turns up (the create call's answer, the subscription, a reconciliation
+ * lookup). Until LND reports it canceled, every reconciliation pass tries again
+ * (`superseded-invoice-cancel-failed`). If it was paid before the cancel reached LND,
+ * the payment is a `second-payment`: posted, reported, to be returned.
+ *
+ * `found` is LND's state, already applied by the caller; without it, it is looked up.
+ */
+async function supersede(deps: ReceiverDeps, record: InvoiceRecord, found: Invoice | undefined, pass?: Pass):
+  Promise<'canceled' | 'paid' | 'waiting' | 'failed' | 'skipped'> {
+  const { paymentHash, orderId } = record;
+  if (pass?.handled.has(paymentHash)) return 'skipped';
+  pass?.handled.add(paymentHash);
+  const what = `order ${orderId} was fulfilled by another invoice, and its invoice ${paymentHash} was still ${record.state}`;
+  const failed = (reason: string): 'failed' => {
+    deps.emit({ event: 'superseded-invoice-cancel-failed', orderId, paymentHash, reason: `${what}; ${reason}; the next reconciliation tries again` });
+    if (pass !== undefined) pass.failed += 1;
+    return 'failed';
+  };
+  let current = found;
+  if (current === undefined) {
+    const looked = await lookup(deps, paymentHash);
+    if (looked === 'not-found' && record.state === 'creating') return 'waiting'; // the create call may still be in flight
+    if (looked === 'not-found' || looked === 'unknown') return failed(`lookup ${looked}`);
+    if (record.state === 'creating') deps.store.markCreated(paymentHash, looked.paymentRequest, looked.addIndex);
+    apply(deps, looked, 'lookup');
+    current = looked;
+  }
+  if (current.state === 'SETTLED') return 'paid';
+  if (current.state !== 'CANCELED') {
+    let callError: unknown;
+    try {
+      await deps.api.cancelInvoice(paymentHash);
+      deps.emit({ event: 'cancel-called', orderId, paymentHash, rpc: 'CancelInvoice', reason: what });
+    } catch (error) {
+      callError = error;
+    }
+    const after = await lookup(deps, paymentHash);
+    if (after !== 'not-found' && after !== 'unknown') apply(deps, after, 'lookup');
+    if (after !== 'not-found' && after !== 'unknown' && after.state === 'SETTLED') return 'paid';
+    if (after === 'not-found' || after === 'unknown' || after.state !== 'CANCELED') {
+      return failed(`CancelInvoice ${callError === undefined ? 'sent' : `failed: ${describeError(callError)}`}, `
+        + `invoice ${after === 'not-found' || after === 'unknown' ? `lookup ${after}` : after.state}`);
+    }
+  }
+  deps.emit({ event: 'superseded-invoice-canceled', orderId, paymentHash, reason: `${what}; it was canceled in LND` });
+  return 'canceled';
+}
+
+/** After a delivery that fulfilled an order: cancels every superseded invoice of the order, in the same step. */
+async function supersedeOthers(deps: ReceiverDeps, outcome: DeliveryOutcome, paymentHash: string, pass?: Pass): Promise<void> {
+  if (outcome !== 'fulfilled') return;
+  const orderId = deps.store.invoice(paymentHash)?.orderId;
+  if (orderId === undefined) return;
+  for (const record of deps.store.supersededInvoices(orderId)) await supersede(deps, record, undefined, pass);
 }
 
 export type LateOutcome =
@@ -222,10 +303,13 @@ export type LateOutcome =
  *   fulfilled by another invoice it is not fulfilled again; the delivery is
  *   `second-payment` and the operator is told to return the money.
  */
-export async function resolveLateInvoice(deps: ReceiverDeps, record: InvoiceRecord, found: Invoice, source: DeliverySource): Promise<LateOutcome> {
+export async function resolveLateInvoice(deps: ReceiverDeps, record: InvoiceRecord, found: Invoice, source: DeliverySource,
+  pass?: Pass): Promise<LateOutcome> {
   const { paymentHash, orderId } = record;
   const what = `LND holds invoice ${paymentHash} (${found.state}) for order ${orderId} after it was recorded as not created`;
   const outcome = apply(deps, found, source);
+  // Paid late, and first: it fulfilled the order, so the order's replacement is canceled now.
+  await supersedeOthers(deps, outcome, paymentHash, pass);
   if (deps.store.invoice(paymentHash)?.state !== 'not-created') {
     const reason = `${what}; the order had no other live invoice, so it was adopted`;
     deps.emit({ event: 'late-invoice-adopted', orderId, paymentHash, lndState: found.state, reason });
@@ -240,7 +324,8 @@ export async function resolveLateInvoice(deps: ReceiverDeps, record: InvoiceReco
     callError = error;
   }
   const after = await lookup(deps, paymentHash);
-  if (after !== 'not-found' && after !== 'unknown') apply(deps, after, 'lookup');
+  // Paid before the cancel reached LND, and first: it fulfilled the order, so the replacement is canceled now.
+  if (after !== 'not-found' && after !== 'unknown') await supersedeOthers(deps, apply(deps, after, 'lookup'), paymentHash, pass);
   if (after !== 'not-found' && after !== 'unknown' && after.state === 'CANCELED') {
     const reason = `${what}; order ${orderId} has another live invoice or no longer awaits payment, so it was canceled in LND`;
     deps.emit({ event: 'late-invoice-canceled', orderId, paymentHash, reason });
@@ -270,6 +355,11 @@ function holdInvoiceFor(deps: ReceiverDeps, orderId: string): InvoiceRecord | st
 /** Releases the preimage of a hold invoice whose HTLCs LND has accepted. */
 export async function settleHoldInvoice(deps: ReceiverDeps, orderId: string): Promise<SettleOutcome> {
   const invoice = holdInvoiceFor(deps, orderId);
+  // Settling a superseded hold invoice would take a second payment for a fulfilled order; it is to be canceled.
+  if (typeof invoice !== 'string' && deps.store.isSuperseded(invoice.paymentHash)) {
+    return { kind: 'refused', reason: `order ${orderId} was already fulfilled by another invoice; invoice ${invoice.paymentHash} is to be `
+      + 'canceled ("receiver reconcile" or "receiver cancel"), not settled' };
+  }
   if (typeof invoice === 'string') return { kind: 'refused', reason: invoice };
   const before = await lookup(deps, invoice.paymentHash);
   if (before === 'not-found' || before === 'unknown') return { kind: 'unresolved', reason: `invoice lookup: ${before}` };
@@ -320,15 +410,18 @@ export async function reconcileInvoices(deps: ReceiverDeps, onlyOrder?: string):
   const targets = onlyOrder === undefined
     ? [...deps.store.unresolvedInvoices(), ...deps.store.lateInvoiceCandidates(recheckSince)]
     : deps.store.invoicesForOrder(onlyOrder);
+  const pass: Pass = { handled: new Set(), failed: 0 };
   for (const invoice of targets) {
     if (invoice.state === 'canceled') continue;
+    // Already canceled (or tried) in this pass, as a superseded invoice of an order fulfilled earlier in it.
+    if (pass.handled.has(invoice.paymentHash)) continue;
     if (invoice.state === 'not-created') {
       // LND may have created it after all (a create call that stalled past the window): cancel or adopt it.
       if (invoice.lateLndState === 'CANCELED' || invoice.lateLndState === 'SETTLED') continue;
       const late = await lookup(deps, invoice.paymentHash);
       if (late === 'unknown') { unknown += 1; continue; }
       if (late === 'not-found') continue;
-      const result = await resolveLateInvoice(deps, invoice, late, 'lookup');
+      const result = await resolveLateInvoice(deps, invoice, late, 'lookup', pass);
       if (result.kind === 'unresolved') unknown += 1; else if (result.kind === 'adopted' && late.state !== 'SETTLED') open += 1; else resolved += 1;
       continue;
     }
@@ -340,10 +433,18 @@ export async function reconcileInvoices(deps: ReceiverDeps, onlyOrder?: string):
       continue;
     }
     if (invoice.state === 'creating') deps.store.markCreated(invoice.paymentHash, found.paymentRequest, found.addIndex);
-    apply(deps, found, 'lookup');
+    const outcome = apply(deps, found, 'lookup');
+    await supersedeOthers(deps, outcome, invoice.paymentHash, pass);
+    if (deps.store.isSuperseded(invoice.paymentHash)) {
+      // Its order was fulfilled by another invoice: cancel it (retried on every pass until LND reports it canceled).
+      const result = await supersede(deps, invoice, found, pass);
+      if (result === 'canceled' || result === 'paid') resolved += 1;
+      continue;
+    }
     if (found.state === 'SETTLED' || found.state === 'CANCELED') resolved += 1; else open += 1;
   }
-  return { resolved, open, unknown };
+  // Failed superseded cancels count as unknown, also those tried in another invoice's step of this pass.
+  return { resolved, open, unknown: unknown + pass.failed };
 }
 
 const BACKOFF_START_MS = 1_000;
@@ -375,6 +476,13 @@ export async function listen(deps: ReceiverDeps, options: { reconcileIntervalMs:
     }
   };
   let reconciling: Promise<void> | undefined;
+  // Superseded cancels started by subscription deliveries, run one after another.
+  let superseding: Promise<void> = Promise.resolve();
+  const supersedeLater = (work: () => Promise<unknown>): void => {
+    superseding = superseding.then(work).then(() => undefined, (error: unknown) => {
+      deps.emit({ event: 'supersede-failed', error: describeError(error) });
+    });
+  };
   const timer = setInterval(() => { reconciling ??= reconcileTick().finally(() => { reconciling = undefined; }); }, options.reconcileIntervalMs);
   try {
     let backoff = BACKOFF_START_MS;
@@ -385,7 +493,16 @@ export async function listen(deps: ReceiverDeps, options: { reconcileIntervalMs:
       const subscription = deps.api.subscribeInvoices(cursor, invoice => {
         backoff = BACKOFF_START_MS;
         // A late invoice (recorded not-created, now open in LND) is canceled by the next reconciliation pass; start one now.
-        if (apply(deps, invoice, 'subscription') === 'late-invoice') reconciling ??= reconcileTick().finally(() => { reconciling = undefined; });
+        const outcome = apply(deps, invoice, 'subscription');
+        if (outcome === 'late-invoice') reconciling ??= reconcileTick().finally(() => { reconciling = undefined; });
+        // A fulfillment cancels the order's superseded invoices at once; so does a superseded invoice turning up in LND.
+        if (outcome === 'fulfilled') supersedeLater(() => supersedeOthers(deps, outcome, invoice.paymentHash));
+        else if ((invoice.state === 'OPEN' || invoice.state === 'ACCEPTED') && deps.store.isSuperseded(invoice.paymentHash)) {
+          supersedeLater(async () => {
+            const record = deps.store.invoice(invoice.paymentHash);
+            if (record !== undefined && deps.store.isSuperseded(record.paymentHash)) await supersede(deps, record, undefined);
+          });
+        }
         return 'continue';
       }, signal);
       if (first) {
@@ -405,5 +522,6 @@ export async function listen(deps: ReceiverDeps, options: { reconcileIntervalMs:
   } finally {
     clearInterval(timer);
     await reconciling;
+    await superseding;
   }
 }

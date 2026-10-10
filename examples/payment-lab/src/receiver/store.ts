@@ -184,6 +184,26 @@ export class ReceiverStore {
       .all(recheckSince).map(invoiceFrom);
   }
 
+  /**
+   * Superseded invoices: those of a fulfilled order that did not fulfill it and are still
+   * `creating`, `open` or `accepted` in the record, so still payable (or about to be) in LND.
+   * This happens when an invoice recorded not-created turns up late and is paid before the
+   * order's replacement; the replacement is then canceled in LND (supersede in receiver.ts).
+   */
+  supersededInvoices(orderId?: string): InvoiceRecord[] {
+    return this.db.prepare(`SELECT invoices.* FROM invoices JOIN orders ON orders.order_id = invoices.order_id
+      WHERE orders.state = 'fulfilled' AND invoices.state IN ('creating', 'open', 'accepted')
+      AND NOT EXISTS (SELECT 1 FROM fulfillments WHERE fulfillments.payment_hash = invoices.payment_hash)
+      AND (? IS NULL OR invoices.order_id = ?) ORDER BY invoices.created_at`).all(orderId ?? null, orderId ?? null).map(invoiceFrom);
+  }
+
+  /** Whether this invoice is superseded (see supersededInvoices). */
+  isSuperseded(paymentHash: string): boolean {
+    return this.db.prepare(`SELECT 1 AS n FROM invoices JOIN orders ON orders.order_id = invoices.order_id
+      WHERE invoices.payment_hash = ? AND orders.state = 'fulfilled' AND invoices.state IN ('creating', 'open', 'accepted')
+      AND NOT EXISTS (SELECT 1 FROM fulfillments WHERE fulfillments.payment_hash = invoices.payment_hash)`).get(paymentHash) !== undefined;
+  }
+
   deliveries(paymentHash: string): { source: string; lndState: string; settleIndex: bigint; outcome: string; receivedAt: string }[] {
     return this.db.prepare('SELECT * FROM deliveries WHERE payment_hash = ? ORDER BY delivery_id').all(paymentHash)
       .map(row => ({ source: text(row, 'source'), lndState: text(row, 'lnd_state'), settleIndex: int(row, 'settle_index'),
