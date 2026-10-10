@@ -2,8 +2,8 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { afterEach, expect, it } from 'vitest';
-import { LIST_LIMIT, LIST_PAGE, TRACK_LIMIT, run } from '../src/commands/reconcile.js';
+import { afterEach, expect, it, vi } from 'vitest';
+import { LIST_LIMIT, LIST_PAGE, MAX_MSAT, RECONCILE_BUDGET_MS, TRACK_LIMIT, run } from '../src/commands/reconcile.js';
 import { LndError } from '../src/errors.js';
 import snapshot from '../src/grade/lnd-permissions.json' with { type: 'json' };
 import type { LndAdapter, LndPayment, PaymentLookup } from '../src/lnd/index.js';
@@ -14,7 +14,7 @@ import { NODE, OTHER_NODE, vector } from './helpers/payment-journal.js';
 const repo = resolve();
 const tmpRoot = process.env.MACWARDEN_TEST_TMP || join(repo, 'test/.tmp');
 const dirs: string[] = [];
-afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+afterEach(() => { vi.restoreAllMocks(); for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
 const BASE = Date.parse('2026-10-09T10:00:00.000Z');
 const at = (seconds: number) => new Date(BASE + seconds * 1_000).toISOString();
@@ -292,21 +292,88 @@ it('RECONCILE/bounds the listing is paged and capped, and per-hash lookups are l
   } });
   const s = setup([start(0), line('registered', 1, { session: 1 })]);
   const output = await reconcile([...s.args, '--since', at(0), '--until', at(100)], endless);
+  expectSchemaValid(output);
   const result = output.result as ReconcileResult;
   expect(pages).toBe(LIST_LIMIT / LIST_PAGE);
   expect(result.lookups).toMatchObject({ listed: LIST_LIMIT, listTruncated: true });
   expect(output.exitCode).toBe(1);
-  expect(output.warnings.map(item => typeof item === 'string' ? item : item.code)).toContain('lookups-limited');
+  expect(output.warnings).toContainEqual({ code: 'lookups-limited',
+    message: `LND's payment listing stopped at ${LIST_LIMIT} payments; narrow the window with --since and --until` });
 
   const many = [start(0), line('registered', 1, { session: 1 }),
     ...Array.from({ length: TRACK_LIMIT + 3 }, (_, index) => payment(2 + index / 1_000, C1, '1', H(`t-${index}`), '1'))];
   const limited = setup(many);
   const trackCalls: string[] = [];
   const looked = await reconcile([...limited.args, '--since', at(0), '--until', at(100)], fakeLnd({ calls: trackCalls }));
+  expectSchemaValid(looked);
   const lookups = (looked.result as ReconcileResult).lookups;
   expect(lookups).toMatchObject({ tracked: TRACK_LIMIT, trackLimited: 3 });
   expect(trackCalls.filter(call => call.startsWith('trackPayment')).length).toBe(TRACK_LIMIT);
   expect((looked.result as ReconcileResult).payments.filter(item => item.settlement.status === 'unknown').length).toBe(3);
+});
+
+it('RECONCILE/budget a listing the 10 minute budget ends is reported as the budget, not the count limit (audit 1.2.1 N2)', async () => {
+  // The budget runs out while the third page is read: the listing stops there, far below LIST_LIMIT.
+  let clock = Date.now();
+  vi.spyOn(Date, 'now').mockImplementation(() => clock);
+  let pages = 0;
+  const slow = fakeLnd({ listPayments: async ({ indexOffset, max }) => {
+    pages += 1;
+    if (pages === 3) clock += RECONCILE_BUDGET_MS + 1;
+    const payments = Array.from({ length: max }, (_, index) => lnd(H(`slow-${indexOffset + BigInt(index)}`), 10, 'succeeded', [], null,
+      indexOffset + BigInt(index) + 1n));
+    return { payments, lastIndexOffset: indexOffset + BigInt(max) };
+  } });
+  const s = setup([start(0), line('registered', 1, { session: 1 })]);
+  const output = await reconcile([...s.args, '--since', at(0), '--until', at(100)], slow);
+  expectSchemaValid(output);
+  expect(pages).toBe(3);
+  expect((output.result as ReconcileResult).lookups).toMatchObject({ listed: 3 * LIST_PAGE, listTruncated: true });
+  expect(output.exitCode).toBe(1);
+  const limited = output.warnings.find(item => typeof item !== 'string' && item.code === 'lookups-limited');
+  expect(limited).toEqual({ code: 'lookups-limited', message: `LND's payment listing stopped after ${3 * LIST_PAGE} payments when the `
+    + `${RECONCILE_BUDGET_MS / 60_000} minute budget ran out; narrow the window with --since and --until` });
+  expect(JSON.stringify(limited)).not.toContain(String(LIST_LIMIT));
+});
+
+it('RECONCILE/sums LND amounts that sum past an int64 for one credential are not LND records: exit 5 at Q6 (audit 1.2.1 N1)', async () => {
+  // Each payment is within LND's int64 type (the adapter refuses a larger one); their sum for one credential is not.
+  const journal = [start(0), line('registered', 1, { session: 1 }), payment(10, C1, '1', H('big-1'), '1000'), payment(20, C1, '1', H('big-2'), '1000')];
+  const listed = [lnd(H('big-1'), 10, 'succeeded', [htlc('succeeded', MAX_MSAT, 0n)], null, 1n),
+    lnd(H('big-2'), 20, 'succeeded', [htlc('succeeded', 1n, 0n)], null, 2n)];
+  const s = setup(journal);
+  const output = await reconcile([...s.args, '--since', at(0), '--until', at(100)], fakeLnd({ listed }));
+  expectSchemaValid(output);
+  expect(output).toMatchObject({ ok: false, result: null, error: { code: 5, step: 'Q6', message: 'invalid LND response' } });
+  for (const [fees, inFlight] of [[MAX_MSAT, 0n], [0n, MAX_MSAT]]) {
+    const other = [lnd(H('big-1'), 10, inFlight ? 'in-flight' : 'succeeded', [htlc(inFlight ? 'in-flight' : 'succeeded', inFlight || 1n, fees)], null, 1n),
+      lnd(H('big-2'), 20, inFlight ? 'in-flight' : 'succeeded', [htlc(inFlight ? 'in-flight' : 'succeeded', 1n, inFlight ? 0n : 1n)], null, 2n)];
+    const failed = await reconcile([...s.args, '--since', at(0), '--until', at(100)], fakeLnd({ listed: other }));
+    expectSchemaValid(failed);
+    expect(failed.error).toEqual({ code: 5, step: 'Q6', message: 'invalid LND response' });
+  }
+  // At the bound exactly, the sum is reported and the output stays within its schema.
+  const atBound = [lnd(H('big-1'), 10, 'succeeded', [htlc('succeeded', MAX_MSAT - 1n, 0n)], null, 1n),
+    lnd(H('big-2'), 20, 'succeeded', [htlc('succeeded', 1n, 0n)], null, 2n)];
+  const fine = await reconcile([...s.args, '--since', at(0), '--until', at(100)], fakeLnd({ listed: atBound }));
+  expectSchemaValid(fine);
+  expect((fine.result as ReconcileResult).credentials[0]).toMatchObject({ credential: C1, settledMsat: MAX_MSAT.toString() });
+});
+
+it('RECONCILE/sums journaled requests that sum past an int64 are capped and said so; the output stays within its schema (audit 1.2.1 N1)', async () => {
+  // A credential can ask for any amount (LND refuses it); the requests are journaled and summed.
+  const MAX = MAX_MSAT.toString();
+  const journal = [start(0), line('registered', 1, { session: 1 }),
+    ...Array.from({ length: 11 }, (_, index) => payment(10 + index, C1, '1', H(`ask-${index}`), MAX)),
+    ...Array.from({ length: 11 }, (_, index) => payment(30 + index, C2, '2', H('route'), MAX, { method: ROUTE, amountSource: 'route' }))];
+  const s = setup(journal);
+  const output = await reconcile([...s.args, '--since', at(0), '--until', at(100)], fakeLnd({}));
+  expectSchemaValid(output);
+  expect(output).toMatchObject({ ok: true, error: null, exitCode: 1 });
+  const result = output.result as ReconcileResult;
+  expect(result.credentials.map(row => [row.credential, row.requestedMsat])).toEqual([[C1, MAX], [C2, MAX]]);
+  expect(result.payments.find(item => item.paymentHash === H('route'))!.observation.routeAttemptsMsat).toBe(MAX);
+  expect(output.warnings.map(item => typeof item === 'string' ? item : item.code)).toContain('requested-amounts-capped');
 });
 
 it('RECONCILE/read-only reconcile never writes: the journal and registry are unchanged', async () => {

@@ -144,9 +144,12 @@ function createLnd(config, macaroonHex, onRequest) {
 /** One request to the paid API, optionally with an Authorization header. */
 function callApi(config, authorization) {
   const headers = authorization ? { authorization } : {};
-  const requestFn = config.serviceUrl.protocol === 'https:' ? httpsRequest : httpRequest;
-  return exchange(requestFn, { host: config.serviceUrl.hostname, port: config.serviceUrl.port || undefined,
-    path: `${config.serviceUrl.pathname}${config.serviceUrl.search}`, headers }, undefined, API_TIMEOUT_MS, `GET ${config.serviceUrl.pathname}`);
+  const https = config.serviceUrl.protocol === 'https:';
+  // The L402 token is a bearer credential: rejectUnauthorized is explicit, as for LND, so an inherited
+  // NODE_TLS_REJECT_UNAUTHORIZED=0 cannot send it to a certificate nobody trusts.
+  return exchange(https ? httpsRequest : httpRequest, { host: config.serviceUrl.hostname, port: config.serviceUrl.port || undefined,
+    path: `${config.serviceUrl.pathname}${config.serviceUrl.search}`, headers, ...(https ? { rejectUnauthorized: true } : {}) },
+  undefined, API_TIMEOUT_MS, `GET ${config.serviceUrl.pathname}`);
 }
 
 /** Parses `WWW-Authenticate: L402 macaroon="…", invoice="…"`. Aperture also sends the legacy LSAT form first. */

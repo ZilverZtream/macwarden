@@ -145,6 +145,34 @@ it('PAYADAPTER/list-payments refuses invalid responses and queries, and bounds t
   });
 });
 
+it('PAYADAPTER/sums attempt amounts summed past an int64 for one payment are not an LND record (audit 1.2.1 N1)', async () => {
+  const MAX = '9223372036854775807';
+  const attempt = (status: string, total: string, fees: string) => ({ status, route: { total_fees_msat: fees, total_amt_msat: total } });
+  // Each attempt is within LND's int64 type; only their sum is impossible (21 million bitcoin is 2.1e18 msat).
+  // Each page is valid but for the sums (last_index_offset included), so only the sum check can refuse it.
+  const invalid = [
+    [attempt('SUCCEEDED', MAX, '0'), attempt('SUCCEEDED', '1', '0')],
+    Array.from({ length: 1_000 }, () => attempt('SUCCEEDED', MAX, '0')),
+    [attempt('SUCCEEDED', MAX, MAX), attempt('SUCCEEDED', '1', '1')],
+    [attempt('IN_FLIGHT', MAX, '0'), attempt('IN_FLIGHT', MAX, '0')],
+  ].map(htlcs => ({ payments: [lndPayment({ htlcs })], last_index_offset: '7' }));
+  let index = 0;
+  await withServer(() => ({ body: JSON.stringify(invalid[index++]) }), async adapter => {
+    for (let i = 0; i < invalid.length; i++) {
+      const error = await adapter.listPayments({ startSeconds: 0, endSeconds: 10, indexOffset: 0n, max: 1 }).then(() => null, failure => failure);
+      expect(error, `case ${i}`).toBeInstanceOf(LndError);
+      expect((error as LndError).message).toBe('invalid LND response');
+      expect((error as LndError).code).toBe(5);
+    }
+  });
+  // At the bound exactly, the sums are still LND's: one attempt of 2^63-1 and failed attempts that are not summed.
+  await withServer(() => ({ body: JSON.stringify({ payments: [lndPayment({ htlcs: [attempt('SUCCEEDED', MAX, '0'), attempt('FAILED', MAX, '0'),
+    attempt('FAILED', MAX, '0')] })], last_index_offset: '7' }) }), async adapter => {
+    const page = await adapter.listPayments({ startSeconds: 0, endSeconds: 10, indexOffset: 0n, max: 1 });
+    expect(page.payments[0]).toMatchObject({ succeededMsat: BigInt(MAX), attempts: 3 });
+  });
+});
+
 it('PAYADAPTER/track-payment reads the first streamed update and closes the stream; the hash is base64url in the path', async () => {
   await withServer(() => ({ open: true, body: `${JSON.stringify({ result: lndPayment({ status: 'IN_FLIGHT', htlcs: [{ status: 'IN_FLIGHT',
     route: { total_fees_msat: '10', total_amt_msat: '5010' } }] }) })}\n` }), async (adapter, seen, open) => {

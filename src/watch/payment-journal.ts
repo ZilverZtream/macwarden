@@ -95,6 +95,8 @@ const MSAT = /^(?:0|[1-9][0-9]{0,19})$/;
 const CREDENTIAL = /^id:(?:[0-9a-f]{16}|none|undecodable)$/;
 const MS_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const PRINTABLE = /^[\x20-\x7e]{1,64}$/;
+// The last instant the reader accepts (MS_TIME: a four-digit year).
+const MAX_RECORD_TIME = 253_402_300_799_999;
 const time = (value: unknown): value is string => typeof value === 'string' && MS_TIME.test(value) && isInstant(value);
 const count = (value: unknown, min = 0): value is number => Number.isSafeInteger(value) && (value as number) >= min;
 const nullable = (value: unknown, pattern: RegExp) => value === null || (typeof value === 'string' && pattern.test(value));
@@ -567,7 +569,10 @@ export class PaymentJournal {
       }
       const journal = new PaymentJournal(handle, size, release, deps.clock, target, deps.onStop);
       journal.aclWarning = aclWarning;
-      const first: RunStartRecord = { v: 1, type: 'run-start', time: journal.now(), run: journal.run, node, version, repairedTail };
+      // The run-start has no earlier record to fall back on: a clock the reader cannot take is refused.
+      const startAt = journal.clockTime();
+      if (startAt === null) throw new JournalError('cannot open payment journal: the system clock is invalid');
+      const first: RunStartRecord = { v: 1, type: 'run-start', time: journal.stamp(startAt), run: journal.run, node, version, repairedTail };
       const text = `${newline ? '\n' : ''}${JSON.stringify(first)}\n`;
       try { await writeAll(handle, text); await handle.sync(); }
       catch { throw new JournalError('cannot write payment journal'); }
@@ -582,10 +587,20 @@ export class PaymentJournal {
     }
   }
 
-  /** The record time: the clock, never earlier than this run's previous record. */
+  /**
+   * The clock in milliseconds, or null when it is not a time the reader accepts (audit 1.2.1:
+   * NaN threw out of the decoding turn and crashed watch; past the year 9999 every later record
+   * was one the reader refuses).
+   */
+  private clockTime(): number | null {
+    let value: number;
+    try { value = this.clock().getTime(); } catch { return null; }
+    return Number.isFinite(value) && value <= MAX_RECORD_TIME ? value : null;
+  }
+
+  /** The record time: the clock, never earlier than this run's previous record; the previous time when the clock is invalid. */
   private now(): string {
-    this.lastTime = Math.max(this.lastTime, this.clock().getTime());
-    return new Date(this.lastTime).toISOString();
+    return this.stamp(this.clockTime() ?? this.lastTime);
   }
 
   private base(time: string): Base { return { v: 1, time, run: this.run }; }
@@ -595,7 +610,7 @@ export class PaymentJournal {
    * while the intercepted frame is still valid. Costs a counter when the intake is full.
    */
   capture(call: MiddlewareCall): void {
-    const at = Math.max(this.lastTime, this.clock().getTime());
+    const at = Math.max(this.lastTime, this.clockTime() ?? this.lastTime);
     if (this.closing || this.stats.stopped) { this.stats.dropped += 1; return; }
     const bytes = (call.payloadBytes ?? 0) + (call.macaroonBytes ?? 0) + 256;
     if (this.intake.length - this.intakeHead >= JOURNAL_INTAKE_ITEMS || this.intakeBytes + bytes > JOURNAL_INTAKE_BYTES) {
@@ -632,7 +647,7 @@ export class PaymentJournal {
     this.marker(time => ({ ...this.base(time), type: 'alive' }));
   }
 
-  private marker(make: (time: string) => JournalRecord, at = this.clock().getTime()): void {
+  private marker(make: (time: string) => JournalRecord, at = this.clockTime() ?? this.lastTime): void {
     if (this.stats.stopped) return;
     this.flushIntakeDrop();
     this.intake.push({ kind: 'marker', make, bytes: 0, at });
@@ -711,7 +726,7 @@ export class PaymentJournal {
 
   /** A record time for a call captured at `at`: never earlier than the run's previous record. */
   private stamp(at: number): string {
-    this.lastTime = Math.max(this.lastTime, at);
+    if (Number.isFinite(at) && at <= MAX_RECORD_TIME) this.lastTime = Math.max(this.lastTime, at);
     return new Date(this.lastTime).toISOString();
   }
 

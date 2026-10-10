@@ -388,6 +388,46 @@ it('PAYJ/time a clock that steps back never makes a record earlier than its pred
   expect(stamps).toEqual([...stamps].sort((a, b) => a - b));
 });
 
+it('PAYJ/time a clock that returns NaN or jumps past the year 9999 never crashes the writer or writes a time the reader refuses (audit 1.2.1 N3)', async () => {
+  const dir = scratch();
+  const path = join(dir, 'bad-clock.journal');
+  const good = Date.parse('2026-10-09T10:00:00.000Z');
+  const year10000 = Date.parse('+010000-01-01T00:00:00.000Z');
+  let now = good;
+  const journal = await openJournal(path, { clock: () => new Date(now) });
+  now = good + 1_000; journal.registered();
+  // NaN once: for a call record and for a marker.
+  now = NaN; journal.capture(paymentCall(SEND, bytes(3, hash('nan')), vector('preset-pay-only'), 1n));
+  await settle();
+  journal.unregistered('stream-lost');
+  now = good + 2_000; journal.registered();
+  await settle();
+  // Past the year 9999, and past what Date can hold at all.
+  now = year10000; journal.capture(paymentCall(SEND, bytes(3, hash('far')), vector('preset-pay-only'), 2n));
+  await settle();
+  journal.unregistered('stream-lost');
+  now = 9e15; journal.registered();
+  const stats = await journal.close();
+  expect(stats).toMatchObject({ payments: 2, dropped: 0, stopped: null });
+  const text = readFileSync(path, 'utf8');
+  expectLinesValid(text, (ok, detail) => expect(ok, detail).toBe(true));
+  const read = await readJournal(path);
+  expect(read).toMatchObject({ tornTail: false, repairedLines: 0 });
+  expect(read.records.map(item => item.type)).toEqual(['run-start', 'registered', 'payment', 'unregistered', 'registered', 'payment',
+    'unregistered', 'registered', 'unregistered', 'run-end']);
+  // An invalid clock reading falls back to the last good time, never earlier than the previous record.
+  expect(read.records.map(item => item.time)).toEqual(['2026-10-09T10:00:00.000Z', '2026-10-09T10:00:01.000Z', '2026-10-09T10:00:01.000Z',
+    '2026-10-09T10:00:01.000Z', '2026-10-09T10:00:02.000Z', '2026-10-09T10:00:02.000Z', '2026-10-09T10:00:02.000Z', '2026-10-09T10:00:02.000Z',
+    '2026-10-09T10:00:02.000Z', '2026-10-09T10:00:02.000Z']);
+  // The run-start has no earlier record to fall back on: an invalid clock is refused at open, nothing written.
+  for (const [name, clock] of [['nan', () => new Date(NaN)], ['year-10000', () => new Date(year10000)],
+    ['throws', () => { throw new Error('no clock'); }]] as const) {
+    const refused = join(dir, `${name}.journal`);
+    await expect(openJournal(refused, { clock })).rejects.toThrow(new JournalError('cannot open payment journal: the system clock is invalid'));
+    expect(readFileSync(refused, 'utf8')).toBe('');
+  }
+});
+
 it('PAYJ/alive while registered an alive record is written after 5 quiet minutes', async () => {
   const dir = scratch();
   const path = join(dir, 'alive.journal');

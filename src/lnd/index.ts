@@ -419,6 +419,9 @@ function paymentLookup(call: ReturnType<typeof transport>['call'], read: ReturnT
       const status = HTLC_STATUS[string(htlc.status, stage)] ?? 'unknown';
       if (status === 'succeeded') { succeededAttempts += 1; succeededMsat += total - fees; succeededFeesMsat += fees; }
       else if (status === 'in-flight') inFlightMsat += total - fees;
+      // The sums are bounded too (audit 1.2.1): no payment moves more than an int64 of
+      // millisatoshi (21 million bitcoin is 2.1e18), so a larger sum is not an LND record.
+      if (succeededMsat > MAX_INT64 || succeededFeesMsat > MAX_INT64 || inFlightMsat > MAX_INT64) throw new LndError(5, stage, 'invalid LND response');
     }
     const reason = item.failure_reason === undefined ? 'FAILURE_REASON_NONE' : string(item.failure_reason, stage);
     if (!/^FAILURE_REASON_[A-Z_]{1,64}$/.test(reason)) throw new LndError(5, stage, 'invalid LND response');

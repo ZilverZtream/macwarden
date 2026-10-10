@@ -76,6 +76,13 @@ function coveredSpan(covered: [number, number][], from: number, to: number): boo
 export const RECONCILE_BUDGET_MS = 10 * 60_000;
 const nsToMs = (ns: bigint) => Number(ns / 1_000_000n);
 const sum = (values: bigint[]) => values.reduce((total, value) => total + value, 0n);
+/**
+ * No real amount reaches an int64 of millisatoshi (21 million bitcoin is 2.1e18 msat): a sum of
+ * LND's amounts above it means the records are not LND's (exit 5), and a sum of journaled
+ * requests above it (a credential can ask for any amount; LND refuses) is reported as this
+ * ceiling with the warning `requested-amounts-capped`, so the output stays within its schema.
+ */
+export const MAX_MSAT = (1n << 63n) - 1n;
 
 /** Settlement evidence from one LND payment record; amounts from its HTLC attempts. */
 function settlement(payment: LndPayment, source: 'list-payments' | 'track-payment', firstObserved: number | null): ReconcileSettlement {
@@ -217,7 +224,8 @@ async function runSteps(args: string[], deps: Deps): Promise<ReconcileOutput> {
 
   // Q6: LND's payments created in the window (with clock tolerance), paged.
   const listed = new Map<string, LndPayment>();
-  let listTruncated = false;
+  // The listing stops at the count limit or at the budget; each is reported as itself (audit 1.2.1).
+  let listLimited = false, budgetReached = false;
   const deadline = Date.now() + RECONCILE_BUDGET_MS;
   try {
     let offset = 0n;
@@ -227,7 +235,9 @@ async function runSteps(args: string[], deps: Deps): Promise<ReconcileOutput> {
       const page = await cancellable(() => adapter.listPayments({ startSeconds, endSeconds, indexOffset: offset, max: LIST_PAGE }));
       for (const payment of page.payments) listed.set(payment.paymentHash, payment);
       if (page.payments.length < LIST_PAGE || page.lastIndexOffset <= offset) break;
-      if (listed.size >= LIST_LIMIT || Date.now() > deadline) { listTruncated = true; break; }
+      listLimited = listed.size >= LIST_LIMIT;
+      budgetReached = Date.now() > deadline;
+      if (listLimited || budgetReached) break;
       offset = page.lastIndexOffset;
     }
   } catch (error) {
@@ -251,6 +261,9 @@ async function runSteps(args: string[], deps: Deps): Promise<ReconcileOutput> {
       deletionsByHash.set(record.paymentHash, set);
     }
   }
+  const listTruncated = listLimited || budgetReached;
+  let requestsCapped = false;
+  const capped = (value: bigint) => { if (value > MAX_MSAT) { requestsCapped = true; return MAX_MSAT; } return value; };
   const deletedBy = (hash: string) => [...new Set([...(deletionsByHash.get(hash) ?? []), ...deletedAllBy])].sort();
   for (const [hash, records] of [...byHash].sort((a, b) => Date.parse(a[1][0].time) - Date.parse(b[1][0].time) || (a[0] < b[0] ? -1 : 1))) {
     const firstObserved = Date.parse(records[0].time);
@@ -283,7 +296,7 @@ async function runSteps(args: string[], deps: Deps): Promise<ReconcileOutput> {
     results.push({ paymentHash: hash, attribution: credentials.length > 1 ? 'ambiguous' : found.predatesObservation ? 'historical' : 'single', credentials,
       observation: { first: records[0].time, last: records.at(-1)!.time, calls: records.length,
         requestedMsat: latest?.amountMsat ?? null,
-        routeAttemptsMsat: routes.length ? sum(routes.map(record => BigInt(record.amountMsat!))).toString() : null,
+        routeAttemptsMsat: routes.length ? capped(sum(routes.map(record => BigInt(record.amountMsat!)))).toString() : null,
         feeLimitMsat: latest?.feeLimitMsat ?? null,
         observations: records.slice(-OBSERVATION_LIST_LIMIT).map(observation) },
       settlement: found, deletedBy: deletedBy(hash) });
@@ -322,6 +335,13 @@ async function runSteps(args: string[], deps: Deps): Promise<ReconcileOutput> {
     row.label = row.rootKeyIds.length === 1 ? labelFor(row.rootKeyIds[0]) : null;
   };
   const add = (value: string, extra: string | null) => (BigInt(value) + BigInt(extra ?? '0')).toString();
+  // LND's amounts summed past an int64 for one credential cannot be real (audit 1.2.1): not LND's records.
+  let impossible = false;
+  const addLnd = (value: string, extra: string | null) => {
+    const total = BigInt(value) + BigInt(extra ?? '0');
+    if (total > MAX_MSAT) impossible = true;
+    return total.toString();
+  };
   for (const item of results) {
     const records = byHash.get(item.paymentHash)!;
     for (const record of records) noteRoot(credentialRow(record.credential), record.rootKeyId);
@@ -332,11 +352,12 @@ async function runSteps(args: string[], deps: Deps): Promise<ReconcileOutput> {
     const status = item.settlement.status;
     if (status === 'succeeded') row.succeeded += 1; else if (status === 'failed') row.failed += 1;
     else if (status === 'in-flight') row.inFlight += 1; else if (status === 'not-found') row.notFound += 1; else row.unknown += 1;
-    row.requestedMsat = add(row.requestedMsat, item.observation.requestedMsat ?? item.observation.routeAttemptsMsat);
-    row.settledMsat = add(row.settledMsat, item.settlement.settledMsat);
-    row.feesMsat = add(row.feesMsat, item.settlement.feesMsat);
-    row.inFlightMsat = add(row.inFlightMsat, item.settlement.inFlightMsat);
+    row.requestedMsat = capped(BigInt(add(row.requestedMsat, item.observation.requestedMsat ?? item.observation.routeAttemptsMsat))).toString();
+    row.settledMsat = addLnd(row.settledMsat, item.settlement.settledMsat);
+    row.feesMsat = addLnd(row.feesMsat, item.settlement.feesMsat);
+    row.inFlightMsat = addLnd(row.inFlightMsat, item.settlement.inFlightMsat);
   }
+  if (impossible) return fail(5, 'Q6', 'invalid LND response', warnings);
   for (const record of unmatched) { const row = credentialRow(record.credential); row.unmatched += 1; noteRoot(row, record.rootKeyId); }
   for (const record of deletionRecords) { const row = credentialRow(record.credential); row.deletions += 1; noteRoot(row, record.rootKeyId); }
   for (const row of perCredential.values()) row.rootKeyIds.sort((a, b) => a === 'none' ? 1 : b === 'none' ? -1 : (BigInt(a) < BigInt(b) ? -1 : BigInt(a) > BigInt(b) ? 1 : 0));
@@ -383,8 +404,14 @@ async function runSteps(args: string[], deps: Deps): Promise<ReconcileOutput> {
     + 'requested by more than one credential; their outcomes are not counted for any single credential' });
   if (deletionRecords.length) warnings.push({ code: 'payment-deletions', message: `${deletionRecords.length} call${deletionRecords.length === 1 ? '' : 's'} `
     + 'to delete LND payment records were journaled in the window; LND may no longer list the payments they removed' });
-  if (listTruncated || trackLimited) warnings.push({ code: 'lookups-limited', message: `${listTruncated ? `LND's payment listing stopped at ${LIST_LIMIT} payments; ` : ''}`
+  const budget = `the ${RECONCILE_BUDGET_MS / 60_000} minute budget`;
+  const listing = listLimited && budgetReached ? `LND's payment listing stopped at ${LIST_LIMIT} payments as ${budget} ran out; `
+    : listLimited ? `LND's payment listing stopped at ${LIST_LIMIT} payments; `
+      : budgetReached ? `LND's payment listing stopped after ${listed.size} payments when ${budget} ran out; ` : '';
+  if (listTruncated || trackLimited) warnings.push({ code: 'lookups-limited', message: listing
     + `${trackLimited ? `${trackLimited} payment hashes were not looked up (limit ${TRACK_LIMIT}, or the ${RECONCILE_BUDGET_MS / 60_000} minute budget ran out); ` : ''}narrow the window with --since and --until` });
+  if (requestsCapped) warnings.push({ code: 'requested-amounts-capped', message: 'journaled requests sum to more than '
+    + `${MAX_MSAT} msat (more than all bitcoin): such sums are reported as ${MAX_MSAT}; the requests were for amounts no payment can reach` });
   if (contents.tornTail) warnings.push({ code: 'journal-torn-tail', message: 'the journal ends with an incomplete line (watch is writing it, '
     + 'or stopped while writing it); it was ignored' });
   if (otherNodeRecords) warnings.push({ code: 'journal-other-node', message: `${otherNodeRecords} journal records belong to another node and were ignored` });
