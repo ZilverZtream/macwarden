@@ -23,8 +23,15 @@ export class LndError extends Error {
     this.httpStatus = httpStatus;
   }
 
+  /**
+   * LND itself answered NotFound: gRPC code 5, or an HTTP 404 whose body carries LND's
+   * message. A bodiless 404 (the client's "HTTP 404" stand-in) can come from a proxy or a
+   * wrong path in front of LND and proves nothing about the payment or invoice, so it is
+   * not NotFound (the caller treats it as unknown), as definiteRefusal does.
+   */
   get notFound(): boolean {
-    return this.grpcCode === NOT_FOUND || this.httpStatus === 404;
+    if (this.grpcCode !== undefined) return this.grpcCode === NOT_FOUND;
+    return this.httpStatus === 404 && this.message !== 'HTTP 404';
   }
 }
 

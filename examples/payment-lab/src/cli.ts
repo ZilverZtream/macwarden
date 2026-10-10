@@ -48,6 +48,16 @@ function required(values: Record<string, unknown>, name: string): string {
   return value;
 }
 
+/** An amount or index given on the command line: a malformed one is a usage error (exit 2), not an internal one. */
+function amountArg(text: string, what: string): bigint {
+  try { return parseAmount(text, what); } catch (error) { throw new UsageError(error instanceof Error ? error.message : String(error)); }
+}
+
+/** A payment hash given on the command line (see amountArg). */
+function hashArg(value: string, what: string): string {
+  try { return assertHash(value, what); } catch (error) { throw new UsageError(error instanceof Error ? error.message : String(error)); }
+}
+
 function identifier(value: string, what: string): string {
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)) throw new UsageError(`${what} must be 1-128 letters, digits, '.', '_', ':' or '-'`);
   return value;
@@ -166,8 +176,8 @@ async function payer(command: string, args: string[], services: Services): Promi
         const operationId = identifier(required(values, 'operation'), '--operation');
         const kind = required(values, 'kind');
         if (!['order-payment', 'refund', 'payout'].includes(kind)) throw new UsageError('--kind must be order-payment, refund or payout');
-        const feeLimitMsat = parseAmount(required(values, 'fee-limit-msat'), '--fee-limit-msat');
-        const maxParts = values['max-parts'] === undefined ? 16 : Number(parseAmount(values['max-parts'], '--max-parts'));
+        const feeLimitMsat = amountArg(required(values, 'fee-limit-msat'), '--fee-limit-msat');
+        const maxParts = values['max-parts'] === undefined ? 16 : Number(amountArg(values['max-parts'], '--max-parts'));
         if (maxParts < 1 || maxParts > 128) throw new UsageError('--max-parts must be 1 to 128');
         const fault = (values.fault ?? 'none') as Fault;
         if (fault !== 'none' && fault !== 'drop-stream-after-in-flight') throw new UsageError('--fault must be drop-stream-after-in-flight');
@@ -205,7 +215,7 @@ async function payer(command: string, args: string[], services: Services): Promi
         const timeoutSeconds = values['timeout-s'] === undefined ? undefined : seconds(values, 'timeout-s', 60);
         const targets = values['payment-hash'] === undefined
           ? deps.store.unresolvedPayments().map(item => item.paymentHash)
-          : [assertHash(values['payment-hash'])];
+          : [hashArg(values['payment-hash'], '--payment-hash')];
         const signal = stopSignal(timeoutSeconds);
         emit({ event: 'reconcile-started', payments: targets.length });
         return exitForAll(await Promise.all(targets.map(hash => reconcile(deps, hash, signal))));
@@ -215,7 +225,7 @@ async function payer(command: string, args: string[], services: Services): Promi
         return EXIT.ok;
       case 'budget-set': {
         const budgetId = identifier(required(values, 'budget'), '--budget');
-        deps.store.setBudget(budgetId, parseAmount(required(values, 'limit-msat'), '--limit-msat'));
+        deps.store.setBudget(budgetId, amountArg(required(values, 'limit-msat'), '--limit-msat'));
         emit({ event: 'budget', ...deps.store.budgetStatus(budgetId) });
         return EXIT.ok;
       }
@@ -319,7 +329,7 @@ async function receiver(command: string, args: string[], services: Services): Pr
     switch (command) {
       case 'create-invoice': {
         const orderId = identifier(required(values, 'order'), '--order');
-        const amountMsat = parseAmount(required(values, 'amount-msat'), '--amount-msat');
+        const amountMsat = amountArg(required(values, 'amount-msat'), '--amount-msat');
         if (amountMsat === 0n) throw new UsageError('--amount-msat must be positive');
         const outcome = await createInvoice(deps, { orderId, amountMsat, hold: values.hold === true, memo: values.memo ?? orderId,
           expirySeconds: seconds(values, 'expiry-s', 3600) });
@@ -349,8 +359,8 @@ async function receiver(command: string, args: string[], services: Services): Pr
         return EXIT.ok;
       }
       case 'cursor-set': {
-        const settleIndex = parseAmount(required(values, 'settle-index'), '--settle-index');
-        const addIndex = values['add-index'] === undefined ? 0n : parseAmount(values['add-index'], '--add-index');
+        const settleIndex = amountArg(required(values, 'settle-index'), '--settle-index');
+        const addIndex = values['add-index'] === undefined ? 0n : amountArg(values['add-index'], '--add-index');
         const before = deps.store.cursor();
         deps.store.setCursor(settleIndex, addIndex);
         emit({ event: 'cursor-set', before, after: deps.store.cursor() });
@@ -384,7 +394,7 @@ async function analysis(command: string, args: string[]): Promise<number> {
   const read = readApi(lab, nodeName(required(values, 'node')));
   switch (command) {
     case 'payments': {
-      const result = await paymentsForHash(read, assertHash(required(values, 'payment-hash')));
+      const result = await paymentsForHash(read, hashArg(required(values, 'payment-hash'), '--payment-hash'));
       emit({ event: 'payments-for-hash', count: result.payments.length, scanned: result.scanned, complete: result.complete,
         payments: result.payments });
       return EXIT.ok;

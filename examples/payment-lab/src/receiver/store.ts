@@ -137,6 +137,7 @@ const RANK: Record<InvoiceRecordState, number> = { 'not-created': 0, creating: 0
 /** The same order for LND's state of a late invoice (late_lnd_state), so a stale delivery never moves it back either. */
 const LATE_RANK = (expression: string): string =>
   `CASE ${expression} WHEN 'OPEN' THEN 1 WHEN 'ACCEPTED' THEN 2 WHEN 'SETTLED' THEN 3 WHEN 'CANCELED' THEN 3 ELSE 0 END`;
+const LND_RANK: Record<string, number> = { OPEN: 1, ACCEPTED: 2, SETTLED: 3, CANCELED: 3 };
 
 export class ReceiverStore {
   readonly db: DatabaseSync;
@@ -166,11 +167,11 @@ export class ReceiverStore {
   }
 
   invoicesForOrder(orderId: string): InvoiceRecord[] {
-    return this.db.prepare('SELECT * FROM invoices WHERE order_id = ? ORDER BY created_at').all(orderId).map(invoiceFrom);
+    return this.db.prepare('SELECT * FROM invoices WHERE order_id = ? ORDER BY created_at, rowid').all(orderId).map(invoiceFrom);
   }
 
   unresolvedInvoices(): InvoiceRecord[] {
-    return this.db.prepare(`SELECT * FROM invoices WHERE state IN ('creating', 'open', 'accepted') ORDER BY created_at`).all().map(invoiceFrom);
+    return this.db.prepare(`SELECT * FROM invoices WHERE state IN ('creating', 'open', 'accepted') ORDER BY created_at, rowid`).all().map(invoiceFrom);
   }
 
   /**
@@ -180,7 +181,7 @@ export class ReceiverStore {
    */
   lateInvoiceCandidates(recheckSince: string): InvoiceRecord[] {
     return this.db.prepare(`SELECT * FROM invoices WHERE state = 'not-created'
-      AND (late_lnd_state IN ('OPEN', 'ACCEPTED') OR (late_lnd_state IS NULL AND created_at >= ?)) ORDER BY created_at`)
+      AND (late_lnd_state IN ('OPEN', 'ACCEPTED') OR (late_lnd_state IS NULL AND created_at >= ?)) ORDER BY created_at, rowid`)
       .all(recheckSince).map(invoiceFrom);
   }
 
@@ -194,7 +195,7 @@ export class ReceiverStore {
     return this.db.prepare(`SELECT invoices.* FROM invoices JOIN orders ON orders.order_id = invoices.order_id
       WHERE orders.state = 'fulfilled' AND invoices.state IN ('creating', 'open', 'accepted')
       AND NOT EXISTS (SELECT 1 FROM fulfillments WHERE fulfillments.payment_hash = invoices.payment_hash)
-      AND (? IS NULL OR invoices.order_id = ?) ORDER BY invoices.created_at`).all(orderId ?? null, orderId ?? null).map(invoiceFrom);
+      AND (? IS NULL OR invoices.order_id = ?) ORDER BY invoices.created_at, invoices.rowid`).all(orderId ?? null, orderId ?? null).map(invoiceFrom);
   }
 
   /** Whether this invoice is superseded (see supersededInvoices). */
@@ -277,13 +278,15 @@ export class ReceiverStore {
    * invoice is adopted), unless the order has meanwhile got another live invoice or
    * no longer awaits payment: one live invoice per order is a constraint, so the
    * record then keeps `not-created`, LND's OPEN is noted in late_lnd_state, and the
-   * caller cancels the invoice in LND (resolveLateInvoice in receiver.ts).
+   * caller cancels the invoice in LND (resolveLateInvoice in receiver.ts). Canceled is
+   * final: a create answer that arrives after LND was seen to cancel the invoice (state
+   * `canceled`, or late_lnd_state CANCELED) reopens nothing.
    * Returns the record's state afterwards.
    */
   markCreated(paymentHash: string, paymentRequest: string, addIndex: bigint): InvoiceRecordState | undefined {
     return immediate(this.db, () => {
       this.db.prepare(`UPDATE invoices SET state = CASE WHEN state = 'creating' THEN 'open'
-          WHEN state = 'not-created' AND NOT EXISTS (SELECT 1 FROM invoices other WHERE other.order_id = invoices.order_id
+          WHEN state = 'not-created' AND (late_lnd_state IS NULL OR late_lnd_state IN ('OPEN', 'ACCEPTED')) AND NOT EXISTS (SELECT 1 FROM invoices other WHERE other.order_id = invoices.order_id
             AND other.payment_hash <> invoices.payment_hash AND other.state IN ('creating', 'open', 'accepted', 'settled'))
             AND EXISTS (SELECT 1 FROM orders WHERE orders.order_id = invoices.order_id AND orders.state = 'awaiting-payment') THEN 'open'
           ELSE state END,
@@ -345,13 +348,19 @@ export class ReceiverStore {
     // break one-live-invoice-per-order (and a cancellation would cancel the order under the live
     // one). The record then stays not-created with LND's state in late_lnd_state: an open one is
     // `late-invoice`, for the caller to cancel in LND, and a settlement is still posted below.
-    const blocked = record.state === 'not-created' && this.#mayNotAdopt(record);
+    // Canceled is final: a late invoice LND canceled is never adopted (its order still awaits a
+    // payment, and a replacement may be issued), and an update older than LND's last known state
+    // of it (a replayed OPEN after CANCELED) changes nothing.
+    const late = record.lateLndState;
+    const behind = record.state === 'not-created' && late !== undefined
+      && (late === 'CANCELED' || (LND_RANK[invoice.state] ?? 0) < (LND_RANK[late] ?? 0));
+    const blocked = record.state === 'not-created' && (next === 'canceled' || behind || this.#mayNotAdopt(record));
     if (blocked) {
       const moved = changes(this.db.prepare(`UPDATE invoices SET late_lnd_state = ?, add_index = COALESCE(add_index, ?),
           payment_request = COALESCE(payment_request, ?), updated_at = ? WHERE payment_hash = ? AND ${LATE_RANK('?')} > ${LATE_RANK('late_lnd_state')}`)
         .run(invoice.state, invoice.addIndex, invoice.paymentRequest === '' ? null : invoice.paymentRequest, now, invoice.paymentHash,
           invoice.state)) === 1;
-      if (next === 'open' || next === 'accepted') return 'late-invoice';
+      if (next === 'open' || next === 'accepted') return behind ? 'unchanged' : 'late-invoice';
       if (next === 'canceled') return moved ? 'state-updated' : 'unchanged';
     }
     if (!blocked && (RANK[next] > RANK[record.state] || (record.state === 'creating' && next === 'open'))) {

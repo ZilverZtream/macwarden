@@ -13,8 +13,9 @@ import type { IntentResult, OperationKind, PayerStore, PaymentState, UpdateResul
  * 3. SendPaymentV2 is called only for a record in `intent`, claimed by
  *    compare-and-set, so a restart or a second worker never pays again.
  * 4. Only LND's terminal answer completes or fails the business operation.
- * 5. Every update is applied with the submission its stream was started for, so a
- *    late answer about an earlier submission never decides the current one.
+ * 5. Every update, and every outcome of a call (an error, a stream that ended), is
+ *    applied with the submission it was made for, so a late answer about an earlier
+ *    submission never decides the current one; that call reports its own outcome.
  */
 
 export type Emit = (event: Record<string, unknown>) => void;
@@ -112,6 +113,7 @@ export async function submit(deps: PayerDeps, paymentHash: string, options: { ti
   let updates = 0;
   let lastState: PaymentState = 'submitting';
   let dropped = false;
+  let terminal: Payment | undefined;
   const onUpdate = (payment: Payment): StreamDecision => {
     if (payment.paymentHash !== paymentHash) throw new Error('SendPaymentV2 returned an update for another payment hash');
     updates += 1;
@@ -120,7 +122,10 @@ export async function submit(deps: PayerDeps, paymentHash: string, options: { ti
     lastState = result.state;
     deps.emit({ event: 'payment-update', source: 'SendPaymentV2', ...summary(payment), recordState: result.state,
       operationCompleted: result.completed });
-    if (isTerminal(payment.status)) return 'stop';
+    if (isTerminal(payment.status)) {
+      terminal = payment;
+      return 'stop';
+    }
     const holding = payment.htlcs.some(item => item.status === 'IN_FLIGHT');
     if (options.fault === 'drop-stream-after-in-flight' && holding && !dropped) {
       dropped = true;
@@ -138,11 +143,40 @@ export async function submit(deps: PayerDeps, paymentHash: string, options: { ti
   const final = deps.store.payment(paymentHash);
   if (final?.state === 'succeeded') return { kind: 'succeeded', paymentHash, feeMsat: final.feeMsat ?? 0n };
   if (final?.state === 'failed') return { kind: 'failed', paymentHash, reason: final.failureReason ?? 'unknown' };
+  // A terminal update the store refused as stale: a later submission is the record's now.
+  const ended = terminal as Payment | undefined;
+  if (ended !== undefined) return superseded(deps, paymentHash, submission, `SendPaymentV2 reported this submission ${ended.status}`);
   // The server ended the stream without a terminal state: outcome unknown.
   const reason = `SendPaymentV2 stream ended in state ${lastState} without a terminal update`;
-  deps.store.markUncertain(paymentHash, reason);
-  deps.emit({ event: 'uncertain', paymentHash, reason });
-  return { kind: 'unresolved', paymentHash, state: 'uncertain', reason };
+  return markUncertain(deps, paymentHash, submission, reason);
+}
+
+/**
+ * This call's submission is superseded (a later one was claimed, or prepareRetry closed it):
+ * its outcome is reported, and the record, which speaks for the later submission, is left alone.
+ */
+function superseded(deps: PayerDeps, paymentHash: string, submission: number | undefined, what: string): PayOutcome {
+  const record = deps.store.payment(paymentHash);
+  const state = record?.state ?? 'uncertain';
+  const reason = `${what}; submission ${submission ?? '?'} is superseded (the record is at submission ${record?.submissions ?? '?'}, `
+    + `state ${state}), so the record was not changed`;
+  deps.emit({ event: 'submission-superseded', paymentHash, submission, currentSubmission: record?.submissions, recordState: state, reason });
+  return { kind: 'unresolved', paymentHash, state, reason };
+}
+
+/** The call for `submission` ended without a terminal state: the record becomes uncertain, unless the submission is superseded. */
+function markUncertain(deps: PayerDeps, paymentHash: string, submission: number | undefined, reason: string): PayOutcome {
+  const marked = deps.store.markUncertain(paymentHash, reason, submission);
+  if (marked === 'superseded') return superseded(deps, paymentHash, submission, reason);
+  if (marked === 'uncertain') {
+    deps.emit({ event: 'uncertain', paymentHash, reason });
+    return { kind: 'unresolved', paymentHash, state: 'uncertain', reason };
+  }
+  // Not unresolved any more: a concurrent tracker recorded LND's answer, or a NotFound reverted it to intent.
+  const record = deps.store.payment(paymentHash);
+  if (record?.state === 'succeeded') return { kind: 'succeeded', paymentHash, feeMsat: record.feeMsat ?? 0n };
+  if (record?.state === 'failed') return { kind: 'failed', paymentHash, reason: record.failureReason ?? 'unknown' };
+  return { kind: 'unresolved', paymentHash, state: record?.state ?? 'uncertain', reason: `${reason}; the record is ${record?.state ?? 'missing'}` };
 }
 
 /**
@@ -157,8 +191,10 @@ export async function submit(deps: PayerDeps, paymentHash: string, options: { ti
 async function afterSubmitError(deps: PayerDeps, paymentHash: string, error: unknown, updates: number, submission: number | undefined,
   signal: AbortSignal | undefined): Promise<PayOutcome> {
   if (error instanceof TransportError && error.notDelivered && updates === 0) {
-    // No connection was ever established: LND never saw the request.
-    deps.store.markNotInitiated(paymentHash, `connection not established: ${error.message}`);
+    // No connection was ever established: LND never saw this request. Only this submission's
+    // record goes back to intent; a later submission is not this call's business.
+    const reverted = deps.store.markNotInitiated(paymentHash, `connection not established: ${error.message}`, submission);
+    if (reverted === 'superseded') return superseded(deps, paymentHash, submission, `connection not established: ${error.message}`);
     deps.emit({ event: 'not-submitted', paymentHash, reason: error.message });
     return { kind: 'not-submitted', paymentHash, reason: error.message };
   }
@@ -171,8 +207,9 @@ async function afterSubmitError(deps: PayerDeps, paymentHash: string, error: unk
       grpcCode: error.grpcCode, httpStatus: error.httpStatus });
     const settled = await trackOnce(deps, paymentHash, submission, signal);
     // The lookup is asynchronous: another tracker may have recorded a terminal state
-    // meanwhile. markRejected leaves a terminal record alone; the record below answers.
-    if (settled === 'not-found' && definite && deps.store.markRejected(paymentHash, error.message)) {
+    // meanwhile. markRejected leaves a terminal record alone, and a record a later submission
+    // speaks for; the record below answers.
+    if (settled === 'not-found' && definite && deps.store.markRejected(paymentHash, error.message, submission)) {
       deps.emit({ event: 'failed', paymentHash, reason: `rejected before initiation: ${error.message}` });
       return { kind: 'failed', paymentHash, reason: `rejected before initiation: ${error.message}` };
     }
@@ -180,10 +217,7 @@ async function afterSubmitError(deps: PayerDeps, paymentHash: string, error: unk
   const record = deps.store.payment(paymentHash);
   if (record?.state === 'succeeded') return { kind: 'succeeded', paymentHash, feeMsat: record.feeMsat ?? 0n };
   if (record?.state === 'failed') return { kind: 'failed', paymentHash, reason: record.failureReason ?? 'unknown' };
-  const reason = `SendPaymentV2 ended without a terminal state: ${describeError(error)}`;
-  deps.store.markUncertain(paymentHash, reason);
-  deps.emit({ event: 'uncertain', paymentHash, reason });
-  return { kind: 'unresolved', paymentHash, state: 'uncertain', reason };
+  return markUncertain(deps, paymentHash, submission, `SendPaymentV2 ended without a terminal state: ${describeError(error)}`);
 }
 
 /** One TrackPaymentV2 read of the current state, without waiting for a terminal one. */
@@ -249,9 +283,11 @@ export async function reconcile(deps: PayerDeps, paymentHash: string, signal?: A
       backoff = Math.min(backoff * 2, BACKOFF_MAX_MS);
     } catch (error) {
       if (error instanceof LndError && error.notFound) {
-        const reverted = deps.store.markNotInitiated(paymentHash, `TrackPaymentV2: ${error.message}`);
-        deps.emit({ event: reverted ? 'not-initiated' : 'not-found-kept-unresolved', paymentHash, message: error.message });
-        if (reverted) return { kind: 'not-submitted', paymentHash, reason: 'LND has no payment for this hash; it may be submitted with the same hash' };
+        const reverted = deps.store.markNotInitiated(paymentHash, `TrackPaymentV2: ${error.message}`, submission);
+        // A submission claimed since this stream opened: this NotFound is not about it. Track the record as it is now.
+        if (reverted === 'superseded') continue;
+        deps.emit({ event: reverted === 'reverted' ? 'not-initiated' : 'not-found-kept-unresolved', paymentHash, message: error.message });
+        if (reverted === 'reverted') return { kind: 'not-submitted', paymentHash, reason: 'LND has no payment for this hash; it may be submitted with the same hash' };
         return { kind: 'unresolved', paymentHash, state: record.state, reason: 'LND reports no payment although attempts were recorded; operator review needed' };
       }
       if (signal?.aborted) {

@@ -2,13 +2,14 @@ import { isAbsolute } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   loadLab, preimageFor, tempDirectory,
-  type DecodedPayReq, type FakeInvoiceApi, type FakePayerApi, type Invoice, type Lab, type Payment, type PayerDeps, type PayerStore,
+  type DecodedPayReq, type FakeInvoiceApi, type FakePayerApi, type HtlcAttempt, type Invoice, type Lab, type Payment, type PayerDeps, type PayerStore,
   type ReceiverDeps, type ReceiverStore, type StreamDecision,
 } from './helpers/payment-lab-modules.js';
 
 /**
  * Regressions for the payment lab's state machines (examples/payment-lab), audit
- * 6e6665a findings F01-F07 and O03. Each runs the lab's real stores (SQLite through
+ * 6e6665a findings F01-F07 and O03, the verifier's residuals of those fixes (V1-V6) and
+ * the owner's reviewers' findings (L1-L4). Each runs the lab's real stores (SQLite through
  * node:sqlite, in a temporary directory), its payer and receiver workflows and its CLI
  * main, against scripted stand-ins for the LND API; no node, no Docker, no credential.
  */
@@ -50,12 +51,27 @@ function decoded(paymentHash: string, amountMsat: bigint): DecodedPayReq {
     description: 'payment-lab-state' };
 }
 
-function payment(label: string, status: 'IN_FLIGHT' | 'FAILED' | 'SUCCEEDED', amountMsat = 1000n): Payment {
+function payment(label: string, status: 'IN_FLIGHT' | 'FAILED' | 'SUCCEEDED', amountMsat = 1000n, htlcs: HtlcAttempt[] = []): Payment {
   const { preimage, paymentHash } = preimageFor(label);
   return { paymentHash, status, valueMsat: amountMsat, feeMsat: status === 'SUCCEEDED' ? 10n : 0n,
     preimage: status === 'SUCCEEDED' ? preimage : undefined, paymentRequest: '', failureReason: status === 'FAILED' ? 'FAILURE_REASON_NO_ROUTE' : '',
-    creationTimeNs: 1n, paymentIndex: '1', htlcs: [] };
+    creationTimeNs: 1n, paymentIndex: '1', htlcs };
 }
+
+/** One HTLC attempt over a one-hop route, delivering 1000 msat. */
+function attempt(attemptId: string, status: HtlcAttempt['status']): HtlcAttempt {
+  return { attemptId, status, route: { totalAmtMsat: 1000n, totalFeesMsat: 0n, hops: [{ chanId: '1', pubKey: DESTINATION, amtToForwardMsat: 1000n }] },
+    principalMsat: 1000n, attemptTimeNs: 1n, resolveTimeNs: status === 'IN_FLIGHT' ? 0n : 2n,
+    failureCode: status === 'FAILED' ? 'TEMPORARY_CHANNEL_FAILURE' : undefined, failureSourceIndex: status === 'FAILED' ? 1 : undefined };
+}
+
+/** The HTLC attempts recorded for a payment, as "attempt:submission:status". */
+function attemptTags(store: PayerStore): string[] {
+  return store.db.prepare('SELECT attempt_id, submission, status FROM htlc_attempts ORDER BY attempt_id').all()
+    .map(row => `${String(row.attempt_id)}:${String(row.submission)}:${String(row.status)}`);
+}
+
+const notFound = (): Promise<never> => Promise.reject(new lab.LndError('payment isn\'t initiated', 5, 404));
 
 function invoice(paymentHash: string, state: string, amtPaidMsat = 0n, settleIndex = 0n): Invoice {
   return { paymentHash, state, memo: '', valueMsat: 1000n, amtPaidMsat, addIndex: 1n, settleIndex, paymentRequest: '', htlcs: [] };
@@ -219,6 +235,197 @@ describe('payment lab payer', () => {
     store.close();
   });
 
+  it('V1: a definite refusal and NotFound for an earlier submission neither fail the live one nor release its reservation', async () => {
+    const store = payerStore('v1.db');
+    const hash = budgeted(store, 'v1', 'OP-V1');
+    const deps = payer(store);
+    let refuseFirst: ((error: unknown) => void) | undefined;
+    deps.api.send.push(() => new Promise<void>((_resolve, reject) => { refuseFirst = reject; }));
+    const first = lab.submit(deps, hash, { timeoutSeconds: 30, fault: 'none' });
+    await until(() => refuseFirst !== undefined);
+    // Another process reconciles while submission 1 is on its way: LND has nothing yet, so back to intent.
+    deps.api.track.push(notFound);
+    expect((await lab.reconcile(deps, hash)).kind).toBe('not-submitted');
+    // Submission 2 is claimed; its request is on its way.
+    const stop = new AbortController();
+    const second = lab.submit(deps, hash, { timeoutSeconds: 30, fault: 'none', signal: stop.signal });
+    await until(() => store.payment(hash)?.submissions === 2);
+    // Submission 1 ends with a definite refusal; its lookup finds nothing (LND has not initiated submission 2 yet).
+    deps.api.track.push(notFound);
+    refuseFirst?.(new lab.LndError('rate limit exceeded', 8, 429));
+    const outcome = await first;
+    expect(outcome.kind).toBe('unresolved');
+    expect(outcome.reason).toMatch(/superseded/);
+    expect(store.payment(hash)).toMatchObject({ state: 'submitting', submissions: 2 });
+    expect(store.budgetStatus('B')).toMatchObject({ heldMsat: 1100n, availableMsat: 0n });
+    expect(replacement(store, 'OP-V1')).toBe('refused');
+    expect(store.events(hash).map(item => item.kind)).toContain('stale-update');
+    stop.abort();
+    await second;
+  });
+
+  it('V2: an earlier submission\'s stream ending with a stale FAILED changes nothing and reports its own outcome', async () => {
+    const store = payerStore('v2.db');
+    const hash = budgeted(store, 'v2', 'OP-V2');
+    const deps = payer(store);
+    let releaseFirst: (() => void) | undefined;
+    deps.api.send.push(async onUpdate => {
+      onUpdate(payment('v2', 'IN_FLIGHT', 1000n, [attempt('1', 'IN_FLIGHT')]));
+      await new Promise<void>(resolve => { releaseFirst = resolve; });
+      onUpdate(payment('v2', 'FAILED', 1000n, [attempt('1', 'FAILED')]));
+    });
+    const first = lab.submit(deps, hash, { timeoutSeconds: 30, fault: 'none' });
+    await until(() => releaseFirst !== undefined);
+    // A tracker in another process records LND's FAILED for submission 1, and the operator retries.
+    store.applyUpdate(payment('v2', 'FAILED', 1000n, [attempt('1', 'FAILED')]), 'TrackPaymentV2', 1);
+    expect(store.prepareRetry('OP-V2').outcome).toBe('recorded');
+    const stop = new AbortController();
+    deps.api.send.push((onUpdate, signal) => {
+      onUpdate(payment('v2', 'IN_FLIGHT', 1000n, [attempt('1', 'FAILED'), attempt('2', 'IN_FLIGHT')]));
+      return heldUntilAborted(signal);
+    });
+    const second = lab.submit(deps, hash, { timeoutSeconds: 30, fault: 'none', signal: stop.signal });
+    await until(() => store.payment(hash)?.state === 'in_flight');
+    const before = store.events(hash).length;
+    // Submission 1's stream now delivers its FAILED and ends.
+    releaseFirst?.();
+    const outcome = await first;
+    expect(outcome).toMatchObject({ kind: 'unresolved', state: 'in_flight' });
+    expect(outcome.reason).toMatch(/FAILED.*superseded/);
+    expect(store.payment(hash)).toMatchObject({ state: 'in_flight', submissions: 2 });
+    expect(store.budgetStatus('B')).toMatchObject({ heldMsat: 1100n, availableMsat: 0n });
+    expect(store.events(hash).slice(before).map(item => item.kind)).toEqual(['stale-update']);
+    // Each attempt carries the submission it was first seen for.
+    expect(attemptTags(store)).toEqual(['1:1:FAILED', '2:2:IN_FLIGHT']);
+    stop.abort();
+    await second;
+  });
+
+  it('V3: a refused connection of an earlier submission does not revert the live one to intent', async () => {
+    const store = payerStore('v3.db');
+    const hash = budgeted(store, 'v3', 'OP-V3');
+    const deps = payer(store);
+    let failFirst: ((error: unknown) => void) | undefined;
+    deps.api.send.push(() => new Promise<void>((_resolve, reject) => { failFirst = reject; }));
+    const first = lab.submit(deps, hash, { timeoutSeconds: 30, fault: 'none' });
+    await until(() => failFirst !== undefined);
+    deps.api.track.push(notFound);
+    expect((await lab.reconcile(deps, hash)).kind).toBe('not-submitted');
+    let releaseSecond: (() => void) | undefined;
+    deps.api.send.push(async onUpdate => {
+      await new Promise<void>(resolve => { releaseSecond = resolve; });
+      onUpdate(payment('v3', 'IN_FLIGHT'));
+      onUpdate(payment('v3', 'FAILED'));
+    });
+    const second = lab.submit(deps, hash, { timeoutSeconds: 30, fault: 'none' });
+    await until(() => releaseSecond !== undefined);
+    failFirst?.(new lab.TransportError('connect ECONNREFUSED', 'connect'));
+    const outcome = await first;
+    expect(outcome.kind).toBe('unresolved');
+    expect(outcome.reason).toMatch(/superseded/);
+    expect(store.payment(hash)).toMatchObject({ state: 'submitting', submissions: 2 });
+    // Submission 2's own answers decide it.
+    releaseSecond?.();
+    expect((await second).kind).toBe('failed');
+    expect(store.payment(hash)?.state).toBe('failed');
+    expect(store.budgetStatus('B')).toMatchObject({ heldMsat: 0n, availableMsat: 1100n });
+  });
+
+  it('V4: after a concurrent NotFound revert, the same submission\'s own IN_FLIGHT and FAILED still apply', async () => {
+    const store = payerStore('v4.db');
+    const hash = budgeted(store, 'v4', 'OP-V4');
+    const deps = payer(store);
+    let go: (() => void) | undefined;
+    deps.api.send.push(async onUpdate => {
+      await new Promise<void>(resolve => { go = resolve; });
+      onUpdate(payment('v4', 'IN_FLIGHT'));
+      onUpdate(payment('v4', 'FAILED'));
+    });
+    const first = lab.submit(deps, hash, { timeoutSeconds: 30, fault: 'none' });
+    await until(() => go !== undefined);
+    // Another process reconciles while the request is still on its way: NotFound, back to intent.
+    deps.api.track.push(notFound);
+    expect((await lab.reconcile(deps, hash)).kind).toBe('not-submitted');
+    expect(store.payment(hash)?.state).toBe('intent');
+    // LND then initiates and fails submission 1 on its own stream.
+    go?.();
+    expect((await first).kind).toBe('failed');
+    expect(store.payment(hash)).toMatchObject({ state: 'failed', submissions: 1 });
+    expect(store.budgetStatus('B')).toMatchObject({ heldMsat: 0n, availableMsat: 1100n });
+    expect(store.events(hash).map(item => item.kind)).not.toContain('stale-update');
+    expect(store.prepareRetry('OP-V4').outcome).toBe('recorded');
+    // The retry closed submission 1: a late update for it is stale before submission 2 is claimed too.
+    expect(store.applyUpdate(payment('v4', 'FAILED'), 'TrackPaymentV2', 1).state).toBe('intent');
+    expect(store.budgetStatus('B')).toMatchObject({ heldMsat: 1100n, availableMsat: 0n });
+  });
+
+  it('V5: a bodiless HTTP 404 is not LND\'s NotFound: after a definite send error the payment stays uncertain', async () => {
+    expect(new lab.LndError('payment isn\'t initiated', 5, 404).notFound).toBe(true);
+    expect(new lab.LndError('payment isn\'t initiated', undefined, 404).notFound).toBe(true);
+    expect(new lab.LndError('HTTP 404', undefined, 404).notFound).toBe(false);
+    const store = payerStore('v5.db');
+    const hash = budgeted(store, 'v5', 'OP-V5');
+    const deps = payer(store);
+    deps.api.send.push(async () => { throw new lab.LndError('invoice expired', 2, 500); });
+    // A proxy in front of LND answers the track path with a 404 and no body.
+    deps.api.track.push(async () => { throw new lab.LndError('HTTP 404', undefined, 404); });
+    expect(await lab.submit(deps, hash, { timeoutSeconds: 30, fault: 'none' })).toMatchObject({ kind: 'unresolved', state: 'uncertain' });
+    expect(store.payment(hash)?.state).toBe('uncertain');
+    expect(store.budgetStatus('B')).toMatchObject({ heldMsat: 1100n, availableMsat: 0n });
+  });
+
+  it('L2: retry takes the most recently recorded failed payment and reserves against its budget, also with equal timestamps', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-10T12:00:00.000Z'));
+    try {
+      const store = payerStore('l2.db');
+      store.setBudget('B1', 1100n);
+      store.setBudget('B2', 1100n);
+      const pay = (label: string, budgetId: string): string => {
+        const { paymentHash } = preimageFor(label);
+        expect(store.recordIntent({ operationId: 'OP-L2', kind: 'payout', paymentRequest: `lnbcrt-${label}`, invoice: decoded(paymentHash, 1000n),
+          feeLimitMsat: 100n, maxParts: 1, budgetId }).outcome).toBe('recorded');
+        expect(store.claimForSubmission(paymentHash)).toBe(true);
+        store.applyUpdate(payment(label, 'FAILED'), 'SendPaymentV2', 1);
+        return paymentHash;
+      };
+      // The original invoice against B1 fails; its replacement against B2 fails in the same millisecond.
+      pay('l2-original', 'B1');
+      const newer = pay('l2-replacement', 'B2');
+      const retried = store.prepareRetry('OP-L2');
+      expect(retried).toMatchObject({ outcome: 'recorded', payment: { paymentHash: newer } });
+      expect(store.budgetStatus('B2')).toMatchObject({ heldMsat: 1100n });
+      expect(store.budgetStatus('B1')).toMatchObject({ heldMsat: 0n });
+      expect(store.operation('OP-L2')?.budgetId).toBe('B2');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('NotFound after a retry is judged by the retry\'s own HTLC attempts, each tagged with its submission', async () => {
+    const store = payerStore('attempts.db');
+    const hash = budgeted(store, 'attempts', 'OP-ATTEMPTS');
+    const deps = payer(store);
+    expect(store.claimForSubmission(hash)).toBe(true);
+    store.applyUpdate(payment('attempts', 'IN_FLIGHT', 1000n, [attempt('1', 'IN_FLIGHT')]), 'SendPaymentV2', 1);
+    store.applyUpdate(payment('attempts', 'FAILED', 1000n, [attempt('1', 'FAILED')]), 'SendPaymentV2', 1);
+    expect(store.prepareRetry('OP-ATTEMPTS').outcome).toBe('recorded');
+    // Submission 2 was claimed and then lost; LND has nothing for it: submission 1's attempt does not count.
+    expect(store.claimForSubmission(hash)).toBe(true);
+    deps.api.track.push(notFound);
+    expect((await lab.reconcile(deps, hash)).kind).toBe('not-submitted');
+    expect(store.payment(hash)).toMatchObject({ state: 'intent', submissions: 2 });
+    // Submission 3 records an attempt of its own: a NotFound now needs an operator.
+    expect(store.claimForSubmission(hash)).toBe(true);
+    store.applyUpdate(payment('attempts', 'IN_FLIGHT', 1000n, [attempt('1', 'FAILED'), attempt('2', 'IN_FLIGHT')]), 'SendPaymentV2', 3);
+    deps.api.track.push(notFound);
+    const outcome = await lab.reconcile(deps, hash);
+    expect(outcome).toMatchObject({ kind: 'unresolved', state: 'in_flight' });
+    expect(outcome.reason).toMatch(/operator review/);
+    expect(attemptTags(store)).toEqual(['1:1:FAILED', '2:3:IN_FLIGHT']);
+    expect(store.events(hash).map(item => item.kind)).toContain('not-found-after-attempts');
+  });
+
   it('O03: budget admission reads reservations through a budget index, also after upgrading an existing database', () => {
     const file = dir.path('o03.db');
     const store = payerStore(file);
@@ -228,7 +435,7 @@ describe('payment lab payer', () => {
       FROM reservations WHERE budget_id = ?`).all('B').map(row => String(row.detail)).join('\n');
     expect(plan()).toMatch(/SEARCH reservations USING INDEX reservations_by_budget \(budget_id=\?\)/);
     // A database written before the index existed: the migration builds it over the existing rows.
-    store.db.exec('DROP INDEX reservations_by_budget; PRAGMA user_version = 3');
+    store.db.exec('DROP INDEX reservations_by_budget; ALTER TABLE payments DROP COLUMN closed_submission; PRAGMA user_version = 3');
     store.close();
     const upgraded = payerStore(file);
     expect(upgraded.db.prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'reservations_by_budget'`).all()).toHaveLength(1);
@@ -305,6 +512,26 @@ describe('payment lab CLI', () => {
     api.track.push(async onUpdate => { onUpdate(payment('f06', 'FAILED')); });
     expect(await lab.main(['payer', 'reconcile', '--as', 'customer-payer', '--payment-hash', hash], services(file, api))).toBe(1);
     expect(outcomes()).toEqual([expect.objectContaining({ kind: 'failed', paymentHash: hash })]);
+  });
+
+  it('V6: a malformed amount or payment hash on the command line is a usage error (exit 2) that changes nothing', async () => {
+    const file = dir.path('v6.db');
+    const setup = payerStore(file);
+    setup.setBudget('B', 1100n);
+    setup.close();
+    const api = new ScriptedPayerApi();
+    const { paymentHash } = preimageFor('v6');
+    api.invoice = decoded(paymentHash, 1000n);
+    const run = services(file, api);
+    expect(await lab.main(['payer', 'pay', '--as', 'customer-payer', '--operation', 'OP-V6', '--kind', 'payout', '--invoice', 'lnbcrt1v6',
+      '--fee-limit-msat', 'x', '--budget', 'B'], run)).toBe(2);
+    expect(await lab.main(['payer', 'reconcile', '--as', 'customer-payer', '--payment-hash', 'zz'], run)).toBe(2);
+    expect(await lab.main(['payer', 'budget-set', '--as', 'customer-payer', '--budget', 'B', '--limit-msat', '-5'], run)).toBe(2);
+    expect(api.trackSignals).toHaveLength(0);
+    const after = payerStore(file);
+    expect(after.operation('OP-V6')).toBeUndefined();
+    expect(after.budgetStatus('B')).toMatchObject({ heldMsat: 0n, availableMsat: 1100n });
+    after.close();
   });
 });
 
@@ -401,5 +628,106 @@ describe('payment lab receiver', () => {
     expect(fulfilled).toHaveLength(1);
     expect(deps.store.fulfillmentCount(fulfilled[0] ?? '')).toBe(1);
     fixture.close();
+  });
+
+  const noCalls: FakeInvoiceApi = {
+    lookupInvoice: async () => { throw new Error('not scripted'); },
+    settleInvoice: async () => undefined,
+    cancelInvoice: async () => undefined,
+    subscribeInvoices: (_from, _onInvoice, signal) => heldUntilAborted(signal),
+  };
+
+  /**
+   * Order ORD-<name> whose first invoice A was recorded not-created, turned up late in LND while
+   * invoice B was live, and was canceled there; B was then decided not-created too. The order
+   * awaits payment and has no live invoice.
+   */
+  function canceledLateInvoice(name: string): { store: ReceiverStore; late: string; orderId: string } {
+    const store = receiverStore(`${name}.db`);
+    const orderId = `ORD-${name}`;
+    const late = preimageFor(`${name}-late`);
+    const other = preimageFor(`${name}-other`);
+    expect(store.recordInvoiceIntent({ orderId, amountMsat: 1000n, kind: 'standard', ...late }).outcome).toBe('recorded');
+    expect(store.markNotCreated(late.paymentHash)).toBe(true);
+    expect(store.recordInvoiceIntent({ orderId, amountMsat: 1000n, kind: 'standard', ...other }).outcome).toBe('recorded');
+    expect(store.applyInvoice(invoice(late.paymentHash, 'OPEN'), 'subscription')).toBe('late-invoice');
+    expect(store.applyInvoice(invoice(late.paymentHash, 'CANCELED'), 'lookup')).toBe('state-updated');
+    expect(store.markNotCreated(other.paymentHash)).toBe(true);
+    expect(store.invoice(late.paymentHash)).toMatchObject({ state: 'not-created', lateLndState: 'CANCELED' });
+    return { store, late: late.paymentHash, orderId };
+  }
+
+  it('L1: a delayed create answer for a late invoice LND canceled does not make it live again', () => {
+    const { store, late, orderId } = canceledLateInvoice('l1-create');
+    expect(store.markCreated(late, 'lnbcrt-l1-late', 1n)).toBe('not-created');
+    const next = preimageFor('l1-create-next');
+    expect(store.recordInvoiceIntent({ orderId, amountMsat: 1000n, kind: 'standard', ...next }).outcome).toBe('recorded');
+  });
+
+  it('L1: a replayed OPEN for a late invoice LND canceled does not make it live again', () => {
+    const { store, late, orderId } = canceledLateInvoice('l1-replay');
+    expect(store.applyInvoice(invoice(late, 'OPEN'), 'subscription')).toBe('unchanged');
+    expect(store.invoice(late)).toMatchObject({ state: 'not-created', lateLndState: 'CANCELED' });
+    const next = preimageFor('l1-replay-next');
+    expect(store.recordInvoiceIntent({ orderId, amountMsat: 1000n, kind: 'standard', ...next }).outcome).toBe('recorded');
+  });
+
+  it('L3: an invoice canceled while AddHoldInvoice was in flight is reported canceled, not created', async () => {
+    const store = receiverStore('l3.db');
+    const api: FakeInvoiceApi = {
+      ...noCalls,
+      addHoldInvoice: async request => {
+        // Meanwhile "receiver cancel" (or a reconciliation pass) learned from LND that the invoice is canceled.
+        expect(store.applyInvoice(invoice(request.paymentHash, 'CANCELED'), 'lookup')).toBe('state-updated');
+        return { paymentRequest: 'lnbcrt-l3', addIndex: 1n };
+      },
+    };
+    const outcome = await lab.createInvoice({ api, store, emit: quiet }, { orderId: 'ORD-L3', amountMsat: 1000n, hold: true, memo: 'l3',
+      expirySeconds: 3600 });
+    expect(outcome.kind).toBe('canceled');
+    expect(store.invoice(outcome.paymentHash ?? '')?.state).toBe('canceled');
+  });
+
+  it('L3: a create call whose answer was lost and whose lookup finds the invoice canceled is reported canceled', async () => {
+    const store = receiverStore('l3-lookup.db');
+    const api: FakeInvoiceApi = {
+      ...noCalls,
+      addInvoice: async () => { throw new lab.TransportError('socket hang up', 'response'); },
+      lookupInvoice: async paymentHash => invoice(paymentHash, 'CANCELED'),
+    };
+    const outcome = await lab.createInvoice({ api, store, emit: quiet }, { orderId: 'ORD-L3L', amountMsat: 1000n, hold: false, memo: 'l3',
+      expirySeconds: 3600 });
+    expect(outcome.kind).toBe('canceled');
+    expect(store.invoice(outcome.paymentHash ?? '')?.state).toBe('canceled');
+  });
+
+  it('L4: a late invoice LND reports canceled is counted resolved, is not adopted, and leaves its order open for a replacement', async () => {
+    const store = receiverStore('l4-late.db');
+    const late = preimageFor('l4-late');
+    expect(store.recordInvoiceIntent({ orderId: 'ORD-L4', amountMsat: 1000n, kind: 'standard', ...late }).outcome).toBe('recorded');
+    expect(store.markNotCreated(late.paymentHash)).toBe(true);
+    const api: FakeInvoiceApi = { ...noCalls, lookupInvoice: async paymentHash => invoice(paymentHash, 'CANCELED') };
+    expect(await lab.reconcileInvoices({ api, store, emit: quiet })).toEqual({ resolved: 1, open: 0, unknown: 0 });
+    expect(store.invoice(late.paymentHash)).toMatchObject({ state: 'not-created', lateLndState: 'CANCELED' });
+    expect(store.order('ORD-L4')?.state).toBe('awaiting-payment');
+    const next = preimageFor('l4-next');
+    expect(store.recordInvoiceIntent({ orderId: 'ORD-L4', amountMsat: 1000n, kind: 'standard', ...next }).outcome).toBe('recorded');
+  });
+
+  it('L4: an invoice canceled locally while its lookup was in flight is counted resolved, not open', async () => {
+    const store = receiverStore('l4-local.db');
+    const identity = preimageFor('l4-local');
+    expect(store.recordInvoiceIntent({ orderId: 'ORD-L4L', amountMsat: 1000n, kind: 'hold', ...identity }).outcome).toBe('recorded');
+    expect(store.markCreated(identity.paymentHash, 'lnbcrt-l4-local', 1n)).toBe('open');
+    const api: FakeInvoiceApi = {
+      ...noCalls,
+      lookupInvoice: async paymentHash => {
+        // "receiver cancel" in another process records LND's CANCELED; this lookup's answer was read just before.
+        expect(store.applyInvoice(invoice(paymentHash, 'CANCELED'), 'lookup')).toBe('state-updated');
+        return invoice(paymentHash, 'OPEN');
+      },
+    };
+    expect(await lab.reconcileInvoices({ api, store, emit: quiet })).toEqual({ resolved: 1, open: 0, unknown: 0 });
+    expect(store.invoice(identity.paymentHash)?.state).toBe('canceled');
   });
 });

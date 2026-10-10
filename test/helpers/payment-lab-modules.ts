@@ -27,6 +27,18 @@ async function load<T>(relative: string): Promise<T> {
 
 export type StreamDecision = 'continue' | 'stop' | 'drop';
 
+/** One HTLC attempt of a payment, as lnd/types.ts parses it. */
+export interface HtlcAttempt {
+  attemptId: string;
+  status: 'IN_FLIGHT' | 'SUCCEEDED' | 'FAILED';
+  route: { totalAmtMsat: bigint; totalFeesMsat: bigint; hops: { chanId: string; pubKey: string; amtToForwardMsat: bigint }[] };
+  principalMsat: bigint;
+  attemptTimeNs: bigint;
+  resolveTimeNs: bigint;
+  failureCode: string | undefined;
+  failureSourceIndex: number | undefined;
+}
+
 export interface Payment {
   paymentHash: string;
   status: string;
@@ -37,7 +49,7 @@ export interface Payment {
   failureReason: string;
   creationTimeNs: bigint;
   paymentIndex: string;
-  htlcs: unknown[];
+  htlcs: HtlcAttempt[];
 }
 
 export interface Invoice {
@@ -69,7 +81,7 @@ export interface PayerStore {
   readonly db: { prepare(sql: string): { all(...params: unknown[]): Record<string, unknown>[] }; exec(sql: string): void };
   close(): void;
   payment(paymentHash: string): PaymentRecord | undefined;
-  operation(operationId: string): { state: string } | undefined;
+  operation(operationId: string): { state: string; budgetId: string | undefined } | undefined;
   setBudget(budgetId: string, limitMsat: bigint): void;
   budgetStatus(budgetId: string): BudgetStatus | undefined;
   events(paymentHash: string): { kind: string; detail: string }[];
@@ -92,7 +104,7 @@ export interface PayerDeps { api: FakePayerApi; store: PayerStore; emit: (event:
 
 export interface ReceiverStore {
   close(): void;
-  invoice(paymentHash: string): { state: string; orderId: string } | undefined;
+  invoice(paymentHash: string): { state: string; orderId: string; lateLndState: string | undefined } | undefined;
   order(orderId: string): { state: string } | undefined;
   isSuperseded(paymentHash: string): boolean;
   fulfillmentCount(orderId: string): number;
@@ -105,6 +117,11 @@ export interface ReceiverStore {
 }
 
 export interface FakeInvoiceApi {
+  /** Only createInvoice calls these; a test that does not create an invoice leaves them out. */
+  addInvoice?(request: { preimage: string; valueMsat: bigint; memo: string; expirySeconds: number }):
+    Promise<{ paymentHash: string; paymentRequest: string; addIndex: bigint }>;
+  addHoldInvoice?(request: { paymentHash: string; valueMsat: bigint; memo: string; expirySeconds: number }):
+    Promise<{ paymentRequest: string; addIndex: bigint }>;
   lookupInvoice(paymentHash: string, signal?: AbortSignal): Promise<Invoice>;
   settleInvoice(preimage: string): Promise<void>;
   cancelInvoice(paymentHash: string): Promise<void>;
@@ -116,11 +133,14 @@ export interface ReceiverDeps { api: FakeInvoiceApi; store: ReceiverStore; emit:
 export interface Lab {
   PayerStore: new (path: string) => PayerStore;
   ReceiverStore: new (path: string) => ReceiverStore;
-  LndError: new (message: string, grpcCode: number | undefined, httpStatus: number | undefined) => Error;
+  LndError: new (message: string, grpcCode: number | undefined, httpStatus: number | undefined) => Error & { readonly notFound: boolean };
   TransportError: new (message: string, phase: 'connect' | 'request' | 'response') => Error;
   submit(deps: PayerDeps, paymentHash: string, options: { timeoutSeconds: number; fault: 'none'; signal?: AbortSignal }): Promise<PayOutcome>;
   reconcile(deps: PayerDeps, paymentHash: string, signal?: AbortSignal): Promise<PayOutcome>;
   settleHoldInvoice(deps: ReceiverDeps, orderId: string): Promise<{ kind: string; reason?: string; outcome?: string }>;
+  createInvoice(deps: ReceiverDeps, input: { orderId: string; amountMsat: bigint; hold: boolean; memo: string; expirySeconds: number }):
+    Promise<{ kind: string; paymentHash?: string; reason?: string }>;
+  reconcileInvoices(deps: ReceiverDeps, onlyOrder?: string, signal?: AbortSignal): Promise<{ resolved: number; open: number; unknown: number }>;
   listen(deps: ReceiverDeps, options: { reconcileIntervalMs: number; signal: AbortSignal }): Promise<void>;
   main(argv: string[], services: { payer(labDir: string | undefined, profile: string): PayerDeps;
     receiver(labDir: string | undefined, profile: string): ReceiverDeps }): Promise<number>;
@@ -132,7 +152,7 @@ export async function loadLab(): Promise<Lab> {
   const payerStore = await load<Pick<Lab, 'PayerStore'>>('payer/store.ts');
   const receiverStore = await load<Pick<Lab, 'ReceiverStore'>>('receiver/store.ts');
   const payer = await load<Pick<Lab, 'submit' | 'reconcile'>>('payer/payer.ts');
-  const receiver = await load<Pick<Lab, 'settleHoldInvoice' | 'listen'>>('receiver/receiver.ts');
+  const receiver = await load<Pick<Lab, 'settleHoldInvoice' | 'listen' | 'createInvoice' | 'reconcileInvoices'>>('receiver/receiver.ts');
   const cli = await load<Pick<Lab, 'main'>>('cli.ts');
   // The workflows classify errors with instanceof: an error made here must be the class they import.
   const shared = await load<{ definiteRefusal(error: unknown): boolean }>('receiver/receiver.ts');
@@ -141,7 +161,8 @@ export async function loadLab(): Promise<Lab> {
   }
   return { PayerStore: payerStore.PayerStore, ReceiverStore: receiverStore.ReceiverStore, LndError: errors.LndError,
     TransportError: errors.TransportError, submit: payer.submit, reconcile: payer.reconcile,
-    settleHoldInvoice: receiver.settleHoldInvoice, listen: receiver.listen, main: cli.main };
+    settleHoldInvoice: receiver.settleHoldInvoice, listen: receiver.listen, createInvoice: receiver.createInvoice,
+    reconcileInvoices: receiver.reconcileInvoices, main: cli.main };
 }
 
 /** A private temporary directory for the tests' SQLite files (the lab's store opens a file path). */
