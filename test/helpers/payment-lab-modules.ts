@@ -5,7 +5,7 @@ import { join } from 'node:path';
 
 /**
  * Loads the payment lab's own modules (examples/payment-lab/src) for the regression
- * tests in test/payment-lab-state.test.ts.
+ * tests in test/payment-lab-state.test.ts and test/payment-lab-ledger.test.ts.
  *
  * The lab is written for Node's type stripping: its imports end in `.ts`. Vitest runs
  * them as they are, but `tsc -p tsconfig.test.json` (part of `npm run build`, so of
@@ -74,12 +74,54 @@ export interface DecodedPayReq {
 }
 
 export interface PaymentRecord { paymentHash: string; state: string; submissions: number; failureReason: string | undefined }
+
+/** The raw database handle the tests use to corrupt or rewind a store (node:sqlite's DatabaseSync, narrowed). */
+export interface RawDb {
+  prepare(sql: string): { all(...params: unknown[]): Record<string, unknown>[]; run(...params: unknown[]): unknown };
+  exec(sql: string): void;
+}
+
+/** src/ledger/journal.ts */
+export interface JournalEntry {
+  entryId: number;
+  event: string;
+  reference: string;
+  operationId: string | undefined;
+  paymentHash: string | undefined;
+  origin: 'live' | 'migrated';
+  postedAt: string;
+  lines: { lineNo: number; account: string; direction: 'debit' | 'credit'; amountMsat: bigint; leg: string | undefined }[];
+}
+
+/** src/ledger/verify.ts */
+export interface Explanation { account: string; entryId?: number; event?: string; reference?: string; paymentHash?: string; reason: string }
+export interface AccountReport {
+  account: string; computed: bigint; stored: bigint; difference: bigint;
+  records?: bigint; recordsDifference?: bigint; lnd?: bigint; lndDifference?: bigint; firstEntry?: Explanation;
+}
+export interface LedgerVerification {
+  book: 'payer' | 'receiver';
+  balanced: boolean;
+  entries: number;
+  unbalancedEntries: { entryId: number; event: string; reference: string; debitsMsat: bigint; creditsMsat: bigint; reason: string }[];
+  accounts: AccountReport[];
+  lnd: 'compared' | 'pending' | 'not-requested' | 'unavailable' | 'incomplete';
+  lndDetail?: string;
+  firstDifference?: Explanation;
+}
+export interface LndLedgerSource {
+  listPaymentsPage?(indexOffset: bigint, maxPayments: number): Promise<{ payments: Payment[]; lastIndexOffset: bigint }>;
+  listInvoicesPage?(indexOffset: bigint, maxInvoices: number): Promise<{ invoices: Invoice[]; lastIndexOffset: bigint }>;
+}
 export interface BudgetStatus { heldMsat: bigint; consumedMsat: bigint; availableMsat: bigint }
 export type IntentResult = { outcome: 'recorded' | 'existing'; payment: PaymentRecord } | { outcome: 'refused'; reason: string };
 
 export interface PayerStore {
-  readonly db: { prepare(sql: string): { all(...params: unknown[]): Record<string, unknown>[] }; exec(sql: string): void };
+  readonly db: RawDb;
+  readonly book: 'payer';
   close(): void;
+  ledger(operationId: string): { account: string; amountMsat: bigint; postedAt: string }[];
+  journal(operationId: string): JournalEntry[];
   payment(paymentHash: string): PaymentRecord | undefined;
   operation(operationId: string): { state: string; budgetId: string | undefined } | undefined;
   setBudget(budgetId: string, limitMsat: bigint): void;
@@ -104,6 +146,9 @@ export interface FakePayerApi {
 export interface PayerDeps { api: FakePayerApi; store: PayerStore; emit: (event: Record<string, unknown>) => void }
 
 export interface ReceiverStore {
+  readonly db: RawDb;
+  readonly book: 'receiver';
+  journal(orderId: string): JournalEntry[];
   close(): void;
   invoice(paymentHash: string): { state: string; orderId: string; lateLndState: string | undefined; settleIndex: bigint | undefined;
     amtPaidMsat: bigint | undefined } | undefined;
@@ -125,6 +170,8 @@ export interface FakeInvoiceApi {
   addHoldInvoice?(request: { paymentHash: string; valueMsat: bigint; memo: string; expirySeconds: number }):
     Promise<{ paymentRequest: string; addIndex: bigint }>;
   lookupInvoice(paymentHash: string, signal?: AbortSignal): Promise<Invoice>;
+  /** Only receiver ledger-verify calls it (ListInvoices). */
+  listInvoicesPage?(indexOffset: bigint, maxInvoices: number): Promise<{ invoices: Invoice[]; lastIndexOffset: bigint }>;
   settleInvoice(preimage: string): Promise<void>;
   cancelInvoice(paymentHash: string): Promise<void>;
   subscribeInvoices(from: unknown, onInvoice: (invoice: Invoice) => StreamDecision, signal?: AbortSignal): Promise<void>;
@@ -152,7 +199,10 @@ export interface Lab {
   reconcileInvoices(deps: ReceiverDeps, onlyOrder?: string, signal?: AbortSignal): Promise<{ resolved: number; open: number; unknown: number }>;
   listen(deps: ReceiverDeps, options: { reconcileIntervalMs: number; signal: AbortSignal }): Promise<void>;
   main(argv: string[], services: { payer(labDir: string | undefined, profile: string): PayerDeps;
-    receiver(labDir: string | undefined, profile: string): ReceiverDeps }): Promise<number>;
+    receiver(labDir: string | undefined, profile: string): ReceiverDeps;
+    ledgerSource?(labDir: string | undefined, component: 'payer' | 'receiver', profile: string): LndLedgerSource | undefined }): Promise<number>;
+  /** src/ledger/verify.ts */
+  verifyLedger(store: PayerStore | ReceiverStore, api?: LndLedgerSource): Promise<LedgerVerification>;
 }
 
 export async function loadLab(): Promise<Lab> {
@@ -164,6 +214,7 @@ export async function loadLab(): Promise<Lab> {
   const payer = await load<Pick<Lab, 'submit' | 'reconcile'>>('payer/payer.ts');
   const receiver = await load<Pick<Lab, 'settleHoldInvoice' | 'listen' | 'createInvoice' | 'reconcileInvoices'>>('receiver/receiver.ts');
   const cli = await load<Pick<Lab, 'main'>>('cli.ts');
+  const ledger = await load<Pick<Lab, 'verifyLedger'>>('ledger/verify.ts');
   // The workflows classify errors with instanceof: an error made here must be the class they import.
   const shared = await load<{ definiteRefusal(error: unknown): boolean }>('receiver/receiver.ts');
   if (!shared.definiteRefusal(new errors.LndError('probe', 2, 500))) {
@@ -173,7 +224,12 @@ export async function loadLab(): Promise<Lab> {
     TransportError: errors.TransportError, ProtocolError: errors.ProtocolError, definiteRefusal: errors.definiteRefusal,
     parsePayment: types.parsePayment, parseInvoice: types.parseInvoice, parsePayReq: types.parsePayReq, submit: payer.submit, reconcile: payer.reconcile,
     settleHoldInvoice: receiver.settleHoldInvoice, listen: receiver.listen, createInvoice: receiver.createInvoice,
-    reconcileInvoices: receiver.reconcileInvoices, main: cli.main };
+    reconcileInvoices: receiver.reconcileInvoices, main: cli.main, verifyLedger: ledger.verifyLedger };
+}
+
+/** The file URL of a lab module, for a child process that imports it (the restart tests). */
+export function labModuleUrl(relative: string): string {
+  return new URL(`../../examples/payment-lab/src/${relative}`, import.meta.url).href;
 }
 
 /** A private temporary directory for the tests' SQLite files (the lab's store opens a file path). */

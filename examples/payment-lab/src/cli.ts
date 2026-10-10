@@ -8,6 +8,7 @@ import {
   NODE_NAMES, PAYER_PROFILES, RECEIVER_PROFILES, databasePath, invoiceApi, loadLab, payerApi, readApi,
   type Lab, type NodeName, type PayerProfile, type ReceiverProfile,
 } from './config.ts';
+import { verifyLedger, type LedgerStore, type LndLedgerSource } from './ledger/verify.ts';
 import { describeError } from './lnd/errors.ts';
 import { decodeInvoice, reconcile, recordIntent, submit, type Fault, type PayOutcome, type PayerDeps } from './payer/payer.ts';
 import { PayerStore, type OperationKind, type PaymentRecord } from './payer/store.ts';
@@ -31,15 +32,21 @@ import { parseAmount } from './util/money.ts';
  *
  * Arguments are validated before anything is recorded: a usage error never
  * leaves a durable change behind.
+ *
+ * ledger-verify has its own reading of 0, 1 and 75: 0 the books balance and agree with
+ * LND; 1 they do not (an unbalanced entry, a stored balance, the records or LND differ);
+ * 75 they balance but LND could not be compared (no list call, an error, more pages than
+ * the bound, or a payment or settlement the records have not learned yet).
  */
 
 const EXIT = { ok: 0, failed: 1, usage: 2, refused: 3, error: 4, unresolved: 75 } as const;
 
 class UsageError extends Error {}
 
+const bigintAsText = (_key: string, value: unknown): unknown => typeof value === 'bigint' ? value.toString() : value;
+
 function emit(event: Record<string, unknown>): void {
-  process.stdout.write(`${JSON.stringify({ at: new Date().toISOString(), ...event },
-    (_key, value: unknown) => typeof value === 'bigint' ? value.toString() : value)}\n`);
+  process.stdout.write(`${JSON.stringify({ at: new Date().toISOString(), ...event }, bigintAsText)}\n`);
 }
 
 function required(values: Record<string, unknown>, name: string): string {
@@ -111,12 +118,39 @@ function openReceiver(lab: Lab, profile: ReceiverProfile): ReceiverDeps {
 export interface Services {
   payer(labDir: string | undefined, profile: PayerProfile): PayerDeps;
   receiver(labDir: string | undefined, profile: ReceiverProfile): ReceiverDeps;
+  /**
+   * What ledger-verify compares with: ListPayments for a payer (its pay-only credential cannot
+   * list payments, so the lab reads them with its node's read-only credential), ListInvoices for
+   * a receiver (undefined: the profile's own invoice-only API, which has invoices:read).
+   */
+  ledgerSource?(labDir: string | undefined, component: 'payer' | 'receiver', profile: string): LndLedgerSource | undefined;
 }
 
 const LAB_SERVICES: Services = {
   payer: (labDir, profile) => openPayer(loadLab(labDir), profile),
   receiver: (labDir, profile) => openReceiver(loadLab(labDir), profile),
+  ledgerSource: (labDir, component, profile) => {
+    if (component !== 'payer') return undefined;
+    const lab = loadLab(labDir);
+    const credential = lab.manifest.credentials[PAYER_PROFILES[profile as PayerProfile].credential];
+    if (credential === undefined) throw new Error(`unknown credential for payer profile ${profile}`);
+    return readApi(lab, credential.node);
+  },
 };
+
+/** ledger-verify: the report as events (or one JSON object with --json) and the exit code (see the header). */
+async function ledgerVerify(store: LedgerStore, source: LndLedgerSource | undefined, json: boolean): Promise<number> {
+  const result = await verifyLedger(store, source);
+  if (json) {
+    process.stdout.write(`${JSON.stringify(result, bigintAsText)}\n`);
+  } else {
+    for (const account of result.accounts) emit({ event: 'ledger-account', ...account });
+    emit({ event: 'ledger-verify', book: result.book, balanced: result.balanced, entries: result.entries,
+      unbalancedEntries: result.unbalancedEntries, lnd: result.lnd, lndDetail: result.lndDetail, firstDifference: result.firstDifference });
+  }
+  if (!result.balanced) return EXIT.failed;
+  return result.lnd === 'compared' ? EXIT.ok : EXIT.unresolved;
+}
 
 function codeFor(outcome: PayOutcome): number {
   switch (outcome.kind) {
@@ -160,6 +194,7 @@ function showPayment(deps: PayerDeps, operationId: string): void {
     payment: payment ?? null,
     attempts: payment === undefined ? [] : deps.store.attempts(payment.paymentHash),
     ledger: deps.store.ledger(operationId),
+    journal: deps.store.journal(operationId),
     events: payment === undefined ? [] : deps.store.events(payment.paymentHash),
     budget: operation?.budgetId === undefined ? null : deps.store.budgetStatus(operation.budgetId) ?? null,
   });
@@ -170,9 +205,10 @@ async function payer(command: string, args: string[], services: Services): Promi
     as: { type: 'string' }, operation: { type: 'string' }, kind: { type: 'string' }, invoice: { type: 'string' },
     'fee-limit-msat': { type: 'string' }, 'max-parts': { type: 'string' }, 'timeout-s': { type: 'string' }, budget: { type: 'string' },
     'limit-msat': { type: 'string' }, 'payment-hash': { type: 'string' }, fault: { type: 'string' }, 'wait-for-go': { type: 'boolean' },
-    lab: { type: 'string' },
+    lab: { type: 'string' }, json: { type: 'boolean' },
   }, strict: true });
-  const deps = services.payer(values.lab, payerProfile(required(values, 'as')));
+  const profile = payerProfile(required(values, 'as'));
+  const deps = services.payer(values.lab, profile);
   try {
     switch (command) {
       case 'pay': {
@@ -237,6 +273,8 @@ async function payer(command: string, args: string[], services: Services): Promi
         emit({ event: 'budget', status: deps.store.budgetStatus(budgetId) ?? null, refusals: deps.store.refusals(budgetId) });
         return EXIT.ok;
       }
+      case 'ledger-verify':
+        return await ledgerVerify(deps.store, services.ledgerSource?.(values.lab, 'payer', profile) ?? {}, values.json === true);
       default:
         throw new UsageError(`unknown payer command ${command}`);
     }
@@ -325,9 +363,10 @@ async function receiver(command: string, args: string[], services: Services): Pr
   const { values } = parseArgs({ args, options: {
     as: { type: 'string' }, order: { type: 'string' }, 'amount-msat': { type: 'string' }, hold: { type: 'boolean' },
     memo: { type: 'string' }, 'expiry-s': { type: 'string' }, 'settle-index': { type: 'string' }, 'add-index': { type: 'string' },
-    'reconcile-interval-s': { type: 'string' }, lab: { type: 'string' },
+    'reconcile-interval-s': { type: 'string' }, lab: { type: 'string' }, json: { type: 'boolean' },
   }, strict: true });
-  const deps = services.receiver(values.lab, receiverProfile(required(values, 'as')));
+  const profile = receiverProfile(required(values, 'as'));
+  const deps = services.receiver(values.lab, profile);
   try {
     switch (command) {
       case 'create-invoice': {
@@ -377,9 +416,12 @@ async function receiver(command: string, args: string[], services: Services): Pr
           paymentRequest: item.paymentRequest }));
         emit({ event: 'order-record', order: deps.store.order(orderId) ?? null, invoices,
           deliveries: invoices.flatMap(item => deps.store.deliveries(item.paymentHash)),
-          fulfillments: deps.store.fulfillmentCount(orderId), ledger: deps.store.ledger(orderId), cursor: deps.store.cursor() });
+          fulfillments: deps.store.fulfillmentCount(orderId), ledger: deps.store.ledger(orderId), journal: deps.store.journal(orderId),
+          cursor: deps.store.cursor() });
         return EXIT.ok;
       }
+      case 'ledger-verify':
+        return await ledgerVerify(deps.store, services.ledgerSource?.(values.lab, 'receiver', profile) ?? deps.api, values.json === true);
       default:
         throw new UsageError(`unknown receiver command ${command}`);
     }
@@ -431,11 +473,13 @@ const USAGE = `usage: node src/cli.ts <component> <command> [options]
   payer show --as <profile> --operation <id>
   payer budget-set --as <profile> --budget <id> --limit-msat <n>
   payer budget-show --as <profile> --budget <id>
+  payer ledger-verify --as <profile> [--json]
   receiver create-invoice --as <merchant|customer> --order <id> --amount-msat <n> [--hold] [--memo <text>] [--expiry-s <n>]
   receiver settle|cancel|show --as <profile> --order <id>
   receiver reconcile --as <profile> [--order <id>]
   receiver listen --as <profile> [--reconcile-interval-s <n>]
   receiver cursor-set --as <profile> --settle-index <n> [--add-index <n>]
+  receiver ledger-verify --as <profile> [--json]
   analysis payments --node <customer|router|merchant> --payment-hash <hex>
   analysis diagnose --node <node> --payer <profile> --operation <id>
 All commands accept --lab <dir> (default: the run named in runtime/current.json).`;

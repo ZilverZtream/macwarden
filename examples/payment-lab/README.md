@@ -40,6 +40,8 @@ One operation has at most one pending payment (recorded and not yet terminal). O
  lncli and bitcoin-cli inside the containers; verdict from node state and the databases
 ```
 
+Each profile's SQLite file also holds that component's double-entry books (`src/ledger/`): every state change that moves or commits money posts a balanced journal entry in the same transaction, and `ledger-verify` checks the books against themselves, the component's own records and LND (see [Ledger](#ledger)).
+
 Setup opens four channels with known balances:
 
 ```text
@@ -529,6 +531,64 @@ Scenario 5: concurrent budget enforcement
 VERDICT scenario 5: PASS (10/10 checks passed, computed from node state and durable records)
 ```
 
+## Ledger
+
+The lab's books are double-entry: every event that moves or commits money posts one journal entry whose debits equal its credits, in the same `BEGIN IMMEDIATE` transaction as the state change that caused it. The state change and its entry commit together or not at all; there is no point between them for a crash to land on. Each payer and receiver profile keeps its own journal in its own database file; both use one chart of accounts (`src/ledger/accounts.ts`).
+
+| Account | What it carries |
+| --- | --- |
+| `customer-receivable` | order payments: the payer debits it when it pays an order, the receiver credits it when an order's invoice settles; across both books one order nets to zero |
+| `lnd-wallet-incoming` | money received: LND's `amt_paid_msat` of every settled invoice |
+| `lnd-wallet-outgoing` | money sent: LND's `value_msat` and `fee_msat` of every succeeded payment, as two lines |
+| `routing-fees` | LND's `fee_msat` of every succeeded payment |
+| `refunds-payable`, `payouts-payable` | refunds and payouts paid (debited on success; the lab does not accrue them when the operation is recorded) |
+| `suspense-double-payment` | money that does not belong to an order: a second payment of an operation (payer) or order (receiver), an underpaid settlement |
+| `budget:<id>`, `budget-commitments` | what each budget has committed: held reservations at principal plus fee allowance, consumed ones at principal plus actual fee; equal to the limit minus what is available |
+
+| Event (where it is posted) | Debit | Credit |
+| --- | --- | --- |
+| invoice settled (receiver, `applyInvoice`) | `lnd-wallet-incoming` amt paid | `customer-receivable` |
+| payment succeeded (payer, `applyUpdate`) | the operation kind's account (`customer-receivable`, `refunds-payable`, `payouts-payable`) value; `routing-fees` fee | `lnd-wallet-outgoing` value; `lnd-wallet-outgoing` fee |
+| double payment, payer (the operation's other payment had succeeded) | `suspense-double-payment` value | the operation kind's account |
+| double payment, receiver (`second-payment`) | `customer-receivable` | `suspense-double-payment` |
+| underpaid settlement (receiver) | `lnd-wallet-incoming` | `suspense-double-payment` |
+| budget reservation held (`recordIntent`, `prepareRetry`) | `budget:<id>` principal + allowance | `budget-commitments` |
+| reservation released (failure, withdrawn replacement) | `budget-commitments` | `budget:<id>` principal + allowance |
+| reservation consumed (success) | `budget-commitments` unused allowance (or `budget:<id>` principal + fee for a reservation a recorded failure had released) | `budget:<id>` (or `budget-commitments`) |
+
+Every line is a non-negative millisatoshi amount bounded to int64 with a direction. An entry is unique on (event, reference), the payment hash or the reservation, so a repeated delivery or update posts nothing. Each line records its account's running balance after it, and a `balances` table holds every account's current balance, written in the same transaction. Running balances and every sum are computed in JavaScript bigints and stored as decimal text: a sum of int64 amounts need not fit in 64 bits, and SQLite's `SUM` fails past that.
+
+`payer show` and `receiver show` print the operation's or order's `journal` next to the `ledger` view, which keeps its 1.2 shape (the payer's principal and routing-fee legs, the receiver's sales).
+
+**Upgrading a 1.2 database.** Opening it runs the ledger migration (payer migration 6, receiver migration 3) in one transaction: every `ledger_entries` row becomes the balanced entry the 1.3 code would have posted (`principal` and `routing-fee` rows of a payment become one payment-succeeded entry against the operation kind's account; a `sales` row becomes an invoice-settled entry against `customer-receivable`; a second payment of an operation or order also gets its double-payment entry), with origin `migrated` and the row's original time; reservations still held or consumed get their budget entries; a settled underpaid invoice, which 1.2 did not post, gets its underpaid-settlement entry; and `ledger_entries` is dropped.
+
+**Verifying.** `payer ledger-verify --as <profile>` and `receiver ledger-verify --as <profile>` check, and list every difference per account with the first entry (lowest entry ID) that explains it:
+
+1. every entry balances, every line is readable, on an account in the chart, in range;
+2. every account's balance recomputed from the entries equals the stored running balance (each line's, and the `balances` row);
+3. the payer's books equal its records: each budget account its held plus consumed reservations, the wallet and fee accounts its succeeded payments;
+4. the wallet and fee accounts equal LND's view over the same window, the payment hashes the store knows: the sum of settled invoices' `amt_paid_msat` from ListInvoices (receiver, with its invoice-only credential), the sums of succeeded payments' `value_msat` and `fee_msat` from ListPayments (payer, with its node's read-only credential, because pay-only cannot list payments). Both lists are read in pages of 500, at most 200 pages.
+
+Exit 0: balanced and in agreement with LND. Exit 1: not balanced (an unbalanced or unreadable entry, a stored balance, the records or LND differ). Exit 75: balanced, but LND could not be compared (no list call, a node error, more than 100,000 items, or LND reports a payment or settlement the records have not learned yet: reconcile, then verify again). Run it with the component quiet. Without `--json` it prints a `ledger-account` event per account and a `ledger-verify` summary; with `--json`, one object:
+
+```text
+{"book":"payer","balanced":false,"entries":3,
+ "unbalancedEntries":[{"entryId":2,"event":"payment-succeeded","reference":"<hash>","debitsMsat":"1011","creditsMsat":"1010","reason":"..."}],
+ "accounts":[{"account":"routing-fees","computed":"11","stored":"10","difference":"1","records":"10","recordsDifference":"1",
+              "lnd":"10","lndDifference":"1","firstEntry":{"account":"routing-fees","entryId":2,"event":"payment-succeeded",...}}, ...],
+ "lnd":"compared","firstDifference":{"account":"routing-fees","entryId":2,"event":"payment-succeeded","reference":"<hash>","reason":"..."}}
+```
+
+Amounts are net debit (debits minus credits) in msat, as decimal strings. From code (the harness calls it after every run):
+
+```ts
+import { verifyLedger } from './src/ledger/verify.ts';
+verifyLedger(store: { db: DatabaseSync; book: 'payer' | 'receiver' }, api?: LndLedgerSource): Promise<LedgerVerification>
+// store: a PayerStore or ReceiverStore. api: anything with listPaymentsPage (payer: ReadApi) or listInvoicesPage
+// (receiver: InvoiceApi or ReadApi); without it, lnd is 'not-requested'. The result is the --json object with bigints;
+// lnd is 'compared' | 'pending' | 'not-requested' | 'unavailable' | 'incomplete'.
+```
+
 ## Design decisions
 
 **Durable intent before submission.** The payer commits the operation, the payment hash (decoded from the invoice), the amount, the fee limit and any budget reservation in one transaction, then marks the payment `submitting` and counts the submission in a second committed transaction, and only then writes SendPaymentV2. After a crash at any point, the record says what may have been sent. The receiver works the same way: it generates the preimage, stores it with the hash, and then asks LND to create exactly that invoice (AddInvoice with `r_preimage`, or AddHoldInvoice with the hash), so a lost answer is resolved by looking the known hash up. A lookup that finds nothing decides the invoice only once the create call is over (LND itself refused it, or two minutes have passed since the intent, well beyond the call's 30-second timeout); until then the invoice stays `creating` and no replacement is issued. Only a definite refusal from LND counts as over: an application error with gRPC code 2, 3, 5, 6, 7, 8, 9, 11, 12 or 16, or a 400-class response other than 404 carrying a message. Cancelled (1), DeadlineExceeded (4), Aborted (10), Internal (13), Unavailable (14), DataLoss (15), an HTTP 408, 499, 502, 503 or 504 from a gateway or proxy, a 404 without gRPC code 5, and a transport error after connecting are ambiguous: LND may still be creating the invoice, so it waits for the window. (The list is in `definiteRefusal` in `src/lnd/errors.ts`; the payer applies the same classes to SendPaymentV2.)
@@ -541,13 +601,13 @@ VERDICT scenario 5: PASS (10/10 checks passed, computed from node state and dura
 
 **SendPaymentV2 is called only by compare-and-set.** `intent → submitting` is a conditional update; two processes (a restarted worker and an old one, or two replicas) can never both submit the same record. A repeated request for an operation that was already submitted is answered from the record and TrackPaymentV2, before the invoice is decoded, so it does not depend on the invoice still being unexpired. The invoice is matched to the record by payment hash when it decodes offline, else by text compared case-insensitively (BOLT11 is case-insensitive; QR codes carry it in upper case); if the stored invoice is damaged, the invoice given is read with DecodePayReq and matched by hash, and a refusal says the record is damaged. Succeeded and failed are final: a later "not found" never fails a succeeded payment, and a completed operation is never retried. Every update and every call outcome is applied with the submission it was made for. A submission is superseded once a later one is claimed or `payer retry` prepares the next one; a late FAILED or IN_FLIGHT, a definite refusal, a refused connection or a stream that ended, for a superseded submission, is logged as `stale-update` and changes neither the payment nor its reservation, and that call reports its own outcome as `unresolved`, naming the live submission. A SUCCEEDED is recorded whichever submission it was read for, because the money left. A NotFound that sends a record back to intent supersedes nothing: if LND initiates that submission after all, its own IN_FLIGHT and FAILED still apply. `payer retry` takes the operation's most recently recorded failed payment (by insertion order, not by a timestamp two payments can share) and reserves against that payment's budget, which `payer show` then reports.
 
-**Idempotency keys.** The payer's ledger is unique on (operation ID, payment hash, account); the receiver's fulfillment on (payment hash, order ID), at most one per order, and its ledger on (order ID, payment hash, account). Every path that learns of a settlement (subscription, lookup, the settle call itself) goes through one function that inserts with `ON CONFLICT DO NOTHING` and posts only when the insert happened. Every delivery is still logged, so repeats are visible.
+**Idempotency keys.** Each journal entry is unique on (event, reference): the payer's payment-succeeded entry on the payment hash, its budget entries on the reservation; the receiver's fulfillment on (payment hash, order ID), at most one per order, and its invoice-settled entry on the payment hash. Every path that learns of a settlement (subscription, lookup, the settle call itself) goes through one function that inserts with `ON CONFLICT DO NOTHING` and posts only when the insert happened. Every delivery is still logged, so repeats are visible.
 
 **Subscriptions are a fast path; lookups are the ground truth.** The listener resumes SubscribeInvoices from its stored settle index (LND replays every settlement after a non-zero index) and also looks up every unresolved invoice at start and every few seconds, which covers the cursor-zero case and any gap between subscribing and LND registering the subscription. Stopping the listener (or `receiver reconcile`) cuts off the lookup in progress and starts no further call; what was already recorded stays recorded, and the next pass picks up the rest.
 
 **Reservations.** A budget reservation is principal plus fee allowance, and the fee allowance is also the fee limit passed to LND, so the reservation is an upper bound LND enforces. It is taken in the same `BEGIN IMMEDIATE` transaction as the intent, which holds SQLite's write lock from the start: concurrent workers serialise, and the second sees the first's reservation. It stays held while the payment is unresolved, is released when LND reports the payment failed, and becomes principal plus the actual fee when LND reports success. Admission reads the budget's reservations through an index on the budget, so other budgets' history adds no work under the write lock.
 
-**Accounting from LND's numbers.** On success the ledger posts LND's `value_msat` as principal and LND's `fee_msat` as the routing fee, and the HTLC attempts are stored next to them, so the books can be checked against the attempts and against the routing node's forwarding log.
+**Accounting from LND's numbers.** On success the ledger posts LND's `value_msat` as principal and LND's `fee_msat` as the routing fee, and the HTLC attempts are stored next to them, so the books can be checked against the attempts and against the routing node's forwarding log. The books are double-entry and balanced by construction: an entry whose debits differ from its credits is refused, and the refusal rolls back the state change with it; `ledger-verify` proves the balance afterwards rather than assuming it (see [Ledger](#ledger)).
 
 **Storage: SQLite through Node's built-in `node:sqlite`.** SQLite gives transactions, cross-process locking and constraints, which the design relies on (the partial unique index, the unique ledger keys, the serialised reservation). WAL with `synchronous = FULL` makes each commit durable on disk before it returns. `node:sqlite` ships with the Node.js versions macwarden supports, so the lab has no native addon to compile and no runtime dependency; it is marked experimental in Node.js, and the lab uses only its basic synchronous API (`DatabaseSync`, prepared statements). The SQL works unchanged with a package such as `better-sqlite3`. A journaled JSON file with fsync was the alternative; it would need its own locking between processes and could not enforce the invariants as constraints. Each database file is created owner-only. The receiver's database holds invoice preimages, which are proofs of payment: in production, protect it like a credential.
 
@@ -563,14 +623,16 @@ VERDICT scenario 5: PASS (10/10 checks passed, computed from node state and dura
 | `payer reconcile --as <profile> [--payment-hash <hex>]` | resolve unresolved payments with TrackPaymentV2 |
 | `payer retry --as <profile> --operation <id>` | submit a payment LND reported failed again, same invoice |
 | `payer show`, `payer budget-set`, `payer budget-show` | records and budgets |
+| `payer ledger-verify --as <profile> [--json]` | check the payer's books against themselves, its records and ListPayments |
 | `receiver create-invoice --as <profile> --order <id> --amount-msat <n> [--hold]` | record the invoice identity, then create it |
 | `receiver settle` / `cancel --order <id>` | release or cancel a hold invoice |
 | `receiver listen` | settlement consumer with periodic reconciliation |
 | `receiver reconcile [--order <id>]` | resolve invoices by lookup |
+| `receiver ledger-verify --as <profile> [--json]` | check the receiver's books against themselves and ListInvoices |
 | `analysis payments --node <node> --payment-hash <hex>` | every payment LND holds for a hash |
 | `analysis diagnose --node <node> --payer <profile> --operation <id>` | liquidity diagnosis for a payment |
 
-Exit codes: 0 done; 1 payment failed according to LND; 2 usage error (also a malformed amount or payment hash, or an amount or index above 2^63 - 1, the most SQLite stores); 3 refused (budget, conflicting operation, wrong state); 4 configuration or node error; 75 unresolved: the outcome is not known yet and the record stays open for reconciliation. `payer reconcile` maps a payment's outcome the same way as `pay` and `retry`; for several payments, the first of 75, 3 and 1 that applies to any of them, else 0. Arguments are checked before anything is recorded, so a usage error leaves no change behind.
+Exit codes: 0 done; 1 payment failed according to LND; 2 usage error (also a malformed amount or payment hash, or an amount or index above 2^63 - 1, the most SQLite stores); 3 refused (budget, conflicting operation, wrong state); 4 configuration or node error; 75 unresolved: the outcome is not known yet and the record stays open for reconciliation. `payer reconcile` maps a payment's outcome the same way as `pay` and `retry`; for several payments, the first of 75, 3 and 1 that applies to any of them, else 0. `ledger-verify` exits 0 balanced, 1 unbalanced, 75 when LND could not be compared. Arguments are checked before anything is recorded, so a usage error leaves no change behind.
 
 ## Limits
 
@@ -594,6 +656,7 @@ Exit codes: 0 done; 1 payment failed according to LND; 2 usage error (also a mal
 | `src/payer/` | payer records and the submit and reconcile workflow |
 | `src/receiver/` | receiver records, invoice creation, hold settlement, the settlement listener |
 | `src/analysis/` | ListPayments by hash, forwarding history, the liquidity diagnosis |
+| `src/ledger/` | chart of accounts, posting rules, journal, the 1.2 migration, `verifyLedger` |
 | `src/cli.ts` | the service's command line |
 | `scenarios/` | the five scenario drivers and their `.sh` and `.ps1` wrappers |
 | `runtime/` | created by setup, ignored by git: one directory per lab run |

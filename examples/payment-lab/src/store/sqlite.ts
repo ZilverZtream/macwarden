@@ -19,7 +19,14 @@ export type Row = Record<string, SQLOutputValue>;
 
 const BUSY_TIMEOUT_MS = 15_000;
 
-export function openDatabase(path: string, migrations: readonly string[]): DatabaseSync {
+/**
+ * One schema step: SQL, or a function for a step that must compute in JavaScript (the ledger
+ * migration sums amounts as bigints, which SQLite cannot do past 2^63). Both run inside the
+ * same BEGIN IMMEDIATE transaction as the user_version update.
+ */
+export type Migration = string | ((db: DatabaseSync) => void);
+
+export function openDatabase(path: string, migrations: readonly Migration[]): DatabaseSync {
   // Create the file owner-only before SQLite does; SQLite gives -wal and -shm the same mode.
   closeSync(openSync(path, 'a', 0o600));
   const db = new DatabaseSync(path, { timeout: BUSY_TIMEOUT_MS, readBigInts: true, enableForeignKeyConstraints: true });
@@ -27,7 +34,10 @@ export function openDatabase(path: string, migrations: readonly string[]): Datab
   db.exec('PRAGMA synchronous = FULL');
   immediate(db, () => {
     const version = Number(int(db.prepare('PRAGMA user_version').get() ?? {}, 'user_version'));
-    for (let index = version; index < migrations.length; index += 1) db.exec(migrations[index] ?? '');
+    for (let index = version; index < migrations.length; index += 1) {
+      const step = migrations[index] ?? '';
+      if (typeof step === 'string') db.exec(step); else step(db);
+    }
     if (version < migrations.length) db.exec(`PRAGMA user_version = ${migrations.length}`);
   });
   return db;
