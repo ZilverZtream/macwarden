@@ -506,7 +506,7 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
     if (work.length - workHead >= ATTRIBUTION_QUEUE_ITEMS || workBytes + size > ATTRIBUTION_QUEUE_BYTES) {
       counters.attributionDropped += 1;
       // Whose call this was is unknown, so the usage data is marked incomplete for everyone.
-      usage.noteDroppedAttribution(Date.now());
+      usage.noteDroppedAttribution(deps.clock().getTime());
       return;
     }
     work.push({ run: make(), bytes: size });

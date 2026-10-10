@@ -93,6 +93,19 @@ describe('RUNE/base64 the URL-safe decoder accepts exactly what ccan accepts', (
       expect(decodeRuneBase64(bad), JSON.stringify(bad)).toBeNull();
   });
 
+  it('RUNE/base64 a last group of only padding decodes to nothing, as ccan base64_decode_tail_using_maps does', () => {
+    // CLN v26.06.8 ccan/ccan/base64/base64.c: `while (insize != 0 && src[insize-1] == '=') insize--;`
+    // then `if (insize == 0) return 0;` before the one-character check: the group adds no bytes.
+    const quartets = padded.slice(0, padded.length - (padded.length % 4 || 4));
+    for (const text of ['=', '==', '===', '===='])
+      expect(decodeRuneBase64(text), JSON.stringify(text)).toEqual(Buffer.alloc(0));
+    expect(decodeRuneBase64('YWJj====')).toEqual(Buffer.from('abc'));
+    expect(decodeRuneBase64('YWJj=')).toEqual(Buffer.from('abc'));
+    expect(decodeRuneBase64(`${quartets}====`)).toEqual(decodeRuneBase64(quartets));
+    // Only the last group is stripped: padding before it is still refused.
+    expect(decodeRuneBase64('YWJj====YWJj')).toBeNull();
+  });
+
   it('RUNE/base64 ignores unused trailing bits, as ccan does (no canonical check)', () => {
     const text = unpadded.slice(0, -1) + String.fromCharCode(unpadded.charCodeAt(unpadded.length - 1) ^ 1);
     const decoded = decodeRuneBase64(text);
@@ -100,7 +113,11 @@ describe('RUNE/base64 the URL-safe decoder accepts exactly what ccan accepts', (
   });
 
   it('RUNE/base64 an empty value decodes to nothing; fewer than 32 bytes is too short', () => {
+    // ccan: srclen 0 → base64_decode_tail_using_maps returns 0, so the decode succeeds with no
+    // bytes; rune_from_base64n then fails on blen < 32, which decodeRuneText reports as too-short.
     expect(decodeRuneBase64('')).toEqual(Buffer.alloc(0));
+    expect(decodeRuneText('')).toEqual({ ok: false, reason: 'too-short' });
+    expect(decodeRuneText('====')).toEqual({ ok: false, reason: 'too-short' });
     expect(decodeRuneText(Buffer.alloc(31).toString('base64url'))).toEqual({ ok: false, reason: 'too-short' });
   });
 

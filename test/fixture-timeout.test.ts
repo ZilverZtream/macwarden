@@ -23,16 +23,24 @@ afterEach(() => {
   }
 });
 
+// The stalled response is aborted by the fixture's own 80 ms deadline. The bound is measured from
+// the first Docker call (after the private-directory check, which spawns PowerShell on Windows and
+// can take seconds on a loaded runner) to the abort: at least most of the deadline (the abort waited
+// for its timer) and far below a stall. The test timeout only guards against a hang.
+const STALL_CEILING_MS = 10_000;
 it('CP-004/fixture-pinned stalled getinfo response is aborted and the owned fixture is cleaned', async () => {
   const root = temp();
   const fixtureDir = join(root, 'macwarden-fixture');
   const calls: string[] = [];
   let destroyed = false;
   let opened = false;
+  let firstCall: number | undefined;
+  let destroyedAt: number | undefined;
   const fixture = createFixture({
     tempBase: root,
     timeout: 80,
     docker: (args: string[], options: { timeout: number }) => {
+      firstCall ??= performance.now();
       calls.push(args[0]);
       expect(options.timeout).toBeGreaterThan(0);
       if (args[0] === 'exec') return { status: 0, stdout: Buffer.alloc(0) };
@@ -46,16 +54,18 @@ it('CP-004/fixture-pinned stalled getinfo response is aborted and the owned fixt
         stream.statusCode = 200;
         response(stream);
       };
-      req.destroy = () => { destroyed = true; };
+      req.destroy = () => { destroyed = true; destroyedAt = performance.now(); };
       return req;
     },
   });
   await expect(fixture.up()).rejects.toThrow(/timed out/);
   expect(opened).toBe(true);
   expect(destroyed).toBe(true);
+  expect(destroyedAt! - firstCall!).toBeGreaterThanOrEqual(50);
+  expect(destroyedAt! - firstCall!).toBeLessThan(STALL_CEILING_MS);
   expect(calls.filter(call => call === 'down')).toHaveLength(2);
   expect(existsSync(fixtureDir)).toBe(false);
-}, 3000);
+}, 30_000);
 
 it('CP-004/fixture-pinned Docker startup and copies share the deadline and timeout cleanup removes copied files', async () => {
   const root = temp();

@@ -714,6 +714,8 @@ it('WATCH/canary-burst a canary used in the same turn as 25,000 ordinary calls s
   const usage = UsageStore.parse(readFileSync(`${s.registry}.usage.json`, 'utf8'));
   expect(usage.droppedAttributions).toBe(summary.droppedAttributions);
   expect(usage.lastAttributionDrop).toBe(new Date(usage.lastAttributionDrop!).toISOString());
+  // The drop time comes from watch's clock (1.2.1), like every other usage time, not the host's.
+  expect(usage.lastAttributionDrop).toBe('2026-10-08T12:00:00.000Z');
   expect(usage.maybeIncomplete()).toBe(true);
 }, 60_000);
 

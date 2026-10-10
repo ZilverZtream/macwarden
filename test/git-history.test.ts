@@ -450,3 +450,28 @@ it('git-history/dropped an lndconnect URI without a macaroon in history is count
   expect(mixed.summary.blobsScanned).toBe(2);
   expect(mixed.summary.dropped).toBe(2);
 }));
+
+// 1.2.1 (verifier, F17): the walk already counted a work-tree file's URIs, so --git-history counts
+// a blob only when it was also committed at a path where the work tree does not hold that content,
+// as a history finding is skipped only at the (path, fingerprint) pairs the work tree reported.
+it('git-history/dropped a blob the work tree holds unchanged at every path is not counted again', async () => temp(async dir => {
+  const two = 'a lndconnect://h1:10009?cert=AAA\nb lndconnect://h2:10009?cert=BBB\n';
+  const dropped = async () => ((await scan([dir])) as Result & { summary: { dropped: number; blobsScanned: number } }).summary;
+  writeFileSync(join(dir, 'uris.txt'), two);
+  commit(dir, 'add');
+  const walk = (await import('../src/scan/index.js')).scan;
+  expect(((await walk([dir], {})) as Result & { summary: { dropped: number } }).summary.dropped).toBe(2);
+  expect(await dropped()).toMatchObject({ blobsScanned: 1, dropped: 2 });
+  // Line endings git may convert on checkout (core.autocrlf) do not make the content differ.
+  writeFileSync(join(dir, 'uris.txt'), two.replaceAll('\n', '\r\n'));
+  expect(await dropped()).toMatchObject({ dropped: 2 });
+  // The same content committed at a second path the work tree also holds: still the walk's.
+  writeFileSync(join(dir, 'uris.txt'), two);
+  writeFileSync(join(dir, 'copy.txt'), two);
+  commit(dir, 'copy');
+  expect(await dropped()).toMatchObject({ blobsScanned: 1, dropped: 4 });
+  // uris.txt changes: its old blob (also copy.txt's) is no longer what the work tree holds there.
+  writeFileSync(join(dir, 'uris.txt'), `${two}c lndconnect://h3:10009?cert=CCC\n`);
+  commit(dir, 'third');
+  expect(await dropped()).toMatchObject({ blobsScanned: 2, dropped: 3 + 2 + 2 });
+}));

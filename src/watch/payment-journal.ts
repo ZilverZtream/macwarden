@@ -535,7 +535,7 @@ export class PaymentJournal {
       // owner-only: 0600 on POSIX (checked below), the same owner and DACL on Windows.
       let created: { dev: number; ino: number } | null = null;
       if (existing) {
-        if (process.platform === 'win32') {
+        if (platform === 'win32') {
           const found = await verifyOwnerOnly(target);
           if (!found) throw new JournalError('cannot verify the payment journal permissions');
           if (found.noAcl) aclWarning = true;

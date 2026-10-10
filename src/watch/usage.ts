@@ -293,11 +293,12 @@ export class UsageStore {
   /**
    * Notes one call that was not attributed (see droppedAttributions). Called once per drop
    * under overload, so it only counts and keeps a number; the time is formatted when the
-   * store is written.
+   * store is written. A clock stepped back never moves the time before the one recorded.
    */
   noteDroppedAttribution(atMs: number): void {
     this.droppedAttributions += 1;
-    this.lastAttributionDropMs = atMs;
+    const recorded = this.lastAttributionDropMs ?? (this.lastAttributionDrop === null ? null : Date.parse(this.lastAttributionDrop));
+    this.lastAttributionDropMs = recorded === null || atMs > recorded ? atMs : recorded;
     this.changed = true;
     this.version += 1;
   }

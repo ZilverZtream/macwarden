@@ -529,6 +529,26 @@ it('PAYJ/coverage gaps carry their reason; coverage exists only between register
     .toEqual([{ from: Date.parse(at(5)), to: Date.parse(at(5)), reason: 'dropped', dropped: 1 }]);
 });
 
+// docs/spec.md coverage rules (1.2.1): a drop inside time that is uncovered for another reason is
+// listed with its count beside that gap (the listed gaps overlap); it removes no covered time, so
+// the uncovered time is the window less the covered time, never the sum of the listed gaps.
+it('PAYJ/coverage a drop outside every covered span is listed beside the gap it falls in and adds no uncovered time', () => {
+  const records = [
+    start(0), record('drop', 6, { count: 3, first: at(2), last: at(5), reason: 'overload' }),
+    record('registered', 10, { session: 1 }), record('unregistered', 20, { session: 1, reason: 'stopping' }),
+    record('run-end', 21, { payments: 0, deletions: 0, dropped: 3 }),
+  ].map(line => parseRecord(line)!);
+  const from = Date.parse(at(0)), to = Date.parse(at(30));
+  const coverage = journalCoverage(records, NODE, from, to);
+  expect(coverage.gaps.map(gap => [(gap.from - from) / 1_000, (gap.to - from) / 1_000, gap.reason, gap.dropped])).toEqual([
+    [0, 10, 'not-registered', 0],
+    [2, 5, 'dropped', 3],
+    [20, 30, 'not-running', 0],
+  ]);
+  expect(coverage.covered).toEqual([[Date.parse(at(10)), Date.parse(at(20))]]);
+  expect(to - from - coverage.coveredMs).toBe(20_000);
+});
+
 // 1.2.1: coverage is computed in sorted sweeps. A hostile journal holds hundreds of thousands of
 // drop records; pairing each with every span was quadratic.
 it('PAYJ/coverage-linear tens of thousands of disjoint drop windows cost linear time', async () => {
