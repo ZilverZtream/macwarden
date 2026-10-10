@@ -132,3 +132,51 @@ it('WATCH/output-queue a write that fails counts the batch it was writing as dro
   queue.push('three\n');
   expect(queue.dropped()).toBe(3);
 });
+
+// 1.2.1 (audit F11): a partially written batch is requeued line by line, so a later loss
+// counts every line that was not completely written, not one buffer.
+it('WATCH/output-queue a partial write keeps line boundaries, so a later failure counts every unwritten line', async () => {
+  const results: (() => Promise<number>)[] = [];
+  const calls: string[] = [];
+  let releaseFirst!: () => void;
+  const first = new Promise<void>(done => { releaseFirst = done; });
+  results.push(async () => { await first; return 5; });                                  // 'zero\n' written whole
+  results.push(async () => 1);                                                           // one byte of the batch
+  results.push(async () => { throw Object.assign(new Error('broken pipe'), { code: 'EPIPE' }); });
+  const queue = createOutputQueue(chunk => { calls.push(chunk.toString('utf8')); return results.shift()!(); });
+  queue.push('zero\n');
+  queue.push('one\n');
+  queue.push('two\n');
+  queue.push('three\n');
+  releaseFirst();
+  expect(await queue.drain(1_000)).toBe(true);
+  // The three lines were written as one coalesced batch; the remainder was retried in order.
+  expect(calls).toEqual(['zero\n', 'one\ntwo\nthree\n', 'ne\ntwo\nthree\n']);
+  expect(queue.dropped()).toBe(3);
+});
+
+// 1.2.1 (audit F11): after close the remainder of a partial write is dropped and counted,
+// never requeued, and settle and drain resolve as soon as that write completes.
+it('WATCH/output-queue close during a write drops its unwritten remainder and settles at once', async () => {
+  let blockFirst!: (written: number) => void;
+  let calls = 0;
+  const blocked = createOutputQueue(() => { calls += 1; return new Promise<number>(done => { blockFirst = done; }); });
+  blocked.push('zero\n');                // in flight
+  blocked.push('one\n');
+  blocked.push('two\n');
+  blockFirst(5);
+  await new Promise(resolve => setImmediate(resolve));
+  expect(calls).toBe(2);                 // 'one\ntwo\n' is now in flight as one batch
+  blocked.push('three\n');               // queued behind it
+  blocked.close();
+  expect(blocked.dropped()).toBe(1);     // the queued line
+  const started = Date.now();
+  const settled = blocked.settle(5_000);
+  const drained = blocked.drain(5_000);
+  blockFirst(1);                         // one byte of the batch, then nothing more may be written
+  expect(await settled).toBe(true);
+  expect(await drained).toBe(true);
+  expect(Date.now() - started).toBeLessThan(1_000);
+  expect(calls).toBe(2);
+  expect(blocked.dropped()).toBe(3);     // 'ne\n' and 'two\n' were never completely written
+});

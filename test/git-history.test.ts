@@ -404,3 +404,49 @@ it('git-history/oversized-macaroon an oversized .macaroon blob is undecodable wi
   expect(result.findings).toEqual([expect.objectContaining({ kind: 'undecodable', fingerprint: expected, commit: added })]);
   expect(result.skipped.filter(item => item.reason === 'size')).toEqual([]);
 }));
+
+// 1.2.1 (audit F16): an empty blob is scanned and counted like the empty file the walk scans,
+// never skipped for size.
+it('git-history/empty-blob an empty file and an empty .macaroon are scanned as the walk scans them, not skipped for size', async () => temp(async dir => {
+  writeFileSync(join(dir, 'empty.txt'), '');
+  writeFileSync(join(dir, 'empty.macaroon'), '');
+  const added = commit(dir, 'add');
+  const walk = (await import('../src/scan/index.js')).scan;
+  const walked = await walk([dir], {}) as Result;
+  rmSync(join(dir, 'empty.txt'));
+  rmSync(join(dir, 'empty.macaroon'));
+  commit(dir, 'remove');
+  const result = await scan([dir]);
+  const notExcluded = (items: { reason: string }[]) => items.filter(item => item.reason !== 'excluded-dir');
+  expect(notExcluded(walked.skipped)).toEqual([]);
+  expect(notExcluded(result.skipped)).toEqual([]);
+  // Both files have the same (empty) content: one blob, read as text and as a *.macaroon file.
+  expect(result.summary.blobsScanned).toBe(1);
+  expect(walked.findings).toEqual([expect.objectContaining({ kind: 'undecodable', path: display(join(dir, 'empty.macaroon')) })]);
+  expect(result.findings).toEqual([expect.objectContaining({ kind: 'undecodable', path: display(join(dir, 'empty.macaroon')),
+    fingerprint: walked.findings[0].fingerprint, commit: added })]);
+}));
+
+// 1.2.1 (audit F17): summary.dropped counts history blobs exactly as it counts work-tree files.
+it('git-history/dropped an lndconnect URI without a macaroon in history is counted in summary.dropped like the walk counts it', async () => temp(async dir => {
+  const text = 'node: lndconnect://127.0.0.1:10009?cert=MIIB\n';
+  writeFileSync(join(dir, 'connect.txt'), text);
+  commit(dir, 'add');
+  const walk = (await import('../src/scan/index.js')).scan;
+  const walked = await walk([dir], {}) as Result & { summary: { dropped: number } };
+  expect(walked.summary.dropped).toBe(1);
+  rmSync(join(dir, 'connect.txt'));
+  commit(dir, 'remove');
+  const history = await scan([dir]) as Result & { summary: { dropped: number } };
+  expect(history.summary.blobsScanned).toBe(1);
+  expect(history.summary.dropped).toBe(1);
+  // A blob with findings adds its dropped count as well.
+  writeFileSync(join(dir, 'mixed.env'), text + 'TOKEN=' + bytes('default-admin').toString('hex') + '\n');
+  commit(dir, 'mixed');
+  rmSync(join(dir, 'mixed.env'));
+  commit(dir, 'remove mixed');
+  const mixed = await scan([dir]) as Result & { summary: { dropped: number } };
+  expect(mixed.findings).toEqual([expect.objectContaining({ fingerprint: admin.fingerprint })]);
+  expect(mixed.summary.blobsScanned).toBe(2);
+  expect(mixed.summary.dropped).toBe(2);
+}));

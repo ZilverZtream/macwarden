@@ -91,9 +91,19 @@ export function createOutputQueue(writeChunk: ChunkWriter, limitBytes = OUTPUT_L
     writeChunk(chunk).then(written => {
       busy = false;
       const count = Math.max(0, Math.min(written, chunk.length));
-      queued -= count;
-      // A partial write keeps the rest at the front so lines stay in order.
-      if (count < chunk.length) queue.unshift(chunk.subarray(count));
+      if (count < chunk.length) {
+        // A partial write returns the rest as the lines it came from (only the first one
+        // sliced), so a later loss counts every line that was not completely written.
+        let skip = count;
+        let first = 0;
+        while (skip >= parts[first].length) { skip -= parts[first].length; first++; }
+        const rest = [parts[first].subarray(skip), ...parts.slice(first + 1)];
+        // After close nothing more is written: the rest is dropped and counted (1.2.1).
+        if (closed) dropped += rest.length;
+        else queue.unshift(...rest);
+      }
+      // close() already emptied the queue and its byte count.
+      if (!closed) queued -= count;
       pump();
     }, () => {
       busy = false;

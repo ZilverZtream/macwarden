@@ -1257,17 +1257,16 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
     // Like the walk: text is read up to TEXT_LIMIT; a larger *.macaroon blob keeps only its
     // first MACAROON_LIMIT + 1 bytes and is reported undecodable with that fingerprint.
     const keep = (i: number) => sizes[i] <= TEXT_LIMIT ? sizes[i] : needs(i) & 2 ? MACAROON_LIMIT + 1 : 0;
-    const readable: number[] = [];
-    for (let i = 0; i < reading.length; i++) if (keep(i) > 0) readable.push(i);
-    await readBlobs(git, directory, repository, readable.map(i => names[i]), j => keep(readable[j]), (j, bytes) => {
+    const scanBlob = (i: number, bytes: Buffer): void => {
       checkCancellation();
-      const i = readable[j];
       const b = reading[i];
       blobsScanned++;
       for (const bit of [1, 2]) {
         if (!(needs(i) & bit)) continue;
         const macaroonFile = bit === 2;
         const outcome = !macaroonFile && sizes[i] > TEXT_LIMIT ? SIZE_SKIP : scanBytes('', bytes, macaroonFile, now, ctx);
+        // Counted once per blob and use, like the walk counts it once per file (1.2.1).
+        if (!('skip' in outcome)) dropped += outcome.dropped;
         const empty = !('skip' in outcome) && outcome.findings.length === 0;
         done[b] |= bit;
         if (!empty) outcomes.set(b * 2 + (macaroonFile ? 1 : 0), outcome);
@@ -1277,7 +1276,16 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
           if (!empty) historyOutcomes.set(key, outcome);
         }
       }
-    });
+    };
+    // An empty blob needs no read: it is scanned (and counted) as the empty file it is, like
+    // the walk scans an empty file. keep(i) = 0 otherwise means a text blob over the size limit.
+    const readable: number[] = [];
+    for (let i = 0; i < reading.length; i++) {
+      if (sizes[i] === 0) scanBlob(i, Buffer.alloc(0));
+      else if (keep(i) > 0) readable.push(i);
+    }
+    await readBlobs(git, directory, repository, readable.map(i => names[i]), j => keep(readable[j]),
+      (j, bytes) => scanBlob(readable[j], bytes));
     // Oldest first. A credential is reported at the oldest commit and path where that exact
     // (path, fingerprint) pair is new; it is skipped only where that pair was already reported
     // (by the work tree or an older blob). Per (blob, use) a record keeps the blob's
