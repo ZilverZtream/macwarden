@@ -120,7 +120,8 @@ it('PAYADAPTER/list-payments refuses invalid responses and queries, and bounds t
     { payments: [], last_index_offset: '-1' },
   ];
   let index = 0;
-  await withServer(() => ({ body: JSON.stringify(invalid[index++]) }), async adapter => {
+  // Every case carries a valid last_index_offset unless it tests that field, so each is refused for its own fault.
+  await withServer(() => ({ body: JSON.stringify({ last_index_offset: '1', ...invalid[index++] }) }), async adapter => {
     for (let i = 0; i < invalid.length; i++) {
       const error = await adapter.listPayments({ startSeconds: 0, endSeconds: 10, indexOffset: 0n, max: 1 }).then(() => null, failure => failure);
       expect(error, JSON.stringify(invalid[i])).toBeInstanceOf(LndError);
