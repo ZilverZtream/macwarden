@@ -7,6 +7,10 @@ import { acquireLock, type Deps } from '../src/commands/watch.js';
 
 const depsFor = (pid: number, files: typeof fs) => ({ fs: files, env: {}, clock: () => new Date(), emit: () => undefined,
   hostname: () => hostname(), pid, processDomain: async () => null }) as unknown as Deps;
+// Two live owners, as two real watches are: this process and its parent. A made-up PID names no
+// process, so a watch that read the other's fresh lock late would rightly find it stale and take it
+// over, which is not the race under test (and Linux, unlike Windows, reports such a PID as gone).
+const [first, second] = [process.pid, process.ppid];
 // A same-host owner PID that does not exist: the lock is stale.
 const staleRecord = `${JSON.stringify({ pid: 2_147_483_000, hostname: hostname() })}\n`;
 
@@ -49,8 +53,8 @@ it('WATCH/lock-race a watch acting on a stale read never removes the lock anothe
         }
         return handle;
       } } as typeof fs;
-      const results = await Promise.allSettled([acquireLock(path, depsFor(1_000_001, files)),
-        acquireLock(path, depsFor(1_000_002, files))]);
+      const results = await Promise.allSettled([acquireLock(path, depsFor(first, files)),
+        acquireLock(path, depsFor(second, files))]);
       // The interleaving really happened: B held the stale record while A replaced it.
       expect(heldStale).toBe(true);
       expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1);
@@ -69,7 +73,7 @@ it('WATCH/lock-race two watches starting at once against a stale lock never both
     for (let round = 0; round < 200; round++) {
       const path = join(dir, `r${round}.watch.lock`);
       writeFileSync(path, staleRecord);
-      const results = await Promise.allSettled([acquireLock(path, depsFor(1_000_001, fs)), acquireLock(path, depsFor(1_000_002, fs))]);
+      const results = await Promise.allSettled([acquireLock(path, depsFor(first, fs)), acquireLock(path, depsFor(second, fs))]);
       expect(results.filter(result => result.status === 'fulfilled').length).toBeLessThanOrEqual(1);
       for (const result of results) if (result.status === 'fulfilled') await result.value();
     }
@@ -78,3 +82,23 @@ it('WATCH/lock-race two watches starting at once against a stale lock never both
     rmSync(dir, { recursive: true, force: true });
   }
 }, 60_000);
+
+// The other order: B starts first but is still looking up its process domain when A takes the
+// lock, so B's exclusive create meets A's fresh lock and reads its record. A live owner keeps it.
+it('WATCH/lock-race a watch that reads the fresh lock of another watch refuses it', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mw-lock-race-'));
+  try {
+    const path = join(dir, 'late.watch.lock');
+    writeFileSync(path, staleRecord);
+    let go!: () => void;
+    const gate = new Promise<null>(resolve => { go = () => resolve(null); });
+    const late = acquireLock(path, { ...depsFor(second, fs), processDomain: () => gate } as Deps);
+    const release = await acquireLock(path, depsFor(first, fs));
+    go();
+    await expect(late).rejects.toMatchObject({ code: 'EEXIST' });
+    await release();
+    expect(existsSync(path)).toBe(false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
