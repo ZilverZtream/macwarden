@@ -455,3 +455,63 @@ it('RECONCILE/window a --since after now is refused, never a negative window rep
   const output = await reconcile([...s.args, '--since', at(7_200)], fakeLnd({}), at(3_600));
   expect(output).toMatchObject({ ok: false, error: { code: 2, step: 'Q1', message: expect.stringContaining('--since must not be after') } });
 });
+
+// 1.2.1 (audit F08): a request journaled after --until never establishes who initiated a payment
+// in the window, nor adds to its observations; requests before --since still do.
+it('RECONCILE/until a request after the window neither hides an unattributed payment in it nor joins its observations', async () => {
+  const window = (journal: string[]) => setup([start(0), line('registered', 1, { session: 1 }), ...journal, line('alive', 1_000)]);
+  const listed = [lnd(H('paid'), 300, 'succeeded', [htlc('succeeded', 1_000n, 0n)], null, 1n)];
+  // 00:00 to 00:10, LND's payment at 00:05, the only request (a retry of the paid invoice) at 00:15.
+  const later = window([payment(900, C1, '4294967341', H('paid'), '1000')]);
+  const output = await reconcile([...later.args, '--since', at(0), '--until', at(600)], fakeLnd({ listed }), at(1_200));
+  expectSchemaValid(output);
+  const result = output.result as ReconcileResult;
+  expect(result.payments).toEqual([]);
+  expect(result.unattributed.map(item => [item.paymentHash, item.coverage])).toEqual([[H('paid'), 'covered']]);
+  expect(result.lookups.attributedOutsideWindow).toBe(0);
+  expect(output).toMatchObject({ ok: true, exitCode: 1 });
+  // A's request at 00:05 for 1000 msat, B's at 00:15 for 9000 msat: A's alone, as A asked for it.
+  const both = window([payment(300, C1, '4294967341', H('paid'), '1000'), payment(900, C2, '0', H('paid'), '9000')]);
+  const shared = (await reconcile([...both.args, '--since', at(0), '--until', at(600)], fakeLnd({ listed }), at(1_200))).result as ReconcileResult;
+  expect(shared.payments).toEqual([expect.objectContaining({ paymentHash: H('paid'), attribution: 'single', credentials: [C1],
+    observation: expect.objectContaining({ first: at(300), last: at(300), calls: 1, requestedMsat: '1000' }) })]);
+  expect(shared.unattributed).toEqual([]);
+  expect(shared.credentials.map(row => row.credential)).toEqual([C1]);
+  // A request before --since still attributes a payment in the window (1.2.1).
+  const before = window([payment(100, C1, '4294967341', H('paid'), '1000'), payment(900, C2, '0', H('paid'), '9000')]);
+  const early = (await reconcile([...before.args, '--since', at(200), '--until', at(600)], fakeLnd({ listed }), at(1_200))).result as ReconcileResult;
+  expect(early.payments).toEqual([]);
+  expect(early.unattributed).toEqual([]);
+  expect(early.lookups.attributedOutsideWindow).toBe(1);
+});
+
+// 1.2.1 (audit F09): DeleteAllPayments with failed_htlcs_only alone deletes the failed attempts of
+// every payment; it is associated with each journaled hash like any other accepted deletion.
+it('RECONCILE/deletions a failed-HTLC cleanup is associated with every journaled payment; a request LND refuses is not', async () => {
+  const deletion = (seconds: number, credential: string, scope: string) => line('deletion', seconds, { requestId: String(++requestId),
+    method: '/lnrpc.Lightning/DeleteAllPayments', credential, rootKeyId: '0', paymentHash: null, scope, extraction: 'complete' });
+  const s = setup([start(0), line('registered', 1, { session: 1 }), payment(10, C1, '4294967341', H('cleaned'), '1000'),
+    deletion(20, C2, 'failed-htlcs'), deletion(30, C1, 'none'), line('alive', 100)]);
+  const listed = [lnd(H('cleaned'), 10, 'succeeded', [htlc('succeeded', 1_000n, 0n)])];
+  const output = await reconcile([...s.args, '--since', at(1), '--until', at(100)], fakeLnd({ listed }), at(100));
+  expectSchemaValid(output);
+  const result = output.result as ReconcileResult;
+  expect(result.payments[0]).toMatchObject({ paymentHash: H('cleaned'), deletedBy: [C2] });
+  expect(result.deletions.map(item => [item.credential, item.scope])).toEqual([[C2, 'failed-htlcs'], [C1, 'none']]);
+});
+
+// 1.2.1 (audit F10): a drop that lasted no measurable time leaves the covered time whole, but a
+// payment created at that instant, or within the clock tolerance of it, is not called covered.
+it('RECONCILE/coverage a payment at an instantaneous recorded drop is a gap, and one near it a boundary, never covered', async () => {
+  const s = setup([start(0), line('registered', 1, { session: 1 }),
+    line('drop', 301, { count: 1, first: at(300), last: at(300), reason: 'overload' }), line('alive', 1_000)]);
+  const listed = [lnd(H('at-drop'), 300, 'succeeded', [], null, 1n), lnd(H('near-drop'), 330, 'succeeded', [], null, 2n),
+    lnd(H('far'), 500, 'succeeded', [], null, 3n)];
+  const output = await reconcile([...s.args, '--since', at(1), '--until', at(900)], fakeLnd({ listed }), at(1_000));
+  expectSchemaValid(output);
+  const result = output.result as ReconcileResult;
+  expect(result.coverage).toMatchObject({ complete: false, gapCount: 1, gapSeconds: 0 });
+  expect(result.coverage.gaps).toEqual([{ from: at(300), to: at(300), reason: 'dropped', dropped: 1 }]);
+  expect(result.unattributed.map(item => [item.paymentHash, item.coverage])).toEqual([
+    [H('at-drop'), 'gap'], [H('near-drop'), 'boundary'], [H('far'), 'covered']]);
+});

@@ -128,6 +128,9 @@ it('PAYJ/deletions DeletePayment names its hash and scope; DeleteAllPayments its
   expect(deletionFacts(all, uint(3, 1), false)).toEqual({ paymentHash: null, scope: 'all-payments', extraction: 'complete' });
   expect(deletionFacts(all, uint(1, 1), false)).toMatchObject({ scope: 'failed-payments' });
   expect(deletionFacts(all, message(uint(1, 1), uint(2, 1)), false)).toMatchObject({ scope: 'failed-htlcs' });
+  // failed_htlcs_only alone is a valid request (LND v0.21.4 removes every payment's failed attempts): its own scope, never `none` (audit F09).
+  expect(deletionFacts(all, uint(2, 1), false)).toEqual({ paymentHash: null, scope: 'failed-htlcs', extraction: 'complete' });
+  expect(deletionFacts(all, message(uint(2, 1), uint(2, 0)), false)).toMatchObject({ scope: 'none' });
   expect(deletionFacts(all, Buffer.alloc(0), false)).toMatchObject({ scope: 'none' });
   expect(deletionFacts(all, null, true)).toMatchObject({ extraction: 'payload-too-large' });
   expect(deletionFacts(all, Buffer.from([0x08]), false)).toMatchObject({ extraction: 'malformed' });

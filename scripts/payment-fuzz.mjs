@@ -467,8 +467,9 @@ function expectDeletion(method, spec) {
     const paymentHash = spec.hash && spec.hash.length === 32 ? spec.hash.toString('hex') : null;
     return { paymentHash, scope: spec.failedHtlcs ? 'failed-htlcs' : 'payment', extraction: spec.hash && !paymentHash ? 'malformed' : 'complete' };
   }
-  const scope = spec[3] ? 'all-payments' : spec[1] ? 'failed-payments' : 'none';
-  return { paymentHash: null, scope: spec[2] && scope !== 'none' ? 'failed-htlcs' : scope, extraction: 'complete' };
+  // failed_htlcs_only is its own scope, alone too (1.2.1, audit F09: LND v0.21.4 accepts it alone).
+  const scope = spec[2] ? 'failed-htlcs' : spec[3] ? 'all-payments' : spec[1] ? 'failed-payments' : 'none';
+  return { paymentHash: null, scope, extraction: 'complete' };
 }
 
 /** 1 to 3 mutations of a serialized message; returns the bytes and the mutation names. */
@@ -1320,7 +1321,8 @@ function reconcileOracle(model, lnd, window, now) {
   const since = window.sinceMs ?? Math.min(mine.length ? Date.parse(mine[0].time) : until, until);
   if (since > until) return { exit: 2 };
   const inWindow = ms => ms >= since && ms <= until;
-  const payments = mine.filter(item => item.type === 'payment');
+  // Requests after --until take no part in attribution or observations (1.2.1, audit F08).
+  const payments = mine.filter(item => item.type === 'payment' && Date.parse(item.time) <= until);
   const windowHashes = new Set(payments.filter(item => item.paymentHash && inWindow(Date.parse(item.time))).map(item => item.paymentHash));
   const requests = new Map();
   for (const item of payments) if (item.paymentHash && windowHashes.has(item.paymentHash)) {

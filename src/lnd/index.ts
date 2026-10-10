@@ -441,6 +441,10 @@ function paymentLookup(call: ReturnType<typeof transport>['call'], read: ReturnT
       if (!Number.isSafeInteger(startSeconds) || !Number.isSafeInteger(endSeconds) || startSeconds < 0 || endSeconds < startSeconds
         || !Number.isSafeInteger(max) || max < 1 || max > MAX_PAGE || indexOffset < 0n || indexOffset > MAX_UINT64)
         throw new UsageError('invalid payment query');
+      // omit_hops is never requested: LND v0.21.4 then builds each attempt's route without hops,
+      // and Route.TotalFees() is 0 for a route with no hops, so total_fees_msat (and the
+      // payment's fee_msat) would read 0 and every fee would be counted as settled amount (SQL
+      // payments store, payments/db/sql_converters.go; the kv store ignores the flag).
       const query = new URLSearchParams({ include_incomplete: 'true', index_offset: indexOffset.toString(), max_payments: String(max),
         reversed: 'false', count_total_payments: 'false', creation_date_start: String(startSeconds), creation_date_end: String(endSeconds) });
       const value = json(await read(stage, 'GET', `/v1/payments?${query.toString()}`, undefined, { maxResponse: PAYMENT_RESPONSE_LIMIT }), stage);

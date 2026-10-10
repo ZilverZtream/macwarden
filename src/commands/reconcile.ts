@@ -71,6 +71,16 @@ function coveredSpan(covered: [number, number][], from: number, to: number): boo
   return found >= 0 && to <= covered[found][1];
 }
 
+/** Whether any span (sorted, disjoint, ends included) meets [from, to]: a binary search. */
+function touchesSpan(spans: [number, number][], from: number, to: number): boolean {
+  let low = 0, high = spans.length - 1, found = -1;
+  while (low <= high) {
+    const middle = (low + high) >> 1;
+    if (spans[middle][0] <= to) { found = middle; low = middle + 1; } else high = middle - 1;
+  }
+  return found >= 0 && spans[found][1] >= from;
+}
+
 // Every LND request has its own timeout; the command as a whole has this budget too (audit 1.2.1),
 // after which the remaining pages and lookups are counted as not done and reported.
 export const RECONCILE_BUDGET_MS = 10 * 60_000;
@@ -205,18 +215,21 @@ async function runSteps(args: string[], deps: Deps): Promise<ReconcileOutput> {
   const since = sinceFlag ?? Math.min(firstMine ?? until, until);
   if (since > until) return fail(2, 'Q1', '--since must not be after --until (now when --until is not given)');
   const inWindow = (ms: number) => ms >= since && ms <= until;
-  const payments = mine.filter((record): record is PaymentRecord => record.type === 'payment');
+  // Requests journaled after the window never establish who initiated a payment in it, nor change
+  // its observations (1.2.1): a retry of an already paid invoice after --until would otherwise
+  // hide an unattributed payment in the window, or add its credential and amount to one.
+  const payments = mine.filter((record): record is PaymentRecord => record.type === 'payment' && Date.parse(record.time) <= until);
   const deletionRecords = mine.filter((record): record is DeletionRecord => record.type === 'deletion' && inWindow(Date.parse(record.time)));
   const observation = (record: PaymentRecord): ReconcileObservation => ({ time: record.time, run: record.run, requestId: record.requestId,
     method: record.method, credential: record.credential, rootKeyId: record.rootKeyId, label: labelFor(record.rootKeyId),
     amountMsat: record.amountMsat, amountSource: record.amountSource, feeLimitMsat: record.feeLimitMsat, extraction: record.extraction });
   const byHash = new Map<string, PaymentRecord[]>();
   const unmatched: ReconcileObservation[] = [];
-  // Every hash the journal attributes for this node, at any time: a listed payment with one of
-  // them is attributed even when the request was journaled outside the window.
+  // Every hash the journal attributes for this node up to the window's end: a listed payment with
+  // one of them is attributed even when the request was journaled before the window.
   const journaledHashes = new Set(payments.flatMap(record => record.paymentHash ? [record.paymentHash] : []));
   // A hash journaled in the window is attributed from every request for it the journal holds, in
-  // the window or before it (1.2.1): a credential that requested the same hash earlier shares the
+  // the window or before it, never after it (1.2.1): a credential that requested the same hash earlier shares the
   // attribution, and LND's one record for the hash cannot be its alone.
   const windowHashes = new Set(payments.flatMap(record => record.paymentHash && inWindow(Date.parse(record.time)) ? [record.paymentHash] : []));
   for (const record of payments) {
@@ -253,7 +266,8 @@ async function runSteps(args: string[], deps: Deps): Promise<ReconcileOutput> {
   const results: ReconcilePayment[] = [];
   let tracked = 0, trackFailed = 0, trackLimited = 0;
   // Deletions that may have removed this payment's record or some of its attempts: one naming
-  // the hash, or any DeleteAllPayments (its scope covers payments by status, not by hash).
+  // the hash, or any DeleteAllPayments LND accepts (its scope covers payments, or their failed
+  // attempts with failed_htlcs_only, by status, not by hash).
   // Indexed once (audit 1.2.1): a filter over every deletion per journaled hash was quadratic.
   const deletionsByHash = new Map<string, Set<string>>();
   const deletedAllBy = new Set<string>();
@@ -310,13 +324,23 @@ async function runSteps(args: string[], deps: Deps): Promise<ReconcileOutput> {
   const coverage = journalCoverage(mine, node.pubkey, since, until);
   const unattributed: ReconcileUnattributed[] = [];
   let attributedOutsideWindow = 0;
+  // Recorded drops, kept as excluded spans for the per-payment classification (1.2.1): a drop
+  // that lasted no measurable time leaves the covered time whole, yet a payment created at that
+  // instant may be the call it lost. Sorted and merged, so one binary search answers each payment.
+  const dropSpans: [number, number][] = [];
+  for (const gap of coverage.gaps.filter(gap => gap.reason === 'dropped').sort((a, b) => a.from - b.from)) {
+    const previous = dropSpans.at(-1);
+    if (previous && gap.from <= previous[1]) previous[1] = Math.max(previous[1], gap.to);
+    else dropSpans.push([gap.from, gap.to]);
+  }
   for (const payment of [...listed.values()].sort((a, b) => (a.createdAtNs < b.createdAtNs ? -1 : a.createdAtNs > b.createdAtNs ? 1 : 0))) {
     const created = nsToMs(payment.createdAtNs);
     if (!inWindow(created)) continue;
     if (byHash.has(payment.paymentHash)) continue;
     if (journaledHashes.has(payment.paymentHash)) { attributedOutsideWindow += 1; continue; }
-    const inside = coveredSpan(coverage.covered, created, created);
-    const clear = coveredSpan(coverage.covered, created - CLOCK_TOLERANCE_MS, created + CLOCK_TOLERANCE_MS);
+    const inside = coveredSpan(coverage.covered, created, created) && !touchesSpan(dropSpans, created, created);
+    const clear = coveredSpan(coverage.covered, created - CLOCK_TOLERANCE_MS, created + CLOCK_TOLERANCE_MS)
+      && !touchesSpan(dropSpans, created - CLOCK_TOLERANCE_MS, created + CLOCK_TOLERANCE_MS);
     const facts = settlement(payment, 'list-payments', null);
     unattributed.push({ paymentHash: payment.paymentHash, createdAt: facts.createdAt!, status: payment.status, settledMsat: facts.settledMsat!,
       feesMsat: facts.feesMsat!, inFlightMsat: facts.inFlightMsat!, attempts: facts.attempts!, failureReason: facts.failureReason,

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs';
+import { constants, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { run as reconcileRun } from '../src/commands/reconcile.js';
@@ -373,6 +373,56 @@ it('PAYJ/open refusals: protected names, directories, other files, a second writ
   await expect(openJournal(path, { fs: statFs(0o100600, 1001), platform: 'linux', uid: 1000 })).rejects.toThrow('owned by another user');
   const ok = await openJournal(path, { fs: statFs(0o100600, 1000), platform: 'linux', uid: 1000 });
   await ok.close();
+});
+
+// Gemini review, 1.2.1: a new journal is created exclusively and owner-only by the shared helper on
+// every platform, then reopened for appending (never created by that open) and proven to be the
+// same file; an existing journal keeps its path, and a file swapped in before the reopen is refused.
+it('PAYJ/create a new journal is created exclusively and owner-only, and a file swapped in before the append open is refused', async () => {
+  const dir = scratch();
+  const opens: { path: string; flags: unknown }[] = [];
+  const recording = { ...fs, open: async (...args: Parameters<typeof fs.open>) => {
+    opens.push({ path: String(args[0]), flags: args[1] });
+    return fs.open(...args);
+  } } as typeof fs;
+  const path = join(dir, 'new.journal');
+  const created = await openJournal(path, { fs: recording });
+  await created.close();
+  const mine = opens.filter(item => item.path === path);
+  // No open of the journal may create it unless it is exclusive (O_CREAT only with O_EXCL).
+  for (const { flags } of mine) {
+    if (typeof flags === 'number') expect((flags & constants.O_CREAT) === 0 || (flags & constants.O_EXCL) !== 0).toBe(true);
+    else expect(String(flags)).toMatch(/^(r\+?|wx\+?)$/);
+  }
+  // The last open appends to what was created, without O_CREAT.
+  expect(typeof mine.at(-1)!.flags === 'number' && (mine.at(-1)!.flags as number) & constants.O_APPEND).toBeTruthy();
+  if (process.platform !== 'win32') {
+    expect(mine[0].flags).toBe('wx');
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+  }
+  expect(lines(path)[0]).toMatchObject({ type: 'run-start' });
+  const NOTES = 'my notes\n';
+  // A file swapped in at the path between the check (or the creation) and the append open is refused, untouched.
+  const swapping = (target: string) => ({ ...fs, open: async (...args: Parameters<typeof fs.open>) => {
+    const flags = args[1];
+    if (String(args[0]) === target && typeof flags === 'number' && (flags & constants.O_APPEND)) {
+      await fs.rename(target, `${target}.moved`);
+      writeFileSync(target, NOTES, { mode: 0o600 });
+    }
+    return fs.open(...args);
+  } }) as typeof fs;
+  const fresh = join(dir, 'fresh.journal');
+  await expect(openJournal(fresh, { fs: swapping(fresh) })).rejects.toThrow('payment journal changed while opened');
+  expect(readFileSync(fresh, 'utf8')).toBe(NOTES);
+  expect(readFileSync(`${fresh}.moved`).length).toBe(0);
+  await expect(openJournal(path, { fs: swapping(path) })).rejects.toThrow('payment journal changed while opened');
+  expect(readFileSync(path, 'utf8')).toBe(NOTES);
+  // An existing journal (moved back) is still appended to.
+  rmSync(path);
+  await fs.rename(`${path}.moved`, path);
+  const again = await openJournal(path);
+  await again.close();
+  expect(lines(path).filter(item => item.type === 'run-start')).toHaveLength(2);
 });
 
 it('PAYJ/time a clock that steps back never makes a record earlier than its predecessor', async () => {

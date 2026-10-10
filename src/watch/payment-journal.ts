@@ -528,30 +528,33 @@ export class PaymentJournal {
     let handle: nodeFs.FileHandle | null = null;
     let aclWarning = false;
     try {
-      // Windows (1.2.1): mode bits mean nothing there, so a new journal is created owner-only by
-      // the shared helper (owned by this user, a protected DACL granting only this user), and an
-      // existing one must already be, as a POSIX journal must be 0600.
+      // A new journal is created owner-only by the shared helper on every platform (1.2.1):
+      // exclusively (O_EXCL) with mode 0600 on POSIX, so the path cannot be a file or link that
+      // appeared after the check above; on Windows, where mode bits mean nothing, owned by this
+      // user with a protected DACL granting only this user. An existing journal must already be
+      // owner-only: 0600 on POSIX (checked below), the same owner and DACL on Windows.
       let created: { dev: number; ino: number } | null = null;
-      if (process.platform === 'win32') {
-        if (existing) {
+      if (existing) {
+        if (process.platform === 'win32') {
           const found = await verifyOwnerOnly(target);
           if (!found) throw new JournalError('cannot verify the payment journal permissions');
           if (found.noAcl) aclWarning = true;
           else if (!found.ownerOnly) throw new JournalError('payment journal must be owner-only: on Windows it must be owned by your account and grant '
             + 'only your account, with inheritance disabled (for example: icacls <journal> /inheritance:r /grant:r "%USERNAME%":F /setowner "%USERNAME%"), '
             + 'or start a new journal at another path');
-        } else {
-          let reserved: Awaited<ReturnType<typeof reserveOwnerOnly>>;
-          try { reserved = await reserveOwnerOnly(target, fs); }
-          catch (error) { throw new JournalError(`cannot create payment journal${error instanceof PrivateFileError ? `: ${error.message}` : ''}`); }
-          aclWarning = reserved.aclWarning;
-          const stat = await reserved.handle.stat();
-          created = { dev: stat.dev, ino: stat.ino };
-          await reserved.handle.close();
         }
+      } else {
+        let reserved: Awaited<ReturnType<typeof reserveOwnerOnly>>;
+        try { reserved = await reserveOwnerOnly(target, fs); }
+        catch (error) { throw new JournalError(`cannot create payment journal${error instanceof PrivateFileError ? `: ${error.message}` : ''}`); }
+        aclWarning = reserved.aclWarning;
+        try { const stat = await reserved.handle.stat(); created = { dev: stat.dev, ino: stat.ino }; }
+        finally { await reserved.handle.close(); }
       }
+      // The file exists now (found or just created): it is reopened for appending, never created
+      // here, and must be the same file (device and inode) that was checked or created.
       try {
-        handle = await fs.open(target, constants.O_RDWR | constants.O_APPEND | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0), 0o600);
+        handle = await fs.open(target, constants.O_RDWR | constants.O_APPEND | (constants.O_NOFOLLOW ?? 0));
       } catch { throw new JournalError('cannot open payment journal'); }
       const opened = await handle.stat();
       if (!opened.isFile()) throw new JournalError('payment journal is not a regular file');
