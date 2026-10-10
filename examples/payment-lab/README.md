@@ -531,6 +531,46 @@ Scenario 5: concurrent budget enforcement
 VERDICT scenario 5: PASS (10/10 checks passed, computed from node state and durable records)
 ```
 
+## Fulfillment
+
+A settlement pays for something. The receiver records that something as an outbox row in the same `BEGIN IMMEDIATE` transaction as the settlement, the `fulfillments` row and the invoice-settled journal entry; the payer does the same when an operation completes (LND reported its payment succeeded: an order payment confirmed, a refund issued, a payout confirmed). A worker performs the row later and acknowledges it. The intent and the state change commit together or not at all, so no crash can leave a settled order without its fulfillment or a fulfillment without its settlement.
+
+| Column | Meaning |
+| --- | --- |
+| `outbox_id` | order of enqueueing; the worker takes due rows lowest first |
+| `kind` | `fulfill-order` (receiver) or `confirm-operation` (payer) |
+| `idempotency_key` | `order_id:payment_hash` or `operation_id:payment_hash`, unique: a repeated settlement or update enqueues nothing |
+| `subject`, `payload` | the order or operation ID, and the effect's fields as JSON (amounts as decimal strings) |
+| `state` | `pending`, `leased` (claimed by a worker until `lease_expires_at`), `done` |
+| `attempts`, `next_attempt_at`, `last_error` | claims so far, when a failed row is due again, and why it failed |
+| `created_at`, `acknowledged_at` | enqueued; performed and acknowledged |
+
+A second payment of a fulfilled order, an underpaid settlement and a second success of a completed operation move money (see [Ledger](#ledger)) but fulfil nothing, so they enqueue nothing.
+
+**The effect.** In the lab the effect is a file: a receipt `<lab>/receipts/<order_id>.json` (order, payment hash, amount paid, settle index, the invoice-settled entry's ID) or a confirmation `<lab>/confirmations/<operation_id>.json` (operation, its kind, payment hash, value, fee, the payment-succeeded entry's ID). Each file also carries the row's kind and idempotency key and `hmacSha256`, an HMAC-SHA256 over those fields (as `[name, value]` pairs sorted by name, in JSON) with the lab's key `<lab>/outbox.key` (32 random bytes as hex, created owner-only on first use). The HMAC is a stand-in for a signed receipt: it lets the worker recognise a file it wrote. Characters of the ID other than letters, digits, `_` and `-` are percent-encoded in the file name. The file is written to an owner-only temporary file, fsynced and then hard-linked to its name, which fails if the name exists, so a reader never sees a partial file and only one writer creates it.
+
+**The worker.** `outbox-run` (and `receiver listen` after every reconciliation pass, `payer reconcile` after its pass) repeats:
+
+1. claim, in one `BEGIN IMMEDIATE` transaction: the lowest due row (pending and `next_attempt_at` passed, or leased with an expired lease) becomes `leased` to this worker for 60 seconds, attempts + 1. Two workers serialise on SQLite's write lock, and neither can claim a row the other holds;
+2. perform: an existing file with a valid HMAC over the same fields means an earlier attempt performed it, and nothing is written; a damaged file is replaced; a valid file for another idempotency key is a conflict, never overwritten;
+3. acknowledge: `done` with `acknowledged_at` and the lease cleared, in one statement, only if this worker still holds the lease.
+
+A failed effect returns the row to `pending`, due again after 1 s, 2 s, 4 s, … capped at 5 minutes, with the same idempotency key; a row in backoff does not hold up the rows after it.
+
+| Crash point | What is left | After a restart |
+| --- | --- | --- |
+| between the state change and the outbox insert | nothing: one transaction | the settlement and its row are both there, or neither |
+| after the claim, before the effect | a leased row, no file | the lease runs out; the row is claimed again and performed once |
+| mid-effect (temporary file half written) | a leased row and a temporary file | the temporary file is removed; the effect is performed once |
+| after the effect, before the ack | a leased row and the file | the file's HMAC matches: acknowledged without writing again |
+| after the ack, before the lease release | nothing: the ack clears the lease in the same statement | the row is done; nothing to do |
+
+Each point is covered by a test that kills the worker with SIGKILL there, restarts it, and checks one acknowledged row, one file with a valid HMAC, no temporary file and balanced books (`test/payment-lab-outbox.test.ts`).
+
+`outbox-status --as <profile> [--json] [--deadline-s <n>]` lists the pending, leased and done counts, expired leases, the age of the oldest row not done and, oldest first, the rows not done more than the deadline (default 300 s) after they were enqueued, with their last error. It exits 0, or 75 when a row is past its deadline.
+
+**Upgrading.** Opening a database without an outbox (receiver migration 4, payer migration 7) creates the table and enqueues a pending row for every fulfillment and completed operation already recorded, so their receipts and confirmations are written once like any other.
+
 ## Ledger
 
 The lab's books are double-entry: every event that moves or commits money posts one journal entry whose debits equal its credits, in the same `BEGIN IMMEDIATE` transaction as the state change that caused it. The state change and its entry commit together or not at all; there is no point between them for a crash to land on. Each payer and receiver profile keeps its own journal in its own database file; both use one chart of accounts (`src/ledger/accounts.ts`).
@@ -629,10 +669,12 @@ verifyLedger(store: { db: DatabaseSync; book: 'payer' | 'receiver' }, api?: LndL
 | `receiver listen` | settlement consumer with periodic reconciliation |
 | `receiver reconcile [--order <id>]` | resolve invoices by lookup |
 | `receiver ledger-verify --as <profile> [--json]` | check the receiver's books against themselves and ListInvoices |
+| `payer outbox-run`, `receiver outbox-run --as <profile> [--once] [--interval-s <n>]` | perform pending outbox rows (confirmations, receipts); every `--interval-s` (default 5) until stopped, or one pass |
+| `payer outbox-status`, `receiver outbox-status --as <profile> [--json] [--deadline-s <n>]` | outbox counts per state and the oldest pending age |
 | `analysis payments --node <node> --payment-hash <hex>` | every payment LND holds for a hash |
 | `analysis diagnose --node <node> --payer <profile> --operation <id>` | liquidity diagnosis for a payment |
 
-Exit codes: 0 done; 1 payment failed according to LND; 2 usage error (also a malformed amount or payment hash, or an amount or index above 2^63 - 1, the most SQLite stores); 3 refused (budget, conflicting operation, wrong state); 4 configuration or node error; 75 unresolved: the outcome is not known yet and the record stays open for reconciliation. `payer reconcile` maps a payment's outcome the same way as `pay` and `retry`; for several payments, the first of 75, 3 and 1 that applies to any of them, else 0. `ledger-verify` exits 0 balanced, 1 unbalanced, 75 when LND could not be compared. Arguments are checked before anything is recorded, so a usage error leaves no change behind.
+Exit codes: 0 done; 1 payment failed according to LND; 2 usage error (also a malformed amount or payment hash, or an amount or index above 2^63 - 1, the most SQLite stores); 3 refused (budget, conflicting operation, wrong state); 4 configuration or node error; 75 unresolved: the outcome is not known yet and the record stays open for reconciliation. `payer reconcile` maps a payment's outcome the same way as `pay` and `retry`; for several payments, the first of 75, 3 and 1 that applies to any of them, else 0. `ledger-verify` exits 0 balanced, 1 unbalanced, 75 when LND could not be compared. `outbox-status` exits 75 when a row is not done past its deadline; `outbox-run --once` exits 75 when a row is not done after its pass (in backoff, or held by another worker), and a missing lab directory for the effects is a configuration error (4). Arguments are checked before anything is recorded, so a usage error leaves no change behind.
 
 ## Limits
 
@@ -657,6 +699,53 @@ Exit codes: 0 done; 1 payment failed according to LND; 2 usage error (also a mal
 | `src/receiver/` | receiver records, invoice creation, hold settlement, the settlement listener |
 | `src/analysis/` | ListPayments by hash, forwarding history, the liquidity diagnosis |
 | `src/ledger/` | chart of accounts, posting rules, journal, the 1.2 migration, `verifyLedger` |
+| `src/outbox/` | the outbox table and its intents, the receipt and confirmation files with their HMAC, the worker |
 | `src/cli.ts` | the service's command line |
 | `scenarios/` | the five scenario drivers and their `.sh` and `.ps1` wrappers |
-| `runtime/` | created by setup, ignored by git: one directory per lab run |
+| `runtime/` | created by setup, ignored by git: one directory per lab run, with `outbox.key`, `receipts/` and `confirmations/` written by the outbox worker |
+
+## State-machine harness
+
+`test/harness/` drives the payer's and the receiver's records through random interleavings of two service processes sharing one pair of database files, against a scripted LND, and checks the rules in [Design decisions](#design-decisions) after every store call and every step. It needs no Docker, node or credential: the stores run on `node:sqlite` in a temporary directory, and the harness is TypeScript run through Node's type stripping, like the service.
+
+The events of a case: payment intents (with replacement invoices), submissions, retries and reconciliations; SendPaymentV2 requests that reach LND on time, late or never; stream messages delivered in any order, and streams cut by a transport error, a gateway's 502 or 504, a definite refusal or NotFound; HTLC attempts, and payments failing or succeeding; invoice creations answered, lost, refused or reaching LND after their caller gave up; lookups answered with the current state or with the state they read earlier; invoices paid, held HTLCs timing out, invoices expiring; `receiver settle`, `cancel` and `reconcile` (also through `cli.ts`, for its exit code), the settlement listener and cursor resets; the clock passing the creation window; aborts, and process kills (the store is closed and reopened from its file, and nothing the killed process still had in flight is written). One fault is injected on purpose: LND reporting an invoice canceled that is not, the case the settled-outranks-canceled rule is for. A case ends by killing both processes and reconciling with every call answered.
+
+The oracle (`test/harness/oracle.ts`) states each rule as one named predicate, reading the records through its own read-only connection:
+
+| Predicate | Rule |
+| --- | --- |
+| `one-pending-payment-per-operation` | an operation has at most one payment in `intent`, `submitting`, `in_flight` or `uncertain` |
+| `reservation-held-iff-live` | a budgeted payment holds one reservation while unresolved; failed releases it; succeeded consumes one, at principal plus the actual fee |
+| `ledger-once-per-succeeded-payment` | a payment LND reports succeeded is recorded succeeded and posted once, with LND's value and fee; nothing else is posted; the operation is completed iff a payment succeeded; two succeeded payments of one operation are both flagged `double-payment` |
+| `stale-submission-changes-nothing` | an update or call outcome other than SUCCEEDED for a superseded submission changes neither the payment, its operation nor its reservation |
+| `notfound-revert-keeps-live-updates` | the live submission's IN_FLIGHT, FAILED or definite refusal applies, also after a NotFound sent the record back to `intent` |
+| `terminal-states-final` | succeeded and a completed operation are final; failed changes only by `payer retry` or LND reporting success |
+| `budget-admission-within-limit` | admission follows exact (bigint) arithmetic and never throws on large sums; `budgetStatus` is exact; held plus consumed stays within the limit unless LND reported success after a recorded failure |
+| `canceled-final-for-open-accepted` | a canceled invoice, or a late invoice LND was seen to cancel, is not made live by a replayed OPEN or ACCEPTED or a delayed create answer |
+| `settled-outranks-canceled` | SETTLED for an invoice recorded canceled makes it settled |
+| `settlement-posted-once` | every settlement LND reports is posted once, however often it is delivered; settled is final; an order has at most one fulfillment and is fulfilled iff it has one |
+| `cursor-moves-only-from-subscription` | the cursor moves only with subscription deliveries, or `receiver cursor-set` |
+| `reconcile-buckets-partition` | `receiver reconcile` counts each invoice it covers once (resolved + open + unknown = targets) and exits 75 iff unknown > 0 |
+| `superseded-canceled-never-settled` | SettleInvoice is never called for an invoice of an order fulfilled by another; after reconciliation no order has two payable invoices |
+| `no-internal-error` | store calls and workflows on a live process do not throw (the one refusal by exception is a FAILED for a payment already succeeded) |
+
+Each case is generated from a seed (the generator of `scripts/payment-fuzz.mjs`). A violation is shrunk by delta debugging over the events and written as a replay file: JSON with the case's configuration, the reduced events, the predicate, its message and the records before and after the violation; the file alone reproduces it. From the repository root:
+
+```sh
+npm run fuzz:lab                                        # 500 cases, a random seed (printed first)
+node examples/payment-lab/test/harness/run.mjs --seed 7 --cases 2000 --steps 80 --replay-out examples/payment-lab/runtime/replays
+node examples/payment-lab/test/harness/run.mjs --replay examples/payment-lab/runtime/replays/<file>.json
+```
+
+A campaign prints one JSON summary (cases, events, seconds, violations with their replay files, how often each event ran) and exits 1 on any violation. `--collect` runs every case to its end and records each predicate it violates, not only the first; `--no-shrink` writes the unreduced case. `test/payment-lab-harness.test.ts` runs 40 cases with a fixed seed, and the replay corpus, in the product suite.
+
+The replay corpus, `test/harness/replays/`, holds one replay per predicate. Ten are shrunk cases from runs against the 1.2.0 lab: each violates its predicate there and nothing on the current lab, so the corpus is also the regression history of the 1.2.1 audits. The other four (`one-pending-payment-per-operation`, `notfound-revert-keeps-live-updates`, `canceled-final-for-open-accepted`, `cursor-moves-only-from-subscription`) are hand-written scenarios for rules 1.2.0 already kept; they record no violation. To run the corpus against 1.2.0:
+
+```sh
+mkdir -p examples/payment-lab/runtime/v1.2.0
+git archive v1.2.0 examples/payment-lab/src examples/payment-lab/package.json | tar -x -C examples/payment-lab/runtime/v1.2.0
+node examples/payment-lab/test/harness/run.mjs --replay examples/payment-lab/test/harness/replays \
+  --lab-src examples/payment-lab/runtime/v1.2.0/examples/payment-lab/src --expect-violation
+```
+
+`--expect-violation` passes when every recorded replay violates its predicate and skips the hand-written ones. The `package.json` in the archive marks the old sources as ES modules.

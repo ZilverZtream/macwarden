@@ -4,6 +4,8 @@ import { sha256Hex } from '../util/encoding.ts';
 import { saturateInt64 } from '../util/money.ts';
 import { entriesFor, legsFor, post, type JournalEntry } from '../ledger/journal.ts';
 import { migratePayerLedger } from '../ledger/migrate.ts';
+import { migratePayerOutbox } from '../outbox/migrate.ts';
+import { confirmOperation, enqueue, outboxRows, type OutboxRow } from '../outbox/outbox.ts';
 import { budgetConsumed, budgetHeld, budgetReleased, paymentSucceeded, payerDoublePayment } from '../ledger/postings.ts';
 import { changes, immediate, int, nowIso, openDatabase, optionalInt, optionalText, text, type Migration, type Row } from '../store/sqlite.ts';
 
@@ -157,7 +159,9 @@ UPDATE payments SET closed_submission = submissions WHERE state = 'intent';
 `,
 // 6: the double-entry journal (src/ledger/). ledger_entries' single-leg rows become balanced entries
 // and the table is dropped; see migratePayerLedger for the counter-accounts.
-migratePayerLedger];
+migratePayerLedger,
+// 7: the transactional outbox (src/outbox/); a confirm-operation row for every operation already completed.
+migratePayerOutbox];
 
 export type PaymentState = 'intent' | 'submitting' | 'in_flight' | 'uncertain' | 'succeeded' | 'failed';
 export type OperationKind = 'order-payment' | 'refund' | 'payout';
@@ -368,6 +372,11 @@ export class PayerStore {
   /** The operation's journal entries with their lines (every event, not only payments). */
   journal(operationId: string): JournalEntry[] {
     return entriesFor(this.db, operationId);
+  }
+
+  /** The operation's outbox rows (its confirm-operation effect, once the operation is completed). */
+  outbox(operationId?: string): OutboxRow[] {
+    return outboxRows(this.db, operationId);
   }
 
   events(paymentHash: string): { at: string; kind: string; detail: string }[] {
@@ -690,7 +699,13 @@ export class PayerStore {
         // when another payment of the operation already succeeded, the principal moved to suspense.
         const kind = (this.operation(record.operationId) as OperationRecord).kind;
         const posting = { operationId: record.operationId, kind, paymentHash: payment.paymentHash, valueMsat: payment.valueMsat, postedAt: now };
-        post(this.db, paymentSucceeded({ ...posting, feeMsat: payment.feeMsat }));
+        const entryId = post(this.db, paymentSucceeded({ ...posting, feeMsat: payment.feeMsat }));
+        // The operation's completion enqueues its effect (order payment confirmed, refund issued, payout confirmed) in this
+        // transaction; a later success of another payment (a double payment) completes nothing and enqueues nothing.
+        if (completed) {
+          enqueue(this.db, confirmOperation({ operationId: record.operationId, operationKind: kind, paymentHash: payment.paymentHash,
+            valueMsat: payment.valueMsat, feeMsat: payment.feeMsat, ledgerEntryId: entryId }), now);
+        }
         if (conflicts.some(item => item.action === 'double-payment')) post(this.db, payerDoublePayment(posting));
         this.#consume(payment.paymentHash, payment.feeMsat, record.state === 'failed', now);
         this.#event(payment.paymentHash, 'succeeded', { source, valueMsat: payment.valueMsat, feeMsat: payment.feeMsat,

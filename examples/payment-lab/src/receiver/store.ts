@@ -2,6 +2,8 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { Invoice } from '../lnd/types.ts';
 import { entriesFor, legsFor, post, type JournalEntry } from '../ledger/journal.ts';
 import { migrateReceiverLedger } from '../ledger/migrate.ts';
+import { migrateReceiverOutbox } from '../outbox/migrate.ts';
+import { enqueue, fulfillOrder, outboxRows, type OutboxRow } from '../outbox/outbox.ts';
 import { invoiceSettled, receiverDoublePayment, underpaidSettlement } from '../ledger/postings.ts';
 import { changes, immediate, int, nowIso, openDatabase, optionalInt, optionalText, text, type Migration, type Row } from '../store/sqlite.ts';
 
@@ -15,6 +17,8 @@ import { changes, immediate, int, nowIso, openDatabase, optionalInt, optionalTex
  * - fulfillments   the business effect, at most once per (payment_hash, order_id)
  * - journal        the double-entry ledger (src/ledger/): an invoice-settled entry at most once per
  *                  payment hash, posted in the transaction that records the settlement
+ * - outbox         the fulfillment's effect (src/outbox/): a fulfill-order row enqueued in the same
+ *                  transaction as the fulfillments row, performed later by the outbox worker
  *
  * The preimage is generated and stored here before the invoice is created, so
  * the payment hash is known before LND is called and an uncertain creation is
@@ -84,7 +88,9 @@ ALTER TABLE invoices ADD COLUMN late_lnd_state TEXT;
 `,
 // 3: the double-entry journal (src/ledger/). ledger_entries' single-leg 'sales' rows become balanced
 // entries and the table is dropped; see migrateReceiverLedger for the counter-account.
-migrateReceiverLedger];
+migrateReceiverLedger,
+// 4: the transactional outbox (src/outbox/); a fulfill-order row for every fulfillment already recorded.
+migrateReceiverOutbox];
 
 export type InvoiceRecordState = 'creating' | 'open' | 'accepted' | 'settled' | 'canceled' | 'not-created';
 export type DeliverySource = 'subscription' | 'lookup' | 'single-subscription' | 'settle-call' | 'create-call';
@@ -264,6 +270,11 @@ export class ReceiverStore {
     return entriesFor(this.db, orderId);
   }
 
+  /** The order's outbox rows (its fulfill-order effect, once the order is fulfilled). */
+  outbox(orderId?: string): OutboxRow[] {
+    return outboxRows(this.db, orderId);
+  }
+
   cursor(): { addIndex: bigint; settleIndex: bigint } {
     const row = this.db.prepare(`SELECT add_index, settle_index FROM subscription_cursor WHERE name = 'invoices'`).get() ?? {};
     return { addIndex: int(row, 'add_index'), settleIndex: int(row, 'settle_index') };
@@ -346,7 +357,7 @@ export class ReceiverStore {
    * Applies one invoice update in one transaction: the delivery is logged, the
    * invoice state moves forward, and for a settlement the fulfillment and the
    * journal entry are inserted, keyed on (payment_hash, order_id) and on the
-   * payment hash. A repeat of the same settlement finds both keys present and
+   * payment hash, with the fulfill-order outbox row keyed on order_id:payment_hash. A repeat of the same settlement finds both keys present and
    * changes nothing else.
    * Only subscription deliveries move the cursor, because only the
    * subscription delivers settlements in settle-index order.
@@ -425,7 +436,10 @@ export class ReceiverStore {
     const fulfilled = changes(this.db.prepare(`INSERT INTO fulfillments (payment_hash, order_id, fulfilled_at) VALUES (?, ?, ?)
       ON CONFLICT (payment_hash, order_id) DO NOTHING`).run(invoice.paymentHash, record.orderId, now)) === 1;
     if (!fulfilled) return 'duplicate';
-    post(this.db, invoiceSettled(posting));
+    const entryId = post(this.db, invoiceSettled(posting));
+    // The effect is recorded with the fulfillment, in this transaction: no crash can leave one without the other.
+    enqueue(this.db, fulfillOrder({ orderId: record.orderId, paymentHash: invoice.paymentHash, amountMsat: invoice.amtPaidMsat,
+      settleIndex: invoice.settleIndex, ledgerEntryId: entryId }), now);
     this.db.prepare(`UPDATE orders SET state = 'fulfilled', fulfilled_at = ? WHERE order_id = ?`).run(now, record.orderId);
     return 'fulfilled';
   }

@@ -5,7 +5,8 @@ import { join } from 'node:path';
 
 /**
  * Loads the payment lab's own modules (examples/payment-lab/src) for the regression
- * tests in test/payment-lab-state.test.ts and test/payment-lab-ledger.test.ts.
+ * tests in test/payment-lab-state.test.ts, test/payment-lab-ledger.test.ts and
+ * test/payment-lab-outbox.test.ts.
  *
  * The lab is written for Node's type stripping: its imports end in `.ts`. Vitest runs
  * them as they are, but `tsc -p tsconfig.test.json` (part of `npm run build`, so of
@@ -113,6 +114,54 @@ export interface LndLedgerSource {
   listPaymentsPage?(indexOffset: bigint, maxPayments: number): Promise<{ payments: Payment[]; lastIndexOffset: bigint }>;
   listInvoicesPage?(indexOffset: bigint, maxInvoices: number): Promise<{ invoices: Invoice[]; lastIndexOffset: bigint }>;
 }
+/** src/outbox/outbox.ts */
+export type PayloadValue = string | number | null;
+export interface OutboxRow {
+  outboxId: number;
+  kind: 'fulfill-order' | 'confirm-operation';
+  idempotencyKey: string;
+  subject: string;
+  payload: Record<string, PayloadValue>;
+  state: 'pending' | 'leased' | 'done';
+  attempts: number;
+  nextAttemptAt: string;
+  leaseOwner: string | undefined;
+  leaseExpiresAt: string | undefined;
+  lastError: string | undefined;
+  createdAt: string;
+  acknowledgedAt: string | undefined;
+}
+export interface OutboxStatus {
+  pending: number; leased: number; done: number; expiredLeases: number; oldestPendingAgeS: number | null; deadlineS: number;
+  overdue: { outboxId: number; idempotencyKey: string; state: string; attempts: number; lastError: string | undefined }[];
+  overdueCount: number;
+}
+/** src/outbox/effects.ts */
+export interface EffectTarget { dir: string; key: Buffer }
+export type EffectRead = { state: 'absent' } | { state: 'invalid'; reason: string } | { state: 'valid'; fields: Record<string, PayloadValue> };
+/** src/outbox/worker.ts */
+export interface WorkerHooks {
+  afterClaim?(row: OutboxRow): void;
+  duringWrite?(tmpPath: string): void;
+  afterEffect?(row: OutboxRow): void;
+  afterAck?(row: OutboxRow): void;
+}
+export interface PassResult { performed: number; alreadyPresent: number; failed: number; leaseLost: number; remaining: number }
+export interface Outbox {
+  runPass(db: RawDb, target: EffectTarget, options: { emit: (event: Record<string, unknown>) => void; owner?: string; leaseMs?: number;
+    clock?: () => number; maxRows?: number; hooks?: WorkerHooks }): PassResult;
+  claim(db: RawDb, owner: string, nowMs: number, leaseMs: number): OutboxRow | undefined;
+  acknowledge(db: RawDb, outboxId: number, owner: string, nowMs: number): boolean;
+  retryLater(db: RawDb, outboxId: number, owner: string, error: string, nowMs: number): boolean;
+  outboxStatus(db: RawDb, nowMs: number, deadlineS: number): OutboxStatus;
+  backoffMs(attempts: number): number;
+  labKey(labDir: string): Buffer;
+  fileBase(subject: string): string;
+  effectPath(target: EffectTarget, subject: string): string;
+  readEffect(path: string, key: Buffer): EffectRead;
+  MAX_RECEIPT_BYTES: number;
+}
+
 export interface BudgetStatus { heldMsat: bigint; consumedMsat: bigint; availableMsat: bigint }
 export type IntentResult = { outcome: 'recorded' | 'existing'; payment: PaymentRecord } | { outcome: 'refused'; reason: string };
 
@@ -122,6 +171,7 @@ export interface PayerStore {
   close(): void;
   ledger(operationId: string): { account: string; amountMsat: bigint; postedAt: string }[];
   journal(operationId: string): JournalEntry[];
+  outbox(operationId?: string): OutboxRow[];
   payment(paymentHash: string): PaymentRecord | undefined;
   operation(operationId: string): { state: string; budgetId: string | undefined } | undefined;
   setBudget(budgetId: string, limitMsat: bigint): void;
@@ -149,6 +199,7 @@ export interface ReceiverStore {
   readonly db: RawDb;
   readonly book: 'receiver';
   journal(orderId: string): JournalEntry[];
+  outbox(orderId?: string): OutboxRow[];
   close(): void;
   invoice(paymentHash: string): { state: string; orderId: string; lateLndState: string | undefined; settleIndex: bigint | undefined;
     amtPaidMsat: bigint | undefined } | undefined;
@@ -197,12 +248,15 @@ export interface Lab {
   createInvoice(deps: ReceiverDeps, input: { orderId: string; amountMsat: bigint; hold: boolean; memo: string; expirySeconds: number }):
     Promise<{ kind: string; paymentHash?: string; reason?: string }>;
   reconcileInvoices(deps: ReceiverDeps, onlyOrder?: string, signal?: AbortSignal): Promise<{ resolved: number; open: number; unknown: number }>;
-  listen(deps: ReceiverDeps, options: { reconcileIntervalMs: number; signal: AbortSignal }): Promise<void>;
+  listen(deps: ReceiverDeps, options: { reconcileIntervalMs: number; signal: AbortSignal; afterReconcile?: () => void }): Promise<void>;
   main(argv: string[], services: { payer(labDir: string | undefined, profile: string): PayerDeps;
     receiver(labDir: string | undefined, profile: string): ReceiverDeps;
-    ledgerSource?(labDir: string | undefined, component: 'payer' | 'receiver', profile: string): LndLedgerSource | undefined }): Promise<number>;
+    ledgerSource?(labDir: string | undefined, component: 'payer' | 'receiver', profile: string): LndLedgerSource | undefined;
+    outbox?(labDir: string | undefined, component: 'payer' | 'receiver'): EffectTarget | undefined }): Promise<number>;
   /** src/ledger/verify.ts */
   verifyLedger(store: PayerStore | ReceiverStore, api?: LndLedgerSource): Promise<LedgerVerification>;
+  /** src/outbox/ */
+  outbox: Outbox;
 }
 
 export async function loadLab(): Promise<Lab> {
@@ -215,6 +269,11 @@ export async function loadLab(): Promise<Lab> {
   const receiver = await load<Pick<Lab, 'settleHoldInvoice' | 'listen' | 'createInvoice' | 'reconcileInvoices'>>('receiver/receiver.ts');
   const cli = await load<Pick<Lab, 'main'>>('cli.ts');
   const ledger = await load<Pick<Lab, 'verifyLedger'>>('ledger/verify.ts');
+  const outbox = {
+    ...await load<Pick<Outbox, 'claim' | 'acknowledge' | 'retryLater' | 'outboxStatus' | 'backoffMs'>>('outbox/outbox.ts'),
+    ...await load<Pick<Outbox, 'labKey' | 'fileBase' | 'effectPath' | 'readEffect' | 'MAX_RECEIPT_BYTES'>>('outbox/effects.ts'),
+    ...await load<Pick<Outbox, 'runPass'>>('outbox/worker.ts'),
+  };
   // The workflows classify errors with instanceof: an error made here must be the class they import.
   const shared = await load<{ definiteRefusal(error: unknown): boolean }>('receiver/receiver.ts');
   if (!shared.definiteRefusal(new errors.LndError('probe', 2, 500))) {
@@ -224,7 +283,10 @@ export async function loadLab(): Promise<Lab> {
     TransportError: errors.TransportError, ProtocolError: errors.ProtocolError, definiteRefusal: errors.definiteRefusal,
     parsePayment: types.parsePayment, parseInvoice: types.parseInvoice, parsePayReq: types.parsePayReq, submit: payer.submit, reconcile: payer.reconcile,
     settleHoldInvoice: receiver.settleHoldInvoice, listen: receiver.listen, createInvoice: receiver.createInvoice,
-    reconcileInvoices: receiver.reconcileInvoices, main: cli.main, verifyLedger: ledger.verifyLedger };
+    reconcileInvoices: receiver.reconcileInvoices, main: cli.main, verifyLedger: ledger.verifyLedger,
+    outbox: { claim: outbox.claim, acknowledge: outbox.acknowledge, retryLater: outbox.retryLater, outboxStatus: outbox.outboxStatus,
+      backoffMs: outbox.backoffMs, labKey: outbox.labKey, fileBase: outbox.fileBase, effectPath: outbox.effectPath,
+      readEffect: outbox.readEffect, MAX_RECEIPT_BYTES: outbox.MAX_RECEIPT_BYTES, runPass: outbox.runPass } };
 }
 
 /** The file URL of a lab module, for a child process that imports it (the restart tests). */
