@@ -181,6 +181,8 @@ export interface PayerStore {
   recordIntent(input: { operationId: string; kind: string; paymentRequest: string; invoice: DecodedPayReq; feeLimitMsat: bigint;
     maxParts: number; budgetId?: string }): IntentResult;
   claimForSubmission(paymentHash: string): boolean;
+  markUncertain(paymentHash: string, reason: string, submission?: number): string;
+  markNotInitiated(paymentHash: string, evidence: string, submission?: number): string;
   applyUpdate(payment: Payment, source: 'SendPaymentV2' | 'TrackPaymentV2', submission?: number): { state: string };
   prepareRetry(operationId: string): IntentResult;
 }
@@ -287,6 +289,56 @@ export async function loadLab(): Promise<Lab> {
     outbox: { claim: outbox.claim, acknowledge: outbox.acknowledge, retryLater: outbox.retryLater, outboxStatus: outbox.outboxStatus,
       backoffMs: outbox.backoffMs, labKey: outbox.labKey, fileBase: outbox.fileBase, effectPath: outbox.effectPath,
       readEffect: outbox.readEffect, MAX_RECEIPT_BYTES: outbox.MAX_RECEIPT_BYTES, runPass: outbox.runPass } };
+}
+
+/** src/explain/: the explanation of one payment (payer explain, receiver explain). */
+export interface ExplainTimelineItem { at: string; kind: string; detail: string; rule?: string }
+export interface ExplainResult {
+  subject: { component: 'payer' | 'receiver'; operationId?: string; orderId?: string; payments: string[] };
+  timeline: ExplainTimelineItem[];
+  outcome: Record<string, unknown> & { summary: string };
+  reservation: Record<string, unknown> | null;
+  journal: { entryId: number; event: string; reference: string; payment: string | null; lines: { account: string; direction: string; amountMsat: string }[] }[];
+  outbox: { outboxId: number; kind: string; idempotencyKey: string; state: string; effect: string }[];
+  reconciliation: { at: string; decision: string; detail: string; rule: string; predicates: readonly string[] }[];
+}
+export interface ExplainDocument {
+  schema: 1; command: 'explain'; ok: boolean; warnings: { code: string; message: string }[]; result: ExplainResult | null;
+  error: { code: number; step: string | null; message: string } | null;
+}
+export interface Explain {
+  RULES: Record<string, { name: string; form: 'paragraph' | 'section' | 'sentence'; predicates: readonly string[] }>;
+  fingerprint(paymentHash: string): string;
+  safeText(value: string): string;
+}
+
+export async function loadExplain(): Promise<Explain> {
+  const rules = await load<Pick<Explain, 'RULES'>>('explain/rules.ts');
+  const format = await load<Pick<Explain, 'fingerprint' | 'safeText'>>('explain/format.ts');
+  return { RULES: rules.RULES, fingerprint: format.fingerprint, safeText: format.safeText };
+}
+
+/**
+ * The state-machine harness's case runner (examples/payment-lab/test/harness/harness.ts, class Run), for a test that
+ * reads the records a replay leaves behind before the case directory is removed: runCase and replay remove it.
+ */
+export interface HarnessRun {
+  readonly dir: string;
+  step(event: unknown): Promise<boolean>;
+  quiesce(): Promise<void>;
+  dispose(): Promise<void>;
+}
+export interface HarnessRunner {
+  Run: new (lab: unknown, config: unknown, scratch: string) => HarnessRun;
+  loadHarnessLab(): Promise<unknown>;
+  PREDICATES: Record<string, string>;
+}
+
+export async function loadHarnessRunner(): Promise<HarnessRunner> {
+  const harnessDir = '../../examples/payment-lab/test/harness/';
+  const harness = await import(/* @vite-ignore */ `${harnessDir}harness.ts`) as Pick<HarnessRunner, 'Run' | 'PREDICATES'>;
+  const labModule = await import(/* @vite-ignore */ `${harnessDir}lab.ts`) as { loadLab(): Promise<unknown> };
+  return { Run: harness.Run, PREDICATES: harness.PREDICATES, loadHarnessLab: () => labModule.loadLab() };
 }
 
 /** The file URL of a lab module, for a child process that imports it (the restart tests). */

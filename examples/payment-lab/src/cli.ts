@@ -11,6 +11,7 @@ import {
   type Lab, type NodeName, type PayerProfile, type ReceiverProfile,
 } from './config.ts';
 import { verifyLedger, type LedgerStore, type LndLedgerSource } from './ledger/verify.ts';
+import { explainCommand } from './explain/command.ts';
 import { describeError } from './lnd/errors.ts';
 import { labKey, type EffectTarget } from './outbox/effects.ts';
 import { outboxStatus } from './outbox/outbox.ts';
@@ -47,6 +48,9 @@ import { parseAmount } from './util/money.ts';
  * was enqueued. outbox-run --once exits 0 when every row is done after the pass, else 75 (a row
  * failed and is in backoff, or another worker holds it); without --once it runs until SIGINT or
  * SIGTERM and exits 0.
+ *
+ * explain (payer and receiver) exits 0 when the subject is in the records, 3 when it is not, and 4 when a
+ * --refresh lookup failed (the explanation from the records is printed all the same, with a warning).
  */
 
 const EXIT = { ok: 0, failed: 1, usage: 2, refused: 3, error: 4, unresolved: 75 } as const;
@@ -238,6 +242,15 @@ async function waitForGo(): Promise<void> {
   throw new UsageError('stdin closed before "go"');
 }
 
+/** explain's subject: exactly one of --<idOption> and --payment-hash (a usage error otherwise). */
+function explainSubject(values: Record<string, unknown>, idOption: 'operation' | 'order'): { id?: string; paymentHash?: string } {
+  const id = values[idOption];
+  const hash = values['payment-hash'];
+  if ((id === undefined) === (hash === undefined)) throw new UsageError(`explain needs exactly one of --${idOption} and --payment-hash`);
+  if (typeof hash === 'string') return { paymentHash: hashArg(hash, '--payment-hash').toLowerCase() };
+  return { id: identifier(required(values, idOption), `--${idOption}`) };
+}
+
 function showPayment(deps: PayerDeps, operationId: string): void {
   const operation = deps.store.operation(operationId);
   const payment = deps.store.paymentForOperation(operationId);
@@ -260,7 +273,7 @@ async function payer(command: string, args: string[], services: Services): Promi
     'fee-limit-msat': { type: 'string' }, 'max-parts': { type: 'string' }, 'timeout-s': { type: 'string' }, budget: { type: 'string' },
     'limit-msat': { type: 'string' }, 'payment-hash': { type: 'string' }, fault: { type: 'string' }, 'wait-for-go': { type: 'boolean' },
     lab: { type: 'string' }, json: { type: 'boolean' }, once: { type: 'boolean' }, 'interval-s': { type: 'string' },
-    'deadline-s': { type: 'string' },
+    'deadline-s': { type: 'string' }, refresh: { type: 'boolean' },
   }, strict: true });
   const profile = payerProfile(required(values, 'as'));
   const deps = services.payer(values.lab, profile);
@@ -337,6 +350,11 @@ async function payer(command: string, args: string[], services: Services): Promi
         return await outboxRun(services, values, 'payer', deps.store.db);
       case 'outbox-status':
         return outboxStatusCommand(values, deps.store.db);
+      case 'explain': {
+        const subject = explainSubject(values, 'operation');
+        return await explainCommand({ component: 'payer', store: deps.store, api: deps.api,
+          subject: { operationId: subject.id, paymentHash: subject.paymentHash } }, { json: values.json === true, refresh: values.refresh === true });
+      }
       default:
         throw new UsageError(`unknown payer command ${command}`);
     }
@@ -426,7 +444,7 @@ async function receiver(command: string, args: string[], services: Services): Pr
     as: { type: 'string' }, order: { type: 'string' }, 'amount-msat': { type: 'string' }, hold: { type: 'boolean' },
     memo: { type: 'string' }, 'expiry-s': { type: 'string' }, 'settle-index': { type: 'string' }, 'add-index': { type: 'string' },
     'reconcile-interval-s': { type: 'string' }, lab: { type: 'string' }, json: { type: 'boolean' }, once: { type: 'boolean' },
-    'interval-s': { type: 'string' }, 'deadline-s': { type: 'string' },
+    'interval-s': { type: 'string' }, 'deadline-s': { type: 'string' }, 'payment-hash': { type: 'string' }, refresh: { type: 'boolean' },
   }, strict: true });
   const profile = receiverProfile(required(values, 'as'));
   const deps = services.receiver(values.lab, profile);
@@ -491,6 +509,11 @@ async function receiver(command: string, args: string[], services: Services): Pr
         return await outboxRun(services, values, 'receiver', deps.store.db);
       case 'outbox-status':
         return outboxStatusCommand(values, deps.store.db);
+      case 'explain': {
+        const subject = explainSubject(values, 'order');
+        return await explainCommand({ component: 'receiver', store: deps.store, api: deps.api,
+          subject: { orderId: subject.id, paymentHash: subject.paymentHash } }, { json: values.json === true, refresh: values.refresh === true });
+      }
       default:
         throw new UsageError(`unknown receiver command ${command}`);
     }
@@ -545,6 +568,7 @@ const USAGE = `usage: node src/cli.ts <component> <command> [options]
   payer ledger-verify --as <profile> [--json]
   payer outbox-run --as <profile> [--once] [--interval-s <n>]
   payer outbox-status --as <profile> [--json] [--deadline-s <n>]
+  payer explain --as <profile> --operation <id> | --payment-hash <hex> [--json] [--refresh]
   receiver create-invoice --as <merchant|customer> --order <id> --amount-msat <n> [--hold] [--memo <text>] [--expiry-s <n>]
   receiver settle|cancel|show --as <profile> --order <id>
   receiver reconcile --as <profile> [--order <id>]
@@ -553,6 +577,7 @@ const USAGE = `usage: node src/cli.ts <component> <command> [options]
   receiver ledger-verify --as <profile> [--json]
   receiver outbox-run --as <profile> [--once] [--interval-s <n>]
   receiver outbox-status --as <profile> [--json] [--deadline-s <n>]
+  receiver explain --as <profile> --order <id> | --payment-hash <hex> [--json] [--refresh]
   analysis payments --node <customer|router|merchant> --payment-hash <hex>
   analysis diagnose --node <node> --payer <profile> --operation <id>
 All commands accept --lab <dir> (default: the run named in runtime/current.json).`;

@@ -531,6 +531,27 @@ Scenario 5: concurrent budget enforcement
 VERDICT scenario 5: PASS (10/10 checks passed, computed from node state and durable records)
 ```
 
+## Explain
+
+`payer explain --as <profile> --operation <id> | --payment-hash <hex> [--json] [--refresh]` and `receiver explain --as <profile> --order <id> | --payment-hash <hex> [--json] [--refresh]` print one page a support engineer can read: what happened to one operation (payer) or one order (receiver), from the component's own records, in the order the records say it happened, with the rule in [Design decisions](#design-decisions) (or [Ledger](#ledger), [Fulfillment](#fulfillment)) that made each decision. A payment hash names its operation or order.
+
+| Section | What it holds |
+| --- | --- |
+| outcome | the operation's or order's state now and why, one line |
+| timeline | every recorded fact, oldest first: payer: the operation, each payment's intent, each submission with LND's updates and its HTLC attempts (route length, fee, failure code and the index of the hop that failed it), connections lost, NotFound reverts, stale updates ignored, retries (the closed submission), the failure or success, withdrawn and double payments, budget refusals, reservations held, released and consumed with their amounts, journal entries, outbox rows; receiver: the order, each invoice's recorded identity, every delivery of an invoice update with its source and what it did, invoices not created, late or superseded, the fulfillment, journal entries, outbox rows |
+| reservation | the budget (limit, held, consumed, available) and each reservation and refusal of the operation; none for a receiver |
+| journal | the operation's or order's journal entries with their lines |
+| outbox | its outbox row, its state and claims, and the file performing it writes |
+| reconciliation | each decision of the timeline with its rule, quoted by the name this README gives it, and the oracle predicates of the [State-machine harness](#state-machine-harness) that check that rule |
+
+The rules and their predicates are listed in `src/explain/rules.ts`; a test checks that every name appears in this README as cited. Timeline kinds: `operation`, `intent`, `submission`, `lnd-update`, `htlc-attempt`, `uncertain`, `track-interrupted`, `revert`, `not-found-after-attempts`, `stale-update`, `retry`, `failed`, `succeeded`, `success-after-failure`, `amount-mismatch`, `withdrawn`, `possible-double-payment`, `double-payment`, `budget-refused`, `reservation-held`, `reservation-released`, `reservation-consumed` (payer); `order`, `invoice-intent`, `delivery`, `not-created`, `late-invoice`, `superseded`, `fulfillment` (receiver); `journal`, `outbox-enqueued`, `outbox-done`, `outbox-pending`, `outcome`, `refreshed` (both).
+
+It reads the records only and writes nothing. It never prints a preimage or a payment request, and it never reads either column: a payment or invoice appears as its hash's fingerprint, the first 8 and last 4 hex characters (`1a7c7762…396d`), with its amount. Any other string from the records or LND (an error message, a memo) has a payment hash of the subject replaced by its fingerprint, any other 64-hex run by `[redacted]` and a BOLT 11 string by `[payment request]`; in text output, control characters, Unicode whitespace other than the space, bidirectional and invisible characters are escaped as macwarden's text output escapes them (`\xNN`, `\uNNNN`), and no line starts with `::`. Text lines are at most 120 characters.
+
+`--refresh` adds LND's current view, read-only: the payer reads each payment's current state with TrackPaymentV2 (its first message; the stream is then closed), the receiver looks each invoice up. Each answer is a `refreshed` fact saying whether it agrees with the record; nothing is applied, so a difference is for `payer reconcile` or `receiver reconcile` to act on. `--json` prints one document as macwarden's Output rules do: `{"schema":1,"command":"explain","ok":…,"warnings":[…],"result":{"subject","timeline":[{"at","kind","detail","rule"?}],"outcome","reservation","journal","outbox","reconciliation"},"error":{"code","step","message"}|null}`, amounts as decimal msat strings, `ok` false exactly when `error` is set. In text mode, warnings and the error go to stderr as `warning: <code>: <message>` and `error: <step>: <message>`.
+
+Exit 0: explained. Exit 2: usage (neither or both of the subject options, a malformed hash or ID). Exit 3: the records have no such operation, order or payment hash. Exit 4: a `--refresh` lookup failed; the explanation from the records is printed all the same, with the warning `refresh-failed`.
+
 ## Fulfillment
 
 A settlement pays for something. The receiver records that something as an outbox row in the same `BEGIN IMMEDIATE` transaction as the settlement, the `fulfillments` row and the invoice-settled journal entry; the payer does the same when an operation completes (LND reported its payment succeeded: an order payment confirmed, a refund issued, a payout confirmed). A worker performs the row later and acknowledges it. The intent and the state change commit together or not at all, so no crash can leave a settled order without its fulfillment or a fulfillment without its settlement.
@@ -543,25 +564,34 @@ A settlement pays for something. The receiver records that something as an outbo
 | `subject`, `payload` | the order or operation ID, and the effect's fields as JSON (amounts as decimal strings) |
 | `state` | `pending`, `leased` (claimed by a worker until `lease_expires_at`), `done` |
 | `attempts`, `next_attempt_at`, `last_error` | claims so far, when a failed row is due again, and why it failed |
-| `created_at`, `acknowledged_at` | enqueued; performed and acknowledged |
+| `created_at`, `acknowledged_at` | enqueued; performed and acknowledged (never earlier than `created_at`: a clock that stepped back records the acknowledgement at `created_at`) |
 
 A second payment of a fulfilled order, an underpaid settlement and a second success of a completed operation move money (see [Ledger](#ledger)) but fulfil nothing, so they enqueue nothing.
 
-**The effect.** In the lab the effect is a file: a receipt `<lab>/receipts/<order_id>.json` (order, payment hash, amount paid, settle index, the invoice-settled entry's ID) or a confirmation `<lab>/confirmations/<operation_id>.json` (operation, its kind, payment hash, value, fee, the payment-succeeded entry's ID). Each file also carries the row's kind and idempotency key and `hmacSha256`, an HMAC-SHA256 over those fields (as `[name, value]` pairs sorted by name, in JSON) with the lab's key `<lab>/outbox.key` (32 random bytes as hex, created owner-only on first use). The HMAC is a stand-in for a signed receipt: it lets the worker recognise a file it wrote. Characters of the ID other than letters, digits, `_` and `-` are percent-encoded in the file name. The file is written to an owner-only temporary file, fsynced and then hard-linked to its name, which fails if the name exists, so a reader never sees a partial file and only one writer creates it.
+**The effect.** In the lab the effect is a file: a receipt `<lab>/receipts/<order_id>.json` (order, payment hash, amount paid, settle index, the invoice-settled entry's ID) or a confirmation `<lab>/confirmations/<operation_id>.json` (operation, its kind, payment hash, value, fee, the payment-succeeded entry's ID). Each file also carries the row's kind and idempotency key and `hmacSha256`, an HMAC-SHA256 over those fields (as `[name, value]` pairs sorted by name, in JSON) with the lab's key `<lab>/outbox.key` (32 random bytes as hex, created owner-only on first use). The HMAC is a stand-in for a signed receipt: it lets the worker recognise a file it wrote. The key is created only while no receipt or confirmation exists: if it is missing while such files exist, every command that needs it fails with an error naming `<lab>/outbox.key`, because a new key would make every one of those files fail verification. Restore the key from your copy; to start the lab over instead, move `receipts/` and `confirmations/` aside first.
+
+In the file name, lower-case letters, digits, `_` and `-` of the ID stay as they are and every other byte is percent-encoded with upper-case hex, upper-case letters included (`ORD-7` is `%4F%52%44-7.json`), so two IDs never share a file, even on a file system that ignores case (Windows, macOS: `Order1` and `order1` are `%4Frder1.json` and `order1.json`). A Windows device name has its first letter encoded (`con` is `%63on.json`), and a name longer than 200 characters becomes `=sha256-<SHA-256 of the ID>.json`, which no encoded ID can be. The file is written to an owner-only temporary file `.<name>.json.<owner tag>.<lease end>.tmp`, fsynced and then hard-linked to its name, which fails if the name exists, so a reader never sees a partial file, only one writer creates it, and nothing is ever overwritten.
 
 **The worker.** `outbox-run` (and `receiver listen` after every reconciliation pass, `payer reconcile` after its pass) repeats:
 
 1. claim, in one `BEGIN IMMEDIATE` transaction: the lowest due row (pending and `next_attempt_at` passed, or leased with an expired lease) becomes `leased` to this worker for 60 seconds, attempts + 1. Two workers serialise on SQLite's write lock, and neither can claim a row the other holds;
-2. perform: an existing file with a valid HMAC over the same fields means an earlier attempt performed it, and nothing is written; a damaged file is replaced; a valid file for another idempotency key is a conflict, never overwritten;
+2. check, then perform: the row's `ledgerEntryId` must name its own entry in the journal (the invoice-settled or payment-succeeded entry for its payment hash), or nothing is written. An existing file with a valid HMAC over the same fields means an earlier attempt performed it, and nothing is written; any other existing file is never overwritten (see the failures below);
 3. acknowledge: `done` with `acknowledged_at` and the lease cleared, in one statement, only if this worker still holds the lease.
 
-A failed effect returns the row to `pending`, due again after 1 s, 2 s, 4 s, … capped at 5 minutes, with the same idempotency key; a row in backoff does not hold up the rows after it.
+A failed effect returns the row to `pending`, due again after 1 s, 2 s, 4 s, … capped at 5 minutes, with the same idempotency key; a row in backoff does not hold up the rows after it. The `outbox-failed` event's `reason` and the row's `last_error` (shown by `outbox-status` once the row is past its deadline) name the failure (`show` lists every row with its last error):
+
+| `reason` | What it means | What to do |
+| --- | --- | --- |
+| `conflict` | a valid file for another idempotency key holds the name | find out which row the file belongs to; the worker never overwrites it |
+| `damaged` | a file holds the name that does not verify under the lab's key: partial, edited, or signed with another key (the key changed or was recreated) | inspect the file and move it out of `receipts/` or `confirmations/`; the next attempt writes the effect. Nothing replaces it automatically |
+| `ledger-entry-missing`, `ledger-entry-mismatch` | the row names no ledger entry, one that is not in the journal, or another payment's | run `ledger-verify`; the row stays pending and no file is written |
+| `lease-expired` | this worker stalled past its lease, the worker that took the row over removed its temporary file, and the effect is not there | nothing: the row is retried. When the other worker already performed it, the stalled one reports `outbox-lease-lost` instead |
 
 | Crash point | What is left | After a restart |
 | --- | --- | --- |
 | between the state change and the outbox insert | nothing: one transaction | the settlement and its row are both there, or neither |
 | after the claim, before the effect | a leased row, no file | the lease runs out; the row is claimed again and performed once |
-| mid-effect (temporary file half written) | a leased row and a temporary file | the temporary file is removed; the effect is performed once |
+| mid-effect (temporary file half written) | a leased row and a temporary file | the next attempt removes temporary files of its own owner and of leases that have run out, never one of a lease still running; the effect is performed once |
 | after the effect, before the ack | a leased row and the file | the file's HMAC matches: acknowledged without writing again |
 | after the ack, before the lease release | nothing: the ack clears the lease in the same statement | the row is done; nothing to do |
 
@@ -672,6 +702,8 @@ verifyLedger(store: { db: DatabaseSync; book: 'payer' | 'receiver' }, api?: LndL
 | `receiver ledger-verify --as <profile> [--json]` | check the receiver's books against themselves and ListInvoices |
 | `payer outbox-run`, `receiver outbox-run --as <profile> [--once] [--interval-s <n>]` | perform pending outbox rows (confirmations, receipts); every `--interval-s` (default 5) until stopped, or one pass |
 | `payer outbox-status`, `receiver outbox-status --as <profile> [--json] [--deadline-s <n>]` | outbox counts per state and the oldest pending age |
+| `payer explain --as <profile> --operation <id> \| --payment-hash <hex> [--json] [--refresh]` | one operation's timeline, outcome, reservations, journal and outbox, with the rule behind each decision (see [Explain](#explain)) |
+| `receiver explain --as <profile> --order <id> \| --payment-hash <hex> [--json] [--refresh]` | the same for one order |
 | `analysis payments --node <node> --payment-hash <hex>` | every payment LND holds for a hash |
 | `analysis diagnose --node <node> --payer <profile> --operation <id>` | liquidity diagnosis for a payment |
 
@@ -701,6 +733,7 @@ Exit codes: 0 done; 1 payment failed according to LND; 2 usage error (also a mal
 | `src/analysis/` | ListPayments by hash, forwarding history, the liquidity diagnosis |
 | `src/ledger/` | chart of accounts, posting rules, journal, the 1.2 migration, `verifyLedger` |
 | `src/outbox/` | the outbox table and its intents, the receipt and confirmation files with their HMAC, the worker |
+| `src/explain/` | `payer explain` and `receiver explain`: the timeline from the records, the table of README rules it cites, the text and JSON forms, `--refresh` |
 | `src/cli.ts` | the service's command line |
 | `scenarios/` | the five scenario drivers and their `.sh` and `.ps1` wrappers |
 | `runtime/` | created by setup, ignored by git: one directory per lab run, with `outbox.key`, `receipts/` and `confirmations/` written by the outbox worker |
