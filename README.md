@@ -38,7 +38,7 @@ npm i -g macwarden
 On production hosts, install an exact version and check the registry signatures of what you installed with `npm audit signatures` in a project that depends on MacWarden:
 
 ```sh
-npm i -g macwarden@1.2.1
+npm i -g macwarden@1.3.0
 ```
 
 After installing on a new host or upgrading, the [field check](docs/field-check.md) confirms a release against your own node in about 15 minutes.
@@ -61,7 +61,7 @@ In GitHub Actions:
 - uses: actions/checkout@v5
   with:
     fetch-depth: 0
-- run: npx --yes macwarden@1.2.1 scan . --git-history --fail-on READ --format github
+- run: npx --yes macwarden@1.3.0 scan . --git-history --fail-on READ --format github
 ```
 
 [CI integration](docs/ci-integration.md) covers SARIF upload for GitHub code scanning, the pre-commit hook and the gitleaks and TruffleHog rule packs.
@@ -220,7 +220,7 @@ The online commands are for LND only. Core Lightning runes are decoded by `inspe
 - [CI integration](docs/ci-integration.md): GitHub Actions, SARIF, pre-commit, gitleaks and TruffleHog
 - [Field check](docs/field-check.md): a short, safe procedure to confirm a release against your own node
 - [Safe agent payments example](examples/agent-payments/README.md): a regtest stack where an agent pays an L402 API with a scoped, expiring macaroon, and is then cut off with proof
-- [Payment lab](examples/payment-lab/README.md): a three-node regtest lab that recovers a payment after a dropped connection, processes settlements once, diagnoses directional liquidity and reconciles fees across attempts
+- [Payment lab](examples/payment-lab/README.md): a three-node regtest lab that recovers a payment after a dropped connection, processes settlements once, diagnoses directional liquidity and reconciles fees across attempts; since 1.3.0 it keeps a double-entry ledger with `ledger-verify`, a transactional fulfillment outbox, `explain` for any payment, and a model-based state-machine harness with a replay corpus
 - [Specification](docs/spec.md): every command, flag, grade, exit code and output format
 - [Security model](docs/security-model.md): the SAFE rules and the threat model
 - [Architecture](docs/architecture.md): how it is built and the LND facts it relies on
