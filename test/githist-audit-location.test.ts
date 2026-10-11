@@ -342,12 +342,9 @@ it('githist-audit/gitfile a .git that is a symlink to a gitfile is followed like
   const metadata = join(repo, 'metadata');
   renameSync(gitDir, metadata);
   writeFileSync(join(repo, 'pointer'), 'gitdir: metadata\n');
-  try { symlinkSync('pointer', join(repo, '.git'), 'file'); }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EPERM') throw error;
-    console.warn('githist-audit/gitfile: symlink creation is not permitted here; the .git symlink case was not exercised');
-    return;
-  }
+  // File symlinks are a requirement of this suite on every platform (cp036-protected-streams,
+  // scan-walk.symlink): a refusal here is a failure, not a reason to skip the case.
+  symlinkSync('pointer', join(repo, '.git'), 'file');
   expect(git(repo, 'rev-parse', '--is-inside-work-tree')).toBe('true');
   const workTree = await fs.realpath(repo);
   await expect(locate(repo)).resolves.toEqual({ gitDir: join(workTree, 'metadata'), workTree });
@@ -375,28 +372,28 @@ it('githist-audit/gitfile a rooted, drive-less gitfile, commondir or alternates 
     // Elsewhere a rooted path is simply absolute.
     expect(absoluteLocation('/wt', '/x/y', '/wt')).toBe('/x/y');
     expect(absoluteLocation('/wt/.git', 'rel', '/wt')).toBe('/wt/.git/rel');
-    return;
+  } else {
+    // Computed: a work tree on a drive that is not the process drive (no I/O on it).
+    const letter = win32.parse(process.cwd()).root.toUpperCase().startsWith('Q') ? 'R' : 'Q';
+    const tree = `${letter}:\\wt`;
+    expect(absoluteLocation(tree, '/x/y', tree)).toBe(`${letter}:\\x\\y`);
+    expect(absoluteLocation(`${tree}\\.git`, '\\x', tree)).toBe(`${letter}:\\x`);
+    expect(absoluteLocation(`${tree}\\.git`, 'rel', tree)).toBe(`${letter}:\\wt\\.git\\rel`);
+    expect(absoluteLocation(tree, 'D:\\abs', tree)).toBe('D:\\abs');
+    // Observed: a gitfile written without the drive, read from another drive when one exists.
+    const { root, repo, gitDir } = repository();
+    const moved = join(root, 'moved.git');
+    renameSync(gitDir, moved);
+    const driveless = moved.slice(win32.parse(moved).root.length - 1).replaceAll('\\', '/');
+    expect(driveless.startsWith('/')).toBe(true);
+    writeFileSync(join(repo, '.git'), `gitdir: ${driveless}\n`);
+    const elsewhere = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').map(drive => `${drive}:\\`)
+      .find(drive => drive[0] !== win32.parse(moved).root[0]!.toUpperCase() && existsSync(drive));
+    const cwd = process.cwd();
+    try {
+      if (elsewhere) process.chdir(elsewhere);
+      const located = await locate(repo);
+      expect(await fs.realpath(located.gitDir)).toBe(await fs.realpath(moved));
+    } finally { process.chdir(cwd); }
   }
-  // Computed: a work tree on a drive that is not the process drive (no I/O on it).
-  const letter = win32.parse(process.cwd()).root.toUpperCase().startsWith('Q') ? 'R' : 'Q';
-  const tree = `${letter}:\\wt`;
-  expect(absoluteLocation(tree, '/x/y', tree)).toBe(`${letter}:\\x\\y`);
-  expect(absoluteLocation(`${tree}\\.git`, '\\x', tree)).toBe(`${letter}:\\x`);
-  expect(absoluteLocation(`${tree}\\.git`, 'rel', tree)).toBe(`${letter}:\\wt\\.git\\rel`);
-  expect(absoluteLocation(tree, 'D:\\abs', tree)).toBe('D:\\abs');
-  // Observed: a gitfile written without the drive, read from another drive when one exists.
-  const { root, repo, gitDir } = repository();
-  const moved = join(root, 'moved.git');
-  renameSync(gitDir, moved);
-  const driveless = moved.slice(win32.parse(moved).root.length - 1).replaceAll('\\', '/');
-  expect(driveless.startsWith('/')).toBe(true);
-  writeFileSync(join(repo, '.git'), `gitdir: ${driveless}\n`);
-  const elsewhere = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').map(drive => `${drive}:\\`)
-    .find(drive => drive[0] !== win32.parse(moved).root[0]!.toUpperCase() && existsSync(drive));
-  const cwd = process.cwd();
-  try {
-    if (elsewhere) process.chdir(elsewhere);
-    const located = await locate(repo);
-    expect(await fs.realpath(located.gitDir)).toBe(await fs.realpath(moved));
-  } finally { process.chdir(cwd); }
 });

@@ -140,7 +140,9 @@ describe('a usage error opens nothing (no database created or migrated)', () => 
     ['receiver', 'outbox-status', '--as', 'merchant', '--deadline-s', 'x'],
   ];
 
-  it.each(cases)('%s %s with a missing or malformed argument: exit 2, nothing opened', async (...argv) => {
+  // `%#` keeps the titles distinct: several commands appear with more than one malformed argument,
+  // and the full validation requires every title in the suite to be unique.
+  it.each(cases)('%s %s with a missing or malformed argument (case %#): exit 2, nothing opened', async (...argv) => {
     const services = untouchable();
     expect(await lab.main(argv, services)).toBe(2);
     for (const factory of Object.values(services)) expect(factory).not.toHaveBeenCalled();
