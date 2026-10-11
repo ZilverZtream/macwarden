@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync, lstatSync, statSync, existsSync } from 'node:fs';
 import { resolve, relative, dirname, basename, join, sep, isAbsolute } from 'node:path';
-import { availableParallelism } from 'node:os';
+import { availableParallelism, freemem } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 
@@ -776,9 +776,16 @@ export function findLeaks(options) {
   return null;
 }
 
-/** Worker count for leakScans: every processor but two, at most 20, at least 1. */
-export function leakScanWorkers() {
-  return Math.max(1, Math.min(availableParallelism() - 2, 20));
+// Each worker builds its own matchers for every owner's sentinels: about 0.55 GB at the end of a
+// full validation (20 workers held 11.3 GB on 2026-10-11, and the host ran short of memory).
+const WORKER_BYTES = 640 * 1024 * 1024;
+
+/**
+ * Worker count for leakScans: every processor but two, at most 20, and no more than half of the
+ * free memory holds at WORKER_BYTES each; at least 1.
+ */
+export function leakScanWorkers(processors = availableParallelism(), free = freemem()) {
+  return Math.max(1, Math.min(processors - 2, 20, Math.floor(free / 2 / WORKER_BYTES)));
 }
 
 /**

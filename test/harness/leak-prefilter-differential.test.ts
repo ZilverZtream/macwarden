@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { expect, it } from 'vitest';
-import { findLeaks, internals, leakScans } from '../../scripts/leak-check.mjs';
+import { findLeaks, internals, leakScans, leakScanWorkers } from '../../scripts/leak-check.mjs';
 import { collectedNameDuplicates } from '../../scripts/validation-support.mjs';
 
 // The leak prefilter, the redactor fast path and the parallel scan are checked against
@@ -245,4 +245,16 @@ it('PERF-05 the early name check finds the duplicates the report check rejects, 
     .toEqual({ collected: true, count: 5, duplicates: ['one two three', 'same'] });
   writeFileSync(join(root, 't/b.test.mjs'), `import { it } from ${api};\nit('other', () => {});\n`);
   expect(collectedNameDuplicates(root, process.env, scratch, 120_000).duplicates).toEqual([]);
+});
+
+it('PERF-06 the leak scan pool is bounded by the processors and by half the free memory', () => {
+  const GB = 1024 ** 3;
+  // 24 processors and plenty of memory: every processor but two, at most 20.
+  expect(leakScanWorkers(24, 64 * GB)).toBe(20);
+  expect(leakScanWorkers(8, 64 * GB)).toBe(6);
+  // Memory bounds it: half of 10 GB free at 0.625 GB per worker.
+  expect(leakScanWorkers(24, 10 * GB)).toBe(8);
+  // Never fewer than one, whatever is short.
+  expect(leakScanWorkers(2, 64 * GB)).toBe(1);
+  expect(leakScanWorkers(24, 0)).toBe(1);
 });
