@@ -229,7 +229,12 @@ async function validate(args) {
         const safe = sentinelRedactor(options)(ctx.output);
         writeFileSync(join(attempt, `${ctx.owner}-output.log`), safe);
         result.reports.push({ label: `${ctx.owner}-output`, originalPath: join(ctx.scratch, 'original-output.log'), originalSha256: hash(ctx.output), retainedSha256: hash(safe) });
-      } catch { result.checks.push({ name: `leak-check:${ctx.owner}`, status: 'FAIL' }); }
+      } catch (error) {
+        // The scan refused or could not read the tree (a link inside scratch, an unreadable file):
+        // fail closed, and say why, since the evidence otherwise shows only FAIL.
+        result.checks.push({ name: `leak-check:${ctx.owner}`, status: 'FAIL',
+          detail: `leak scan failed: ${error instanceof Error ? error.message : String(error)}` });
+      }
     }
     result.status = result.checks.length && result.checks.every(check => check.status === 'PASS') ? 'PASS' : 'FAIL';
     result.finishedAt = new Date().toISOString();

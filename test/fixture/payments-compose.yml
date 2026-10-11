@@ -20,7 +20,8 @@ services:
       - --listen=0.0.0.0:9735
       - --tlsextradomain=lnd-payee
       - --accept-keysend
+    # An anonymous volume: it is removed with the container (`rm -v`, `down -v`). A named volume
+    # survived both and the payee then started on the previous run's chain data against a fresh
+    # regtest chain, so it could stay unsynced for the whole wait.
     volumes:
-      - lnd-payee-data:/root/.lnd
-volumes:
-  lnd-payee-data:
+      - /root/.lnd

@@ -43,6 +43,9 @@ for (const suffix of ['.lock', '.lock.claim']) {
     // The planted link is the operator's to remove; nothing of this run is left beside it.
     expect(readdirSync(f.dir).filter(name => name.startsWith(basename(f.registry) + '.lock')).sort())
       .toEqual([basename(f.registry) + suffix]);
+    // The test removes its own planted link: the full validation's leak scan refuses any link left
+    // in the scratch tree (a link could point outside the tree it is asked to inspect).
+    unlinkSync(f.registry + suffix);
   });
 }
 
