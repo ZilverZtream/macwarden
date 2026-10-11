@@ -34,6 +34,9 @@ const UNREACHABLE = '0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b1
 let flags: string[] = [];
 const bakedIds: string[] = [];
 const heldHashes: string[] = [];
+// Watches this file started: afterAll stops any still running, so a failed test cannot leave its
+// middleware registered for the next oracle file (watch-live then met "already registered").
+const watches: ReturnType<typeof spawn>[] = [];
 
 function docker(args: string[], timeout = 60_000) {
   return spawnSync('docker', [...compose, ...args], { cwd: repo, encoding: 'utf8', maxBuffer: 8_000_000, timeout, env: childEnvironment() });
@@ -75,6 +78,7 @@ async function waitFor<T>(what: string, probe: () => T | null | undefined | fals
 function startWatch(seconds: number) {
   const child = spawn(process.execPath, [resolve('dist/bin.js'), 'watch', ...flags, '--lnd-grpc', `localhost:${topology.grpcPort}`,
     '--payment-journal', journal, '--until', `${seconds}s`, '--json'], { env: childEnvironment(), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  watches.push(child);
   let stdout = '';
   let stderr = '';
   child.stdout!.on('data', chunk => { stdout += String(chunk); });
@@ -136,9 +140,19 @@ beforeAll(async () => {
   await waitFor('active channel', () => (lncli(['listchannels', '--active_only']).channels as { remote_pubkey: string }[])
     .some(channel => channel.remote_pubkey === payeeKey));
   await waitFor('payee sees the channel', () => (payee(['listchannels', '--active_only']).channels as unknown[]).length > 0);
+  // Both sides report the channel active a moment before the payer can route over it: the first
+  // payment failed once in CI when this file ran soon after the fixture came up.
+  await waitFor('payer finds a route to the payee', () => docker(['exec', '-T', 'lnd', 'lncli', '--network=regtest', 'queryroutes',
+    '--dest', payeeKey, '--amt', '1000']).status === 0);
 }, 600_000);
 
-afterAll(() => {
+afterAll(async () => {
+  for (const child of watches) {
+    if (child.exitCode !== null || child.signalCode !== null) continue;
+    const closed = new Promise(done => child.once('close', done));
+    child.kill();
+    await Promise.race([closed, sleep(15_000)]);
+  }
   // Release held payments and remove what this file added; the shared fixture keeps its own nodes.
   for (const hash of heldHashes) docker(['exec', '-T', 'lnd-payee', 'lncli', '--network=regtest', 'cancelinvoice', hash]);
   for (const id of bakedIds) docker(['exec', '-T', 'lnd', 'lncli', '--network=regtest', 'deletemacaroonid', id]);
@@ -171,7 +185,8 @@ it('PAYMENTS/live journaled payments by baked credentials reconcile to LND outco
   const watch = startWatch(90);
   await watch.registered;
   // 1. An invoice paid by the payer credential: settles.
-  expect(pay(payer, ['payinvoice', '--force', settledRequest]).status).toBe(0);
+  const settledPay = pay(payer, ['payinvoice', '--force', settledRequest]);
+  expect(settledPay.status, `payinvoice: ${settledPay.stderr} ${settledPay.stdout}`).toBe(0);
   // 2. A keysend to a node no route reaches, by the second credential: LND records it as failed.
   pay(keysender, ['sendpayment', '--keysend', '--dest', UNREACHABLE, '--amt', '100', '--force']);
   // 3. A hold invoice paid by the payer credential and held by the payee: stays in flight.
