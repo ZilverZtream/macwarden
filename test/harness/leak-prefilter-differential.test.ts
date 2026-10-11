@@ -123,27 +123,46 @@ const corpusFiles = (directory: string): string[] => readdirSync(directory, { wi
   return entry.isFile() && statSync(path).size <= 2_000_000 ? [path] : [];
 });
 
-it('PERF-02 the prefilter agrees with the reference on the repository test corpora and their names', () => {
-  const pick = random(7);
-  const registered = readdirSync(resolve('test/sentinels')).map(name => readFileSync(join(resolve('test/sentinels'), name)));
-  const population = [...registered, ...sources(pick, 20, () => 1 + pick.int(300))];
-  const states = population.map(source => internals.preparedCredential(source));
-  const reference = referencePrefilter(states);
-  const { possibleLeak } = internals.preparedFilter(states);
-  const files = [...corpusFiles(resolve('test')), ...corpusFiles(resolve('src'))];
+// The corpus comparison runs in eight slices (every eighth file each), so one test stays well
+// inside the default timeout on a slow CI runner; a final test checks the slices together.
+const corpus = (() => {
+  let built: { reference: (input: Input) => boolean; possibleLeak: (input: Input) => boolean; files: string[] } | undefined;
+  return () => {
+    if (built) return built;
+    const pick = random(7);
+    const registered = readdirSync(resolve('test/sentinels')).map(name => readFileSync(join(resolve('test/sentinels'), name)));
+    const population = [...registered, ...sources(pick, 20, () => 1 + pick.int(300))];
+    const states = population.map(source => internals.preparedCredential(source));
+    const { possibleLeak } = internals.preparedFilter(states);
+    built = { reference: referencePrefilter(states), possibleLeak, files: [...corpusFiles(resolve('test')), ...corpusFiles(resolve('src'))] };
+    return built;
+  };
+})();
+const corpusSlices = 8;
+const corpusTally = { slices: 0, files: 0, positive: 0 };
+
+it.each(Array.from({ length: corpusSlices }, (_, slice) => ({ slice, part: slice + 1 })))('PERF-02 the prefilter agrees with the reference on the repository test corpora and their names (part $part of 8)', ({ slice }) => {
+  const { reference, possibleLeak, files } = corpus();
   const disagreements: string[] = [];
-  let positive = 0;
-  for (const path of files) {
+  const mine = files.filter((_, index) => index % corpusSlices === slice);
+  for (const path of mine) {
     for (const data of [readFileSync(path), Buffer.from(relative(resolve(), path))]) {
       const input = internals.preparedData(data);
       const expected = reference(input);
-      if (expected) positive++;
+      if (expected) corpusTally.positive++;
       if (expected !== possibleLeak(input)) disagreements.push(relative(resolve(), path));
     }
   }
-  expect(files.length).toBeGreaterThan(200);
-  expect(positive, 'the corpora hold registered encodings').toBeGreaterThan(0);
+  corpusTally.slices++;
+  corpusTally.files += mine.length;
   expect(disagreements).toEqual([]);
+});
+
+it('PERF-02 the corpus slices together covered every file, and the corpora hold registered encodings', () => {
+  expect(corpusTally.slices).toBe(corpusSlices);
+  expect(corpusTally.files).toBe(corpus().files.length);
+  expect(corpusTally.files).toBeGreaterThan(200);
+  expect(corpusTally.positive, 'the corpora hold registered encodings').toBeGreaterThan(0);
 });
 
 it('PERF-03 the redactor fast path returns exactly what the full redaction pass returns', () => {

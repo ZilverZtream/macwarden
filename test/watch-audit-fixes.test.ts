@@ -222,8 +222,13 @@ it('WATCH/flush-clock-back periodic usage flushes keep running after the wall cl
   vi.setSystemTime(Date.now() - 3_600_000);
   script.decide[0](call('request', 2, '/lnrpc.Lightning/ListChannels', admin));
   await turns();
-  for (let tick = 0; tick < 2; tick++) { mono += 5_000; vi.advanceTimersByTime(5_000); await turns(); }
-  await vi.waitFor(() => expect(renames).toBe(2), { timeout: 30_000, interval: 5 });
+  // One tick at a time: each flush must finish before the next tick, or a slow write folds the
+  // second tick's coverage into the first write and the count depends on timing.
+  for (const expected of [2, 3]) {
+    mono += 5_000;
+    vi.advanceTimersByTime(5_000);
+    await vi.waitFor(() => expect(renames).toBe(expected), { timeout: 30_000, interval: 5 });
+  }
   const onDisk = JSON.parse(readFileSync(usageFile, 'utf8')) as { entries: { calls: number }[] };
   expect(onDisk.entries.reduce((sum, item) => sum + item.calls, 0)).toBe(2);
   h.stop();
