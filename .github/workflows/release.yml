@@ -91,5 +91,5 @@ jobs:
           version=$(node -p "require('./package.json').version")
           if [ "v$version" != "$GITHUB_REF_NAME" ]; then echo "tag $GITHUB_REF_NAME does not match package.json version $version" >&2; exit 1; fi
           case "$version" in *-*) tag=next ;; *) tag=latest ;; esac
-          echo "$SHA256  package/$TARBALL" | sha256sum --check --strict -
-          npm publish --provenance --tag "$tag" --ignore-scripts "package/$TARBALL"
+          echo "$SHA256  ./package/$TARBALL" | sha256sum --check --strict -
+          npm publish --provenance --tag "$tag" --ignore-scripts "./package/$TARBALL"

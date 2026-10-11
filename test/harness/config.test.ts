@@ -221,8 +221,9 @@ it('CP-001/B12 the release workflow verifies and packs without a token, then pub
     'git merge-base --is-ancestor "$GITHUB_SHA" origin/main', 'npm ci --ignore-scripts', '|']);
   expect(publish).toMatch(/^ {6}- uses: actions\/download-artifact@[0-9a-f]{40}$/m);
   expect(publish.indexOf('merge-base --is-ancestor')).toBeLessThan(publish.indexOf('npm publish'));
-  expect(publish).toMatch(/^ {10}echo "\$SHA256 {2}package\/\$TARBALL" \| sha256sum --check --strict -$/m);
-  expect(publish).toMatch(/^ {10}npm publish --provenance --tag "\$tag" --ignore-scripts "package\/\$TARBALL"$/m);
+  expect(publish).toMatch(/^ {10}echo "\$SHA256 {2}\.\/package\/\$TARBALL" \| sha256sum --check --strict -$/m);
+  expect(publish).toMatch(/^ {10}npm publish --provenance --tag "\$tag" --ignore-scripts "\.\/package\/\$TARBALL"$/m);
+  // A path without ./ reads as a GitHub owner/repo spec: npm tried git ls-remote for v1.3.1.
   expect(yaml).not.toMatch(/npm run build/);
   for (const job of [verify, publish]) {
     expect(job).toMatch(/^ {6}- uses: actions\/checkout@[^\r\n]+\n {8}with:\n {10}persist-credentials: false$/m);
