@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { expect } from 'vitest';
 import { childEnvironment } from '../helpers/environment.js';
 import { findLeaks } from '../helpers/leak-check.js';
+import { requiredPlatformFiles } from '../../scripts/platform-variants.mjs';
 
 type FullEvidence = {
   level: string; platform: string; candidate: string; status: string;
@@ -52,10 +53,13 @@ export function prepareFullControl(variant: 'complete' | 'changed-candidate' | '
   } }));
   put('package-lock.json', JSON.stringify({ name: 'cp050-full-fixture', version: '1.0.0', lockfileVersion: 3,
     packages: { '': { name: 'cp050-full-fixture', version: '1.0.0' } } }));
-  for (const [config, include] of [['vitest.config.ts', 'test/unit/**/*.test.ts'],
-    ['vitest.oracle.config.ts', 'test/oracle/**/*.test.ts'], ['vitest.harness.config.ts', 'test/harness/**/*.test.ts'],
-    ['vitest.cln.config.ts', 'test/cln-oracle/**/*.test.ts']])
-    put(config!, `export default {test:{include:[${JSON.stringify(include)}],${variant === 'oracle-config-exclusion' && config === 'vitest.oracle.config.ts' ? "exclude:['test/oracle/c.test.ts']," : ''}fileParallelism:false,maxWorkers:1}};\n`);
+  // Full validation requires this platform's registered variant files to run and pass
+  // (platform-variants.mjs); the fixture carries a passing stand-in for each, run by its unit config.
+  const platformFiles = requiredPlatformFiles(process.platform);
+  for (const [config, include] of [['vitest.config.ts', ['test/unit/**/*.test.ts', ...platformFiles]],
+    ['vitest.oracle.config.ts', ['test/oracle/**/*.test.ts']], ['vitest.harness.config.ts', ['test/harness/**/*.test.ts']],
+    ['vitest.cln.config.ts', ['test/cln-oracle/**/*.test.ts']]] as const)
+    put(config, `export default {test:{include:${JSON.stringify(include)},${variant === 'oracle-config-exclusion' && config === 'vitest.oracle.config.ts' ? "exclude:['test/oracle/c.test.ts']," : ''}fileParallelism:false,maxWorkers:1}};\n`);
   const test = (title: string) => `import {it,expect} from ${JSON.stringify(api)};\nit(${JSON.stringify(title)},()=>expect(1).toBe(1));\n`;
   let firstProductTitle = 'CP-950/B1 first independent product case';
   if (variant === 'metadata-leak') {
@@ -69,6 +73,7 @@ export function prepareFullControl(variant: 'complete' | 'changed-candidate' | '
   }
   put('test/unit/a.test.ts', test(firstProductTitle));
   put('test/unit/b.test.ts', test('CP-951/B1 second independent product case'));
+  platformFiles.forEach((file, index) => put(file, test(`CP-953/B${index + 1} platform variant stand-in`)));
   put('test/oracle/a.test.ts', test('CP-950/probe first independent reference'));
   put('test/oracle/b.test.ts', test('CP-951/probe second independent reference'));
   if (variant === 'oracle-config-exclusion') put('test/oracle/c.test.ts', test('CP-950/probe third original reference'));

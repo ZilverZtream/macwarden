@@ -84,6 +84,9 @@ it('bake --out naming an existing registry exits 3 at B4 and leaves the registry
   expect(readFileSync(f.registry).equals(before)).toBe(true); expect(existsSync(`${f.registry}.lock`)).toBe(false);
 });
 
+// rotate runs the command in process and then the leak check over the scratch tree (findLeaks,
+// cp028-rotate-support invoke); under a loaded full suite that passed the 15 s default, so these get 90 s
+// (as RECONCILE/bounds did in 1.2.1).
 for (const kind of ['registry', 'lock', 'claim', 'temp', 'canary', 'usage'] as const) {
   it(`rotate refuses --out naming the registry ${kind} file at S5`, async () => rotateScratch(async f => {
     const out = sidecars(f.registry)[kind];
@@ -92,7 +95,7 @@ for (const kind of ['registry', 'lock', 'claim', 'temp', 'canary', 'usage'] as c
     rotateFailure(f, result, 3, 'S5'); expect(f.calls).toEqual([]);
     if (kind !== 'registry') expect(existsSync(out)).toBe(false);
     unchanged(f, before);
-  }));
+  }), 90_000);
 }
 
 for (const kind of ['registry', 'lock', 'claim', 'temp', 'canary', 'usage'] as const) {
