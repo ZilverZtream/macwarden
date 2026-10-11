@@ -89,8 +89,12 @@ function sources(pick: ReturnType<typeof random>, count: number, lengths: () => 
     ? Buffer.concat([shared, pick.bytes(lengths(), 0)]) : pick.bytes(lengths()));
 }
 
-// Six runs of 50 source lengths each (1 to 300 in all): one run takes a few seconds, so a
-// loaded machine stays inside the default test timeout.
+// The reference is the former regex alternation, which Node 22's regular expression engine runs
+// about ten times slower than Node 24's (the prefilter itself runs alike on both): 4 to 5 s per
+// slice in WSL on Node 22, over 15 s on a two-core GitHub runner. The comparisons get their own limit.
+const REFERENCE_TIMEOUT_MS = 120_000;
+
+// Six runs of 50 source lengths each (1 to 300 in all).
 it.each([1, 51, 101, 151, 201, 251].map(first => ({ first, last: first + 49 })))('PERF-01 the prefilter agrees with the literal-alternation reference on every encoding of sources of $first to $last bytes', ({ first, last }) => {
   const pick = random(20261011 + first);
   const tally = { cases: 0, positive: 0, negative: 0, disagreements: [] as string[] };
@@ -115,7 +119,7 @@ it.each([1, 51, 101, 151, 201, 251].map(first => ({ first, last: first + 49 })))
   expect(tally.disagreements).toEqual([]);
   expect(tally.positive, JSON.stringify({ ...tally, disagreements: undefined })).toBeGreaterThan(tally.cases / 4);
   expect(tally.negative).toBeGreaterThan(tally.cases / 10);
-});
+}, REFERENCE_TIMEOUT_MS);
 
 const corpusFiles = (directory: string): string[] => readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
   const path = join(directory, entry.name);
@@ -156,7 +160,7 @@ it.each(Array.from({ length: corpusSlices }, (_, slice) => ({ slice, part: slice
   corpusTally.slices++;
   corpusTally.files += mine.length;
   expect(disagreements).toEqual([]);
-});
+}, REFERENCE_TIMEOUT_MS);
 
 it('PERF-02 the corpus slices together covered every file, and the corpora hold registered encodings', () => {
   expect(corpusTally.slices).toBe(corpusSlices);
