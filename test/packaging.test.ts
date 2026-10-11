@@ -79,8 +79,8 @@ function publish(version: string, ref: string, digest?: string): { status: numbe
 
 it('UX/packaging a prerelease is published to the next dist-tag and a release to latest', () => {
   expect(publish('1.0.0-rc.1', 'v1.0.0-rc.1')).toEqual({ status: 0,
-    args: 'publish --provenance --tag next --ignore-scripts package/x-1.0.0-rc.1.tgz' });
-  expect(publish('1.0.0', 'v1.0.0')).toEqual({ status: 0, args: 'publish --provenance --tag latest --ignore-scripts package/x-1.0.0.tgz' });
+    args: 'publish --provenance --tag next --ignore-scripts ./package/x-1.0.0-rc.1.tgz' });
+  expect(publish('1.0.0', 'v1.0.0')).toEqual({ status: 0, args: 'publish --provenance --tag latest --ignore-scripts ./package/x-1.0.0.tgz' });
 });
 
 it('UX/packaging a tarball whose SHA-256 differs from the one the verify job packed publishes nothing', () => {
