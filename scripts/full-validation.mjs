@@ -1,14 +1,22 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve } from 'node:path';
+import { assignShards, readDurations } from './oracle-shards.mjs';
+import { runNode } from './run-node.mjs';
 import { fileURLToPath } from 'node:url';
 import { createPrivateDirectory } from './private-scratch.mjs';
-import { findLeaks, sentinelRedactor } from './leak-check.mjs';
-import { run, runNpm, commandTimeout, oracleCommandTimeout, fullSuite, skippedSourceCount, candidateInputsClean, safeSerialize, collectedCaseName, resolveVitestConfig, npmVitestConfigArgs } from './validation-support.mjs';
+import { findLeaks, leakScans, sentinelRedactor } from './leak-check.mjs';
+import { run, runNpm, commandTimeout, oracleCommandTimeout, fullSuite, skippedSourceCount, candidateInputsClean, safeSerialize, collectedCaseName, resolveVitestConfig, npmVitestConfigArgs, collectedNameDuplicates } from './validation-support.mjs';
 
 const scriptRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const vitestCli = join(scriptRoot, 'node_modules', 'vitest', 'vitest.mjs');
+
+// LND fixture owners for the oracle shards, one regtest node each. Owners 3 and 4 stay free:
+// CP-050/fixture-shard-isolation (test/oracle/cp050-policy.test.ts) starts them itself.
+// Six start in parallel in about 15 s and pass reliably; more cannot help much, since the host
+// CPU, not Docker, bounds the oracle files. The plan drops owners it has no files for.
+export const lndOwners = ['1', '2', '5', '6', '7', '8'];
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const readJson = path => JSON.parse(readFileSync(path, 'utf8'));
@@ -35,6 +43,12 @@ async function validate(args) {
   if (timeout === null || oracleTimeout === null) return refuse('invalid MACWARDEN_VALIDATION_TIMEOUT_MS');
   if (!['win32', 'linux'].includes(process.platform)) return refuse(`unsupported platform ${process.platform} (Linux and Windows only)`);
   if (process.platform === 'linux' && process.getuid() === 0) return refuse('refusing to run as root');
+  // Evidence inside the work tree must be git-ignored: otherwise its untracked files would be
+  // excused by the cleanliness check while a later commit could pick them up.
+  const evidencePath = relative(root, evidence);
+  if (!evidencePath.startsWith('..') && !isAbsolute(evidencePath)
+    && spawnSync('git', ['check-ignore', '-q', '--', evidencePath || '.'], { cwd: root, timeout: 30_000, windowsHide: true }).status !== 0)
+    return refuse('the evidence directory is inside the work tree and not ignored by git');
   let candidate;
   let inputs;
   try {
@@ -46,7 +60,11 @@ async function validate(args) {
   // New attempt directories retain every previous failed or invalid run.
   mkdirSync(evidence, { recursive: true });
   const attempt = await createPrivateDirectory(evidence, 'attempt-');
-  const result = { level: 'full', platform: process.platform, candidate, inputs, status: 'FAIL',
+  // The toolchain that produced this evidence: Node, npm and the exact dependency lockfile.
+  const npmVersion = run('npm', ['--version'], root, process.env, undefined, 60_000);
+  const toolchain = { node: process.version, npm: npmVersion.exitCode === 0 ? npmVersion.output.trim() : null,
+    lockfileSha256: existsSync(join(root, 'package-lock.json')) ? hash(readFileSync(join(root, 'package-lock.json'))) : null };
+  const result = { level: 'full', platform: process.platform, candidate, toolchain, inputs, status: 'FAIL',
     startedAt: new Date().toISOString(), commands: [], checks: [], reports: [], inventories: [] };
   const runtimeParent = join(root, '.ratchet', 'packets');
   mkdirSync(runtimeParent, { recursive: true });
@@ -61,15 +79,16 @@ async function validate(args) {
     const env = { ...process.env, MACWARDEN_TEST_TMP: scratch, MACWARDEN_SENTINEL_DIR: sentinels };
     delete env.MACWARDEN_FIXTURE_SHARD;
     // LND fixture shards are numbered; the Core Lightning fixture has its own fixed project.
-    if (/^[1-4]$/.test(owner)) env.MACWARDEN_FIXTURE_SHARD = owner;
+    if (/^[1-8]$/.test(owner)) env.MACWARDEN_FIXTURE_SHARD = owner;
     const ctx = { owner, scratch, sentinels, env, output: '' };
     contexts.push(ctx);
     result.lifecycle.owners.push({ owner, scratch, sentinels, createdAt: new Date().toISOString() });
     return ctx;
   };
   const perform = async (ctx, argv, deadline = timeout, directVitest = false) => {
+    // Asynchronous either way: the unit and oracle phases share this event loop.
     const invocation = directVitest
-      ? run(process.execPath, [vitestCli, ...argv], root, ctx.env, undefined, deadline)
+      ? await runNode([vitestCli, ...argv], root, ctx.env, deadline)
       : await runNpm(argv, root, ctx.env, deadline);
     result.commands.push({ owner: ctx.owner, argv, exitCode: invocation.exitCode, timedOut: invocation.timedOut,
       ...(directVitest ? { program: process.execPath, cli: vitestCli } : {}) });
@@ -116,6 +135,18 @@ async function validate(args) {
   };
   try {
     const unit = await context('unit');
+    // Fail fast: two checks the end of the run repeats, made before any test phase so a
+    // run that cannot pass stops in seconds rather than after every phase.
+    result.checks.push({ name: 'no-skipped-source:early', status: skippedSourceCount(root) ? 'FAIL' : 'PASS' });
+    const names = collectedNameDuplicates(root, unit.env, unit.scratch, timeout);
+    for (const { output, ...command } of names.commands) {
+      result.commands.push({ owner: unit.owner, program: process.execPath, ...command });
+      unit.output += output;
+    }
+    // Counts only: a test name is metadata the evidence must not echo.
+    result.checks.push({ name: 'unique-test-names:early', status: names.collected && !names.duplicates.length ? 'PASS' : 'FAIL',
+      detail: names.collected ? `${names.duplicates.length} duplicate names among ${names.count}` : 'test collection failed' });
+    if (result.checks.some(check => check.status !== 'PASS')) throw new Error('fail fast');
     await perform(unit, ['run', 'build']);
     await perform(unit, ['run', 'lint']);
     const unitConfig = resolveVitestConfig(root);
@@ -135,72 +166,101 @@ async function validate(args) {
     };
     oracleFileCoverage(oracles.map(item => item.file), 'oracle-collection');
     oracleFileCoverage(clnOracles.map(item => item.file), 'oracle-cln-collection', 'cln-oracle');
-    const unitReport = join(unit.scratch, 'unit-report.json');
-    await perform(unit, ['run', '--config', unitConfig, '--cache=false', '--reporter=json', `--outputFile=${unitReport}`], timeout, true);
-    report(unit, unitReport, 'unit', units);
-    let unitData = readJson(unitReport);
-    if (harnessConfig) {
-      const harness = await inventory(unit, harnessConfig, 'harness');
-      const harnessReport = join(unit.scratch, 'harness-report.json');
-      await perform(unit, ['run', 'test:harness', '--', ...npmVitestConfigArgs(root, 'test:harness', harnessConfig), '--cache=false', '--reporter=json', `--outputFile=${harnessReport}`]);
-      report(unit, harnessReport, 'harness', harness);
-      const data = readJson(harnessReport);
-      unitData = { success: unitData.success && data.success,
-        testResults: [...unitData.testResults, ...data.testResults],
-        numTotalTests: unitData.numTotalTests + data.numTotalTests,
-        numPassedTests: unitData.numPassedTests + data.numPassedTests,
-        numFailedTests: unitData.numFailedTests + data.numFailedTests,
-        numPendingTests: unitData.numPendingTests + data.numPendingTests,
-        numFailedTestSuites: unitData.numFailedTestSuites + data.numFailedTestSuites };
-    }
-    fullSuite(root, 'unit', unitData, result.checks);
-    const oracleObserved = [];
-    // The Core Lightning rune comparison runs beside the LND shards against its own disposable
-    // regtest fixture (fixture:cln:up, test:cln-oracle, fixture:cln:down), recorded like them.
-    const clnShard = async () => {
-      const ctx = await context('cln');
-      const path = join(ctx.scratch, 'cln-oracle-report.json');
+    // Explicit per-owner file lists, balanced by measured duration: each oracle file has
+    // exactly one owner, so stateful files never share a node, and the plan check proves it.
+    const relativeFile = file => relative(root, resolve(root, file)).replaceAll('\\', '/');
+    const oracleFiles = [...new Set(oracles.map(item => relativeFile(item.file)))].sort();
+    const plan = assignShards(oracleFiles, readDurations(root), lndOwners.length)
+      .map((shard, index) => ({ owner: lndOwners[index], files: shard.files, predictedSeconds: Math.round(shard.seconds) }));
+    const planned = plan.flatMap(shard => shard.files).sort();
+    result.checks.push({ name: 'oracle-shard-plan', status: plan.length > 0 && new Set(planned).size === planned.length &&
+      JSON.stringify(planned) === JSON.stringify(oracleFiles) ? 'PASS' : 'FAIL', detail: JSON.stringify(plan) });
+    // The phases run side by side, each with its own owners: the Core Lightning shard and the LND
+    // fixture startups overlap the unit and harness commands, gitleaks overlaps the LND oracle
+    // files. The LND files themselves wait for the unit and harness commands: they compete for
+    // the host CPU (they spawn the CLI constantly), and measured on 24 threads they pushed the
+    // unit command past its 600000 ms deadline (646 s beside six shards, 398 s alone) while
+    // saving only a tenth of the wall time.
+    let releaseOracleFiles;
+    const unitCommandsDone = new Promise(resolveGate => { releaseOracleFiles = resolveGate; });
+    const unitPhase = async () => {
+      let unitData;
+      // Released however the unit commands end, so a unit failure never strands the oracle phase.
       try {
-        if (await perform(ctx, ['run', 'fixture:cln:up'])) {
-          await perform(ctx, ['run', 'test:cln-oracle', '--', ...npmVitestConfigArgs(root, 'test:cln-oracle', clnConfig), '--cache=false', '--reporter=json', `--outputFile=${path}`], oracleTimeout);
+        const unitReport = join(unit.scratch, 'unit-report.json');
+        await perform(unit, ['run', '--config', unitConfig, '--cache=false', '--reporter=json', `--outputFile=${unitReport}`], timeout, true);
+        report(unit, unitReport, 'unit', units);
+        unitData = readJson(unitReport);
+        if (harnessConfig) {
+          const harness = await inventory(unit, harnessConfig, 'harness');
+          const harnessReport = join(unit.scratch, 'harness-report.json');
+          await perform(unit, ['run', 'test:harness', '--', ...npmVitestConfigArgs(root, 'test:harness', harnessConfig), '--cache=false', '--reporter=json', `--outputFile=${harnessReport}`]);
+          report(unit, harnessReport, 'harness', harness);
+          const data = readJson(harnessReport);
+          unitData = { success: unitData.success && data.success,
+            testResults: [...unitData.testResults, ...data.testResults],
+            numTotalTests: unitData.numTotalTests + data.numTotalTests,
+            numPassedTests: unitData.numPassedTests + data.numPassedTests,
+            numFailedTests: unitData.numFailedTests + data.numFailedTests,
+            numPendingTests: unitData.numPendingTests + data.numPendingTests,
+            numFailedTestSuites: unitData.numFailedTestSuites + data.numFailedTestSuites };
         }
-      } finally {
-        await perform(ctx, ['run', 'fixture:cln:down']);
-      }
-      if (!existsSync(path)) throw new Error('cln oracle report missing');
-      const observed = report(ctx, path, 'oracle-cln', clnOracles);
-      oracleFileCoverage(observed.map(item => item.file), 'oracle-cln-aggregate', 'cln-oracle');
+      } finally { releaseOracleFiles(); }
+      fullSuite(root, 'unit', unitData, result.checks);
+      const gitleaksCommand = readJson(join(root, 'package.json')).scripts?.['test:gitleaks'];
+      const gitleaksConfig = typeof gitleaksCommand === 'string'
+        ? /(?:^|\s)--config\s+([\w./-]+)(?:\s|$)/.exec(gitleaksCommand)?.[1] : null;
+      if (!gitleaksConfig || !existsSync(join(root, gitleaksConfig))) throw new Error('gitleaks inventory configuration unavailable');
+      const gitleaks = await inventory(unit, gitleaksConfig, 'gitleaks');
+      const gitleaksReport = join(unit.scratch, 'gitleaks-report.json');
+      await perform(unit, ['run', 'test:gitleaks', '--', '--cache=false', '--reporter=json', `--outputFile=${gitleaksReport}`], oracleTimeout);
+      report(unit, gitleaksReport, 'gitleaks', gitleaks);
     };
-    // Built-in Vitest file sharding keeps each stateful file with one owner.
-    const shards = await Promise.allSettled([clnShard(), ...['1', '2'].map(async owner => {
-      const ctx = await context(owner);
-      const path = join(ctx.scratch, 'oracle-report.json');
-      try {
-        if (await perform(ctx, ['run', 'fixture:up'])) {
-          await perform(ctx, ['run', 'test:oracle', '--', ...npmVitestConfigArgs(root, 'test:oracle', oracleConfig), `--shard=${owner}/2`, '--cache=false', '--reporter=json', `--outputFile=${path}`], oracleTimeout);
+    const oraclePhase = async () => {
+      const oracleObserved = [];
+      // The Core Lightning rune comparison runs beside the LND shards against its own disposable
+      // regtest fixture (fixture:cln:up, test:cln-oracle, fixture:cln:down), recorded like them.
+      const clnShard = async () => {
+        const ctx = await context('cln');
+        const path = join(ctx.scratch, 'cln-oracle-report.json');
+        try {
+          if (await perform(ctx, ['run', 'fixture:cln:up'])) {
+            await perform(ctx, ['run', 'test:cln-oracle', '--', ...npmVitestConfigArgs(root, 'test:cln-oracle', clnConfig), '--cache=false', '--reporter=json', `--outputFile=${path}`], oracleTimeout);
+          }
+        } finally {
+          await perform(ctx, ['run', 'fixture:cln:down']);
         }
-      } finally {
-        await perform(ctx, ['run', 'fixture:down']);
-      }
-      if (!existsSync(path)) throw new Error('shard report missing');
-      const data = readJson(path);
-      const files = new Set((data.testResults || []).map(suite => resolve(root, suite.name)));
-      oracleObserved.push(...report(ctx, path, `oracle-${owner}`, oracles.filter(item => files.has(resolve(root, item.file)))));
-    })]);
-    if (shards.some(shard => shard.status === 'rejected')) throw new Error('shard validation failed');
-    const keys = items => items.map(item => `${resolve(root, item.file)}\0${item.inventoryName ?? item.name}`).sort();
-    const actual = keys(oracleObserved);
-    result.checks.push({ name: 'oracle-union', status: new Set(actual).size === actual.length &&
-      JSON.stringify(actual) === JSON.stringify(keys(oracles)) ? 'PASS' : 'FAIL' });
-    oracleFileCoverage(oracleObserved.map(item => item.file), 'oracle-aggregate');
-    const gitleaksCommand = readJson(join(root, 'package.json')).scripts?.['test:gitleaks'];
-    const gitleaksConfig = typeof gitleaksCommand === 'string'
-      ? /(?:^|\s)--config\s+([\w./-]+)(?:\s|$)/.exec(gitleaksCommand)?.[1] : null;
-    if (!gitleaksConfig || !existsSync(join(root, gitleaksConfig))) throw new Error('gitleaks inventory configuration unavailable');
-    const gitleaks = await inventory(unit, gitleaksConfig, 'gitleaks');
-    const gitleaksReport = join(unit.scratch, 'gitleaks-report.json');
-    await perform(unit, ['run', 'test:gitleaks', '--', '--cache=false', '--reporter=json', `--outputFile=${gitleaksReport}`], oracleTimeout);
-    report(unit, gitleaksReport, 'gitleaks', gitleaks);
+        if (!existsSync(path)) throw new Error('cln oracle report missing');
+        const observed = report(ctx, path, 'oracle-cln', clnOracles);
+        oracleFileCoverage(observed.map(item => item.file), 'oracle-cln-aggregate', 'cln-oracle');
+      };
+      const shards = await Promise.allSettled([clnShard(), ...plan.map(async ({ owner, files }) => {
+        const ctx = await context(owner);
+        const path = join(ctx.scratch, 'oracle-report.json');
+        try {
+          if (await perform(ctx, ['run', 'fixture:up'])) {
+            await unitCommandsDone;
+            await perform(ctx, ['run', 'test:oracle', '--', ...npmVitestConfigArgs(root, 'test:oracle', oracleConfig), '--cache=false', '--reporter=json', `--outputFile=${path}`, ...files], oracleTimeout);
+          }
+        } finally {
+          await perform(ctx, ['run', 'fixture:down']);
+        }
+        if (!existsSync(path)) throw new Error('shard report missing');
+        // Expected cases come from the plan, not from the report: a file the shard skipped or
+        // one it ran without owning both fail this shard's completeness check.
+        const owned = new Set(files);
+        oracleObserved.push(...report(ctx, path, `oracle-${owner}`, oracles.filter(item => owned.has(relativeFile(item.file)))));
+      })]);
+      if (shards.some(shard => shard.status === 'rejected')) throw new Error('shard validation failed');
+      const keys = items => items.map(item => `${resolve(root, item.file)}\0${item.inventoryName ?? item.name}`).sort();
+      const actual = keys(oracleObserved);
+      result.checks.push({ name: 'oracle-union', status: new Set(actual).size === actual.length &&
+        JSON.stringify(actual) === JSON.stringify(keys(oracles)) ? 'PASS' : 'FAIL' });
+      oracleFileCoverage(oracleObserved.map(item => item.file), 'oracle-aggregate');
+    };
+    // Both phases always finish (fixtures torn down, reports recorded) before either failure counts.
+    const phases = await Promise.allSettled([unitPhase(), oraclePhase()]);
+    if (phases.some(phase => phase.status === 'rejected')) throw new Error('phase validation failed');
     result.checks.push({ name: 'no-skipped-source', status: skippedSourceCount(root) ? 'FAIL' : 'PASS' });
     const unchanged = git(root, ['rev-parse', 'HEAD']) === candidate &&
       candidateInputsClean(root, [evidence, runtime]) &&
@@ -209,17 +269,41 @@ async function validate(args) {
   } catch {
     result.checks.push({ name: 'validation-completeness', status: 'FAIL' });
   } finally {
-    for (const ctx of contexts) {
+    // Every owner's output is written, and its redacted copy retained, before any scan,
+    // so each owner's scan also covers every owner's retained log. The scans then run
+    // at once on one worker pool; each result is what findLeaks returns or throws for
+    // that owner, and checks are recorded in owner order as before.
+    const scans = contexts.map(ctx => {
       const options = { root, sentinels: join(root, 'test/sentinels.json'), sentinelDir: ctx.sentinels,
         testTmp: ctx.scratch, evidenceDir: attempt };
       try {
         writeFileSync(join(ctx.scratch, 'original-output.log'), ctx.output);
-        const leak = findLeaks({ ...options, commandOutput: ctx.output, paths: [ctx.scratch, attempt] });
-        result.checks.push({ name: `leak-check:${ctx.owner}`, status: leak ? 'FAIL' : 'PASS' });
         const safe = sentinelRedactor(options)(ctx.output);
         writeFileSync(join(attempt, `${ctx.owner}-output.log`), safe);
-        result.reports.push({ label: `${ctx.owner}-output`, originalPath: join(ctx.scratch, 'original-output.log'), originalSha256: hash(ctx.output), retainedSha256: hash(safe) });
-      } catch { result.checks.push({ name: `leak-check:${ctx.owner}`, status: 'FAIL' }); }
+        return { ctx, options, safe };
+      } catch (error) {
+        return { ctx, options, error };
+      }
+    });
+    const ready = scans.filter(scan => !scan.error);
+    let outcomes;
+    try {
+      outcomes = await leakScans(ready.map(({ ctx, options }) => ({ ...options, commandOutput: ctx.output, paths: [ctx.scratch, attempt] })));
+    } catch (error) {
+      outcomes = ready.map(() => ({ error }));
+    }
+    for (const scan of scans) {
+      const { ctx } = scan;
+      const outcome = scan.error ? { error: scan.error } : outcomes[ready.indexOf(scan)];
+      if ('error' in outcome) {
+        // The scan refused or could not read the tree (a link inside scratch, an unreadable file):
+        // fail closed, and say why, since the evidence otherwise shows only FAIL.
+        result.checks.push({ name: `leak-check:${ctx.owner}`, status: 'FAIL',
+          detail: `leak scan failed: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}` });
+        continue;
+      }
+      result.checks.push({ name: `leak-check:${ctx.owner}`, status: outcome.hit ? 'FAIL' : 'PASS' });
+      result.reports.push({ label: `${ctx.owner}-output`, originalPath: join(ctx.scratch, 'original-output.log'), originalSha256: hash(ctx.output), retainedSha256: hash(scan.safe) });
     }
     result.status = result.checks.length && result.checks.every(check => check.status === 'PASS') ? 'PASS' : 'FAIL';
     result.finishedAt = new Date().toISOString();
@@ -238,7 +322,7 @@ async function validate(args) {
       } catch {
         result.status = 'FAIL';
         // Only generated identities survive if textual safety cannot be verified.
-        safeResult = { level: 'full', platform: process.platform, candidate, status: 'FAIL',
+        safeResult = { level: 'full', platform: process.platform, candidate, toolchain, status: 'FAIL',
           startedAt: result.startedAt, finishedAt: result.finishedAt, commands: [],
           inputs: inputs.map(item => ({ sha256: item.sha256 })),
           reports: result.reports.map(item => ({ originalSha256: item.originalSha256,
@@ -249,7 +333,9 @@ async function validate(args) {
       }
     }
     safeResult.status = result.status;
-    writeFileSync(join(attempt, 'full-validation.json'), `${JSON.stringify(safeResult, null, 2)}\n`);
+    // Written whole or not at all: an interrupted write never leaves a truncated record.
+    writeFileSync(join(attempt, 'full-validation.json.partial'), `${JSON.stringify(safeResult, null, 2)}\n`);
+    renameSync(join(attempt, 'full-validation.json.partial'), join(attempt, 'full-validation.json'));
   }
   if (result.status !== 'PASS') {
     // Check names only: the evidence file holds the details.

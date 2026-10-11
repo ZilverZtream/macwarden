@@ -4,7 +4,7 @@ import type { Invoice, Payment } from '../lnd/types.ts';
 import type { Row } from '../store/sqlite.ts';
 import { MAX_INT64 } from '../util/money.ts';
 import { ACCOUNT, budgetAccount, budgetOf, counterAccountFor, isAccount } from './accounts.ts';
-import { ISO_TIME, parseBalance, signed, type Direction, type Leg } from './journal.ts';
+import { ISO_TIME, MAX_CLOCK_STEP_MS, MAX_SAFE_ENTRY_ID, parseBalance, signed, type Direction, type Leg } from './journal.ts';
 
 /**
  * `ledger verify`: the balance theorem, checked.
@@ -13,18 +13,21 @@ import { ISO_TIME, parseBalance, signed, type Direction, type Leg } from './jour
  *    on an account in the chart, with a debit and a credit line), and is well formed: an event
  *    this book posts, with the lines its posting rule prescribes (accounts, directions, legs,
  *    line numbers 1..n, each debit/credit pair equal), a reference of the event's shape, an
- *    operation and payment hash that agree with the records, an origin `live` or `migrated`, a
- *    readable posted_at that never decreases from one live entry to the next (migrated entries,
- *    which keep their 1.2 times, all come first). `post` clamps live times so they never
- *    decrease, so an entry out of order was moved: of the two around a decrease, the one its
- *    next live entry disagrees with is named (an entry moved forward, not the healthy entries
- *    after it; an entry moved back, not the one before it).
+ *    operation and payment hash that agree with the records, an entry ID a JavaScript number holds
+ *    exactly (within ±(2^53 - 1)), an origin `migrated` at or below the migration's watermark
+ *    (journal_migration; 0 when there is none) and `live` above it, a readable posted_at that
+ *    never decreases from one live entry to the next (migrated entries, which keep their 1.2
+ *    times, all come first) and is at most MAX_CLOCK_STEP_MS ahead of this run's clock. `post`
+ *    clamps live times so they never decrease, so an entry out of order was moved: of the two
+ *    around a decrease, the one its next live entry disagrees with is named (an entry moved
+ *    forward, not the healthy entries after it; an entry moved back, not the one before it).
  * 2. Every account's balance recomputed from the entries equals the stored running balance
  *    (the balances table, and each line's balance_after on the way); every balances row is an
  *    account in the chart with a canonical decimal balance, last_entry_id the last entry that
  *    touches the account and updated_at that entry's posted_at.
  * 3. The book agrees with its own records, record by record. Payer: each reservation's budget
- *    entries commit what the reservation holds or consumed, each succeeded payment has its
+ *    entries commit what the reservation holds or consumed (a released one has its budget-held
+ *    and budget-released entries, not merely a net of zero), each succeeded payment has its
  *    payment-succeeded entry with the record's value and fee, nothing else posts to the wallet
  *    or fee accounts, and a double-payment entry exists exactly for each succeeded payment of an
  *    operation after its first, for the payment's value. Receiver: one settlement entry per
@@ -44,7 +47,8 @@ import { ISO_TIME, parseBalance, signed, type Direction, type Leg } from './jour
  * up to the first LIST_LIMIT each, lowest entry ID first, with their totals.
  *
  * The books are read in entry-ID batches inside one read transaction, on a read-only connection
- * of its own when the store is a file (so the snapshot can stay open while LND is read), and
+ * of its own when the store is a file (so the snapshot can stay open while LND is read; on the
+ * store's own connection, an in-memory store, LND is read before the transaction begins), and
  * memory is bounded by a batch and the per-account state, not by the size of the books. All sums
  * are bigints computed here; SQLite only reads rows. Run it when the component is quiet: a
  * payment that succeeds in LND between the read of the store and the read of LND is reported, as
@@ -125,6 +129,13 @@ export interface LedgerVerification {
   /** The first LIST_LIMIT malformed entries that are not unbalanced; invalidEntryCount counts them all. */
   invalidEntries: InvalidEntry[];
   invalidEntryCount: number;
+  /**
+   * The first LIST_LIMIT payment hashes (per account) whose posted amounts differ from LND's, in record
+   * order; lndDifferenceCount counts them all. Kept per payment, whatever the account totals: two
+   * differences can cancel out in a total.
+   */
+  lndDifferences: Explanation[];
+  lndDifferenceCount: number;
   accounts: AccountReport[];
   lnd: LndComparison;
   lndDetail?: string;
@@ -137,7 +148,11 @@ export const LIST_LIMIT = 100;
 const BATCH = 10_000;
 /** Problems listed per entry; more are counted. */
 const PROBLEM_LIMIT = 10;
-const MIN_INT64 = -(2n ** 63n);
+/**
+ * The lower bound of the first batch of every ID-ordered read (`id > ?`): a REAL below every int64,
+ * so the first batch includes an ID of -2^63 (with MIN_INT64 itself, `>` would skip that row).
+ */
+const BEFORE_ALL = -1e19;
 const PAGE_SIZE = 500;
 const MAX_PAGES = 200;
 const UNRESOLVED_PAYMENT = new Set(['intent', 'submitting', 'in_flight', 'uncertain', 'failed']);
@@ -151,7 +166,8 @@ const SETTLEMENT_EVENTS: ReadonlySet<string> = new Set(['invoice-settled', 'unde
 const COUNTER_ACCOUNTS: ReadonlySet<string> = new Set([ACCOUNT.customerReceivable, ACCOUNT.refundsPayable, ACCOUNT.payoutsPayable]);
 
 interface EntryInfo {
-  entryId: number;
+  /** Exact (a bigint); reports carry it as a number, and an ID outside ±(2^53 - 1) is malformed. */
+  entryId: bigint;
   event: string;
   reference: string;
   paymentHash: string | undefined;
@@ -174,46 +190,64 @@ interface Slot { account: string; direction: Direction; leg?: Leg }
  */
 class Explanations {
   readonly #byAccount = new Map<string, Explanation>();
+  /** The accounts whose explanation names an unbalanced entry (bounded by the accounts, not the entries). */
+  readonly #unbalanced = new Set<string>();
 
-  offer(explanation: Explanation): void {
+  /** `unbalanced`: the explanation's entry is an unbalanced one. */
+  offer(explanation: Explanation, unbalanced = false): void {
     const known = this.#byAccount.get(explanation.account);
     const earlier = explanation.entryId !== undefined && (known?.entryId === undefined || explanation.entryId < known.entryId);
     const moreSpecific = explanation.entryId === undefined && known?.entryId === undefined && known?.paymentHash === undefined
       && explanation.paymentHash !== undefined;
     if (known === undefined || earlier || moreSpecific) {
       this.#byAccount.set(explanation.account, explanation);
+      if (unbalanced) this.#unbalanced.add(explanation.account); else this.#unbalanced.delete(explanation.account);
+    } else if (unbalanced && explanation.entryId !== undefined && explanation.entryId === known.entryId) {
+      this.#unbalanced.add(explanation.account);
     }
   }
 
   get(account: string): Explanation | undefined {
     return this.#byAccount.get(account);
   }
+
+  namesUnbalanced(account: string): boolean {
+    return this.#unbalanced.has(account);
+  }
 }
 
-/** The entries of one category: every ID counted, the LIST_LIMIT lowest kept, one item per entry. */
+/**
+ * The entries of one category: every entry counted, the LIST_LIMIT lowest kept, keyed by the exact
+ * (bigint) ID. Memory is the kept items, not one ID per entry: the caller adds an entry once (the
+ * entry loop knows which list an entry is in, and a live entry's mark carries it; EntryListing)
+ * and extends it after that.
+ */
 class Listed<T extends { entryId: number; reason: string }> {
-  readonly ids = new Set<number>();
-  readonly items: T[] = [];
+  count = 0;
+  readonly kept: { id: bigint; item: T }[] = [];
 
-  add(item: T): void {
-    if (this.ids.has(item.entryId)) { this.extend(item.entryId, item.reason); return; }
-    this.ids.add(item.entryId);
-    if (this.items.length >= LIST_LIMIT && item.entryId > (this.items.at(-1) as T).entryId) return;
-    const at = this.items.findIndex(known => known.entryId > item.entryId);
-    if (at === -1) this.items.push(item); else this.items.splice(at, 0, item);
-    if (this.items.length > LIST_LIMIT) this.items.pop();
+  get items(): T[] {
+    return this.kept.map(known => known.item);
+  }
+
+  add(id: bigint, item: T): void {
+    this.count += 1;
+    if (this.kept.length >= LIST_LIMIT && id > (this.kept.at(-1) as { id: bigint }).id) return;
+    const at = this.kept.findIndex(known => known.id > id);
+    if (at === -1) this.kept.push({ id, item }); else this.kept.splice(at, 0, { id, item });
+    if (this.kept.length > LIST_LIMIT) this.kept.pop();
   }
 
   /** Adds a problem to an entry already listed (no change to the count). */
-  extend(entryId: number, problem: string): void {
-    const known = this.items.find(item => item.entryId === entryId);
-    if (known !== undefined) known.reason = `${known.reason}; ${problem}`;
+  extend(id: bigint, problem: string): void {
+    const known = this.kept.find(item => item.id === id);
+    if (known !== undefined) known.item.reason = `${known.item.reason}; ${problem}`;
   }
 }
 
 function explain(account: string, entry: EntryInfo | undefined, reason: string, paymentHash?: string): Explanation {
   const hash = entry?.paymentHash ?? paymentHash;
-  const named = entry === undefined ? {} : { entryId: entry.entryId, event: entry.event, reference: entry.reference };
+  const named = entry === undefined ? {} : { entryId: Number(entry.entryId), event: entry.event, reference: entry.reference };
   return { account, ...named, ...(hash === undefined ? {} : { paymentHash: hash }), reason };
 }
 
@@ -262,7 +296,7 @@ const listed = (problems: string[]): string => problems.length <= PROBLEM_LIMIT 
 function readEntry(row: Row): { info: EntryInfo; damaged: string[] } {
   const damaged = recordProblems(row, [['event', 'text'], ['reference', 'text'], ['operation_id', 'text', true], ['payment_hash', 'text', true],
     ['origin', 'text'], ['posted_at', 'text']]);
-  return { info: { entryId: Number(row.entry_id as bigint), event: textOf(row, 'event') ?? 'unknown', reference: textOf(row, 'reference') ?? 'unknown',
+  return { info: { entryId: row.entry_id as bigint, event: textOf(row, 'event') ?? 'unknown', reference: textOf(row, 'reference') ?? 'unknown',
     paymentHash: textOf(row, 'payment_hash'), operationId: textOf(row, 'operation_id'), origin: textOf(row, 'origin'),
     postedAt: textOf(row, 'posted_at') }, damaged };
 }
@@ -398,7 +432,10 @@ function entryProblems(info: EntryInfo, lines: Line[], book: 'payer' | 'receiver
 }
 
 /** A live entry the time check has accepted: its time and the accounts its lines touch. */
-interface LiveMark { info: EntryInfo; time: number; accounts: string[] }
+interface LiveMark { info: EntryInfo; time: number; accounts: string[]; listing: EntryListing }
+
+/** Which list an entry is in so far (an entry is counted in at most one: unbalanced, else invalid). */
+interface EntryListing { unbalanced: boolean; invalid: boolean }
 
 /**
  * The read side: a read-only connection of its own when the store is a file (so the snapshot can
@@ -418,18 +455,51 @@ const turn = (): Promise<void> => new Promise(resolve => { setImmediate(resolve)
 
 export async function verifyLedger(store: LedgerStore, api?: LndLedgerSource): Promise<LedgerVerification> {
   const { reader, shared, close } = openReader(store.db);
-  const ownTransaction = !reader.isTransaction;
-  if (ownTransaction) reader.exec('BEGIN');
   try {
-    // On the store's own connection (an in-memory store) the transaction is not held across a yield.
-    return await verifyIn(reader, store.book, api, shared ? () => Promise.resolve() : turn);
+    // On the store's own connection (an in-memory store) the read transaction must not stay open while other work runs on
+    // that connection: LND is read before it begins, and between batches only already-resolved promises are awaited (no
+    // timer or I/O callback runs inside it). A success LND reports after its read and before the store's is then a difference.
+    const before = shared && api !== undefined ? await readLnd(api, store.book) : undefined;
+    const ownTransaction = !reader.isTransaction;
+    if (ownTransaction) reader.exec('BEGIN');
+    try {
+      return await verifyIn(reader, store.book, before === undefined ? api : before, shared ? () => Promise.resolve() : turn);
+    } finally {
+      if (ownTransaction && reader.isTransaction) reader.exec('COMMIT');
+    }
   } finally {
-    if (ownTransaction && reader.isTransaction) reader.exec('COMMIT');
     close();
   }
 }
 
-async function verifyIn(db: DatabaseSync, book: 'payer' | 'receiver', api: LndLedgerSource | undefined, pause: Pause): Promise<LedgerVerification> {
+/** LND's side of step 4: the comparison state, why it is not `compared`, and the amounts read. */
+interface LndOutcome { comparison: LndComparison; lndDetail: string | undefined; lndRead: LndRead | undefined }
+
+async function readLnd(api: LndLedgerSource, book: 'payer' | 'receiver'): Promise<LndOutcome> {
+  try {
+    const lndRead = book === 'payer' ? await settledPayments(api) : await settledInvoices(api);
+    return lndRead.kind === 'read' ? { comparison: 'compared', lndDetail: undefined, lndRead }
+      : { comparison: lndRead.kind, lndDetail: lndRead.detail, lndRead };
+  } catch (error) {
+    return { comparison: 'unavailable', lndDetail: describeError(error), lndRead: undefined };
+  }
+}
+
+/** The watermark of the 1.3 migration (journal_migration), or why there is none. */
+function readWatermark(db: DatabaseSync): { through: bigint; missing?: string } {
+  let row: Row | undefined;
+  try {
+    row = db.prepare('SELECT migrated_through FROM journal_migration WHERE singleton = 1').get();
+  } catch {
+    return { through: 0n, missing: 'the journal has no journal_migration table' };
+  }
+  if (row === undefined) return { through: 0n, missing: 'journal_migration has no row' };
+  const through = intOf(row, 'migrated_through');
+  return through === undefined ? { through: 0n, missing: `journal_migration's migrated_through holds ${describeValue(row.migrated_through)}` } : { through };
+}
+
+async function verifyIn(db: DatabaseSync, book: 'payer' | 'receiver', lndSource: LndLedgerSource | LndOutcome | undefined,
+  pause: Pause): Promise<LedgerVerification> {
   const explanations = new Explanations();
   const unbalanced = new Listed<UnbalancedEntry>();
   const invalid = new Listed<InvalidEntry>();
@@ -440,10 +510,14 @@ async function verifyIn(db: DatabaseSync, book: 'payer' | 'receiver', api: LndLe
     explanations.offer(explain(account, entry, reason, paymentHash));
   };
   /** A malformed entry: listed as invalid unless it is unbalanced (then its reason carries the problems), its accounts flagged. */
-  const malformed = (info: EntryInfo, problems: string[], accounts: string[]): void => {
+  const malformed = (info: EntryInfo, problems: string[], accounts: string[], listing: EntryListing): void => {
     const reason = `entry ${info.entryId} (${info.event} ${info.reference}) is malformed: ${listed(problems)}`;
-    if (unbalanced.ids.has(info.entryId)) unbalanced.extend(info.entryId, `malformed: ${listed(problems)}`);
-    else invalid.add({ entryId: info.entryId, event: info.event, reference: info.reference, reason });
+    if (listing.unbalanced) unbalanced.extend(info.entryId, `malformed: ${listed(problems)}`);
+    else if (listing.invalid) invalid.extend(info.entryId, reason);
+    else {
+      invalid.add(info.entryId, { entryId: Number(info.entryId), event: info.event, reference: info.reference, reason });
+      listing.invalid = true;
+    }
     for (const account of accounts) flag(account, info, reason);
   };
   const computed = new Map<string, bigint>();
@@ -461,6 +535,10 @@ async function verifyIn(db: DatabaseSync, book: 'payer' | 'receiver', api: LndLe
   const entryByKey = db.prepare('SELECT entry_id FROM journal_entries WHERE event = ? AND reference = ?');
   const hasEntry = (event: string, reference: string): boolean => entryByKey.get(event, reference) !== undefined;
   const recordStatements = batchRecordStatements(db, book);
+  const watermark = readWatermark(db);
+  const notMigrated = watermark.missing === undefined ? '' : ` (${watermark.missing}, so no entry is a migrated one)`;
+  /** This run's clock: a live entry later than this was not posted by `post`, which never runs ahead of its clock by more. */
+  const latest = Date.now() + MAX_CLOCK_STEP_MS;
 
   let lastLive: LiveMark | undefined;
   let beforeLive: LiveMark | undefined;
@@ -469,18 +547,22 @@ async function verifyIn(db: DatabaseSync, book: 'payer' | 'receiver', api: LndLe
   let decrease: { last: LiveMark; cur: LiveMark; before: LiveMark | undefined } | undefined;
   const movedForward = (moved: LiveMark, next: LiveMark): void => {
     malformed(moved.info, [`posted_at ${moved.info.postedAt ?? ''} is later than the next live entry ${next.info.entryId}'s ${next.info.postedAt ?? ''} `
-      + '(live times never decrease: the entry was moved)'], moved.accounts);
+      + '(live times never decrease: the entry was moved)'], moved.accounts, moved.listing);
   };
   const movedBack = (moved: LiveMark, previous: LiveMark): void => {
     malformed(moved.info, [`posted_at ${moved.info.postedAt ?? ''} is earlier than live entry ${previous.info.entryId}'s ${previous.info.postedAt ?? ''} `
-      + '(live times never decrease: the entry was moved)'], moved.accounts);
+      + '(live times never decrease: the entry was moved)'], moved.accounts, moved.listing);
   };
-  /** Decides a pending decrease: `next` agreeing with last means cur was moved back; else last was moved forward. */
+  /**
+   * Decides a pending decrease: last ahead of this run's clock was moved forward (post follows the clock once
+   * an entry is that far ahead); otherwise `next` agreeing with last means cur was moved back, else last was moved forward.
+   */
   const settle = (next: LiveMark | undefined): void => {
     if (decrease === undefined) return;
     const { last, cur, before } = decrease;
     decrease = undefined;
-    const curMoved = next === undefined ? before === undefined || before.time > cur.time : next.time >= last.time;
+    const curMoved = last.time > latest ? false
+      : next === undefined ? before === undefined || before.time > cur.time : next.time >= last.time;
     if (curMoved) {
       movedBack(cur, last);
     } else {
@@ -498,7 +580,7 @@ async function verifyIn(db: DatabaseSync, book: 'payer' | 'receiver', api: LndLe
     flag(account, undefined, `journal line ${String(row.line_rowid)} ${why}: ${money} is in no entry`);
   };
 
-  let lower = MIN_INT64;
+  let lower: bigint | number = BEFORE_ALL;
   for (;;) {
     const rows = entryBatch(lower, BATCH);
     const full = rows.length === BATCH;
@@ -532,23 +614,37 @@ async function verifyIn(db: DatabaseSync, book: 'payer' | 'receiver', api: LndLe
       }
       if (debits !== credits) problems.push(`debits ${debits} msat differ from credits ${credits} msat`);
       const accounts = [...new Set(readable.map(line => line.account))];
+      const listing: EntryListing = { unbalanced: problems.length > 0, invalid: false };
       if (problems.length > 0) {
         const reason = `entry ${info.entryId} (${info.event} ${info.reference}) is unbalanced: ${listed(problems)}`;
-        unbalanced.add({ entryId: info.entryId, event: info.event, reference: info.reference, debitsMsat: debits, creditsMsat: credits, reason });
-        for (const account of accounts) explanations.offer(explain(account, info, reason));
+        unbalanced.add(info.entryId, { entryId: Number(info.entryId), event: info.event, reference: info.reference, debitsMsat: debits,
+          creditsMsat: credits, reason });
+        for (const account of accounts) explanations.offer(explain(account, info, reason), true);
       }
 
       // The entry's shape: its columns, its posting rule, its reference and its agreement with the records; its time.
       const shape = [...damaged, ...readable.flatMap(line => line.damaged.map(problem => `line ${line.lineNo ?? '?'}: ${problem}`))];
       if (!(problems.length > 0 && readable.length < lineRows.length)) shape.push(...entryProblems(info, readable, book, records));
+      if (info.entryId > MAX_SAFE_ENTRY_ID || info.entryId < -MAX_SAFE_ENTRY_ID) {
+        shape.push(`its entry ID ${info.entryId} is outside ±(2^53 - 1): an outbox row or a report can not name it exactly (post never assigns one)`);
+      }
       const time = info.postedAt !== undefined && ISO_TIME.test(info.postedAt) ? Date.parse(info.postedAt) : Number.NaN;
       if (Number.isNaN(time)) shape.push(`posted_at ${JSON.stringify(info.postedAt ?? null)} is not an ISO 8601 UTC time`);
+      if (info.origin === 'migrated' && info.entryId > watermark.through) {
+        shape.push(`it is migrated, but the ledger migration posted entries up to ${watermark.through} only${notMigrated}`);
+      } else if (info.origin === 'live' && info.entryId <= watermark.through) {
+        shape.push(`it is live, but at or below entry ${watermark.through}, the last the ledger migration posted`);
+      }
+      if (info.origin === 'live' && time > latest) {
+        shape.push(`posted_at ${info.postedAt ?? ''} is more than ${MAX_CLOCK_STEP_MS / 3_600_000} hours after this run's clock `
+          + `(${new Date(latest - MAX_CLOCK_STEP_MS).toISOString()}); post never runs that far ahead`);
+      }
       if (info.origin === 'migrated' && anyLive !== undefined) {
         shape.push(`it is migrated but follows live entry ${anyLive.entryId} (migrated entries are posted before any live one)`);
       } else if (info.origin === 'live') {
         anyLive = info;
         if (!Number.isNaN(time)) {
-          const mark: LiveMark = { info, time, accounts };
+          const mark: LiveMark = { info, time, accounts, listing };
           settle(mark);
           if (lastLive === undefined || time >= lastLive.time) {
             beforeLive = lastLive;
@@ -558,7 +654,7 @@ async function verifyIn(db: DatabaseSync, book: 'payer' | 'receiver', api: LndLe
           }
         }
       }
-      if (shape.length > 0) malformed(info, shape, accounts);
+      if (shape.length > 0) malformed(info, shape, accounts, listing);
 
       for (const line of readable) {
         const value = signed(line.direction, line.amountMsat);
@@ -575,13 +671,13 @@ async function verifyIn(db: DatabaseSync, book: 'payer' | 'receiver', api: LndLe
     }
     // Lines whose entry row is gone: their money is in the stored balances, so they are reported.
     for (const [entryId, lineRows] of linesOf) {
-      const orphan: EntryInfo = { entryId: Number(entryId), event: 'unknown', reference: 'unknown', paymentHash: undefined, operationId: undefined,
+      const orphan: EntryInfo = { entryId, event: 'unknown', reference: 'unknown', paymentHash: undefined, operationId: undefined,
         origin: undefined, postedAt: undefined };
-      unbalanced.add({ entryId: orphan.entryId, event: orphan.event, reference: orphan.reference, debitsMsat: 0n, creditsMsat: 0n,
+      unbalanced.add(entryId, { entryId: Number(entryId), event: orphan.event, reference: orphan.reference, debitsMsat: 0n, creditsMsat: 0n,
         reason: `${lineRows.length} line(s) belong to entry ${entryId}, which does not exist` });
       for (const lineRow of lineRows) {
         const line = readLine(lineRow);
-        if (!('problem' in line)) explanations.offer(explain(line.account, orphan, `entry ${entryId} is missing but has lines`));
+        if (!('problem' in line)) explanations.offer(explain(line.account, orphan, `entry ${entryId} is missing but has lines`), true);
       }
     }
     if (!full) break;
@@ -590,11 +686,11 @@ async function verifyIn(db: DatabaseSync, book: 'payer' | 'receiver', api: LndLe
   }
   // A decrease at the last live entry: no next entry to ask, so the one before decides.
   settle(undefined);
-  // Lines whose entry_id is NULL, text or a blob (they sort after every number), or a real outside the int64 range: three
+  // Lines whose entry_id is NULL, text or a blob (they sort after every number), or a real outside the batches' range: three
   // index searches (an OR of them would scan every line).
   for (const where of ['entry_id IS NULL', 'entry_id > ?', 'entry_id <= ?']) {
     const statement = db.prepare(`SELECT rowid AS line_rowid, * FROM journal_lines WHERE ${where}`);
-    const rows = where.endsWith('NULL') ? statement.iterate() : statement.iterate(where.includes('>') ? MAX_INT64 : MIN_INT64);
+    const rows = where.endsWith('NULL') ? statement.iterate() : statement.iterate(where.includes('>') ? MAX_INT64 : BEFORE_ALL);
     for (const row of rows) strayLine(row, `has ${typeProblem(row, 'entry_id', 'integer') ?? 'a damaged entry_id'}`);
   }
 
@@ -619,7 +715,7 @@ async function verifyIn(db: DatabaseSync, book: 'payer' | 'receiver', api: LndLe
     const lastId = intOf(row, 'last_entry_id');
     if (lastId === undefined) {
       flag(account, last, `the balances row of ${account}: ${typeProblem(row, 'last_entry_id', 'integer') ?? 'last_entry_id is unreadable'}`);
-    } else if (last !== undefined && lastId !== BigInt(last.entryId)) {
+    } else if (last !== undefined && lastId !== last.entryId) {
       flag(account, last, `the balances row of ${account} names entry ${lastId} as the last to move it; the last entry with a line on it is ${last.entryId}`);
     } else if (last === undefined) {
       flag(account, undefined, `the balances row of ${account} names entry ${lastId} as the last to move it; no entry has a line on it`);
@@ -642,24 +738,12 @@ async function verifyIn(db: DatabaseSync, book: 'payer' | 'receiver', api: LndLe
   }
 
   // 4 (read). LND over the same window, read while the snapshot of the store holds.
-  let comparison: LndComparison = 'not-requested';
-  let lndDetail: string | undefined;
-  let lndRead: LndRead | undefined;
-  if (api !== undefined) {
-    try {
-      lndRead = book === 'payer' ? await settledPayments(api) : await settledInvoices(api);
-      if (lndRead.kind !== 'read') {
-        comparison = lndRead.kind;
-        lndDetail = lndRead.detail;
-      } else {
-        comparison = 'compared';
-      }
-    } catch (error) {
-      comparison = 'unavailable';
-      lndDetail = describeError(error);
-      lndRead = undefined;
-    }
-  }
+  // (Already read, before the transaction, when the store's own connection is the reader.)
+  const outcome: LndOutcome = lndSource === undefined ? { comparison: 'not-requested', lndDetail: undefined, lndRead: undefined }
+    : 'comparison' in lndSource ? lndSource : await readLnd(lndSource, book);
+  let comparison = outcome.comparison;
+  let lndDetail = outcome.lndDetail;
+  const lndRead = outcome.lndRead;
   const lndAmounts = lndRead?.kind === 'read' ? lndRead.amounts : undefined;
 
   // 3. The records, record by record, and 4. LND hash by hash.
@@ -668,6 +752,8 @@ async function verifyIn(db: DatabaseSync, book: 'payer' | 'receiver', api: LndLe
   const lndAccounts = book === 'payer' ? [ACCOUNT.walletOutgoing, ACCOUNT.routingFees] : [ACCOUNT.walletIncoming];
   if (lndAmounts !== undefined) for (const account of lndAccounts) lnd.set(account, 0n);
   const lndCheck = { pending: 0, different: false };
+  const lndDifferences: Explanation[] = [];
+  let lndDifferenceCount = 0;
   /** Compares one known payment hash's posted amounts with LND's. */
   const compareLnd: CompareLnd = (hash, posted, entry, state, unresolved) => {
     if (lndAmounts === undefined) return;
@@ -679,8 +765,12 @@ async function verifyIn(db: DatabaseSync, book: 'payer' | 'receiver', api: LndLe
       if (actual === expected) continue;
       if (actual === 0n && unresolved) { lndCheck.pending += 1; continue; }
       lndCheck.different = true;
-      explanations.offer(explain(account, entry, `LND reports ${expected} msat for ${account} on payment hash ${hash}; `
-        + `the entries post ${actual} msat (record ${state})`, hash));
+      // Flagged per payment, so a difference is explained even when another payment's cancels it in the account total.
+      const difference = explain(account, entry, `LND reports ${expected} msat for ${account} on payment hash ${hash}; `
+        + `the entries post ${actual} msat (record ${state})`, hash);
+      lndDifferenceCount += 1;
+      if (lndDifferences.length < LIST_LIMIT) lndDifferences.push(difference);
+      flag(account, entry, difference.reason, hash);
     }
   };
   if (book === 'payer') {
@@ -710,7 +800,7 @@ async function verifyIn(db: DatabaseSync, book: 'payer' | 'receiver', api: LndLe
     const explanation = explanations.get(report.account);
     const differs = report.difference !== 0n || (report.recordsDifference ?? 0n) !== 0n || flagged.has(report.account)
       || (comparison === 'compared' && (report.lndDifference ?? 0n) !== 0n)
-      || (explanation?.entryId !== undefined && unbalanced.ids.has(explanation.entryId));
+      || (explanation?.entryId !== undefined && explanations.namesUnbalanced(report.account));
     if (differs && explanation !== undefined) report.firstEntry = explanation;
   }
   // The lowest entry ID first; among explanations naming one entry, an account whose balance itself differs first.
@@ -719,21 +809,21 @@ async function verifyIn(db: DatabaseSync, book: 'payer' | 'receiver', api: LndLe
   const ranked = accounts.filter(report => report.firstEntry !== undefined)
     .sort((a, b) => (a.firstEntry?.entryId ?? Infinity) - (b.firstEntry?.entryId ?? Infinity) || own(a) - own(b));
   const differing = ranked.flatMap(report => report.firstEntry === undefined ? [] : [report.firstEntry]);
-  const firstBroken = [...unbalanced.items, ...invalid.items].sort((a, b) => a.entryId - b.entryId)[0];
+  const firstBroken = [...unbalanced.kept, ...invalid.kept].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))[0]?.item;
   const firstDifference = differing.find(item => item.entryId !== undefined)
     ?? differing.find(item => item.paymentHash !== undefined)
     ?? differing[0]
     ?? (firstBroken === undefined ? undefined : { account: '', entryId: firstBroken.entryId, event: firstBroken.event,
       reference: firstBroken.reference, reason: firstBroken.reason });
-  const balanced = unbalanced.ids.size === 0 && invalid.ids.size === 0 && !lndCheck.different && flagged.size === 0
+  const balanced = unbalanced.count === 0 && invalid.count === 0 && !lndCheck.different && flagged.size === 0
     && accounts.every(report => report.difference === 0n && (report.recordsDifference ?? 0n) === 0n);
-  return { book, balanced, entries, unbalancedEntries: unbalanced.items, unbalancedEntryCount: unbalanced.ids.size,
-    invalidEntries: invalid.items, invalidEntryCount: invalid.ids.size, accounts, lnd: comparison,
+  return { book, balanced, entries, unbalancedEntries: unbalanced.items, unbalancedEntryCount: unbalanced.count,
+    invalidEntries: invalid.items, invalidEntryCount: invalid.count, lndDifferences, lndDifferenceCount, accounts, lnd: comparison,
     ...(lndDetail === undefined ? {} : { lndDetail }), ...(firstDifference === undefined ? {} : { firstDifference }) };
 }
 
 /** The statements that read the records one batch of entries refers to. */
-function batchRecordStatements(db: DatabaseSync, book: 'payer' | 'receiver'): { forEntries(lower: bigint, upper: bigint): Omit<BatchRecords, 'hasEntry'> } {
+function batchRecordStatements(db: DatabaseSync, book: 'payer' | 'receiver'): { forEntries(lower: bigint | number, upper: bigint): Omit<BatchRecords, 'hasEntry'> } {
   // From the batch's entries (the rowid range; `+e.event` keeps the planner off the event index) to their records.
   if (book === 'receiver') {
     const invoices = rowReader(db.prepare(`SELECT i.payment_hash AS payment_hash, i.order_id AS order_id FROM journal_entries e
@@ -803,9 +893,9 @@ function rowReader(statement: StatementSync, columns: readonly string[]): (...pa
  * Runs `work` over a table's rows in batches of BATCH by rowid (`read` takes the lower bound and the
  * limit and selects record_rowid), with the bounds of each batch for the queries that join it.
  */
-async function forEachBatch(read: (lower: bigint, limit: number) => Row[], pause: Pause,
-  work: (rows: Row[], lower: bigint, upper: bigint) => void): Promise<void> {
-  let lower = MIN_INT64;
+async function forEachBatch(read: (lower: bigint | number, limit: number) => Row[], pause: Pause,
+  work: (rows: Row[], lower: bigint | number, upper: bigint) => void): Promise<void> {
+  let lower: bigint | number = BEFORE_ALL;
   for (;;) {
     const rows = read(lower, BATCH);
     const last = rows.at(-1);
@@ -819,7 +909,7 @@ async function forEachBatch(read: (lower: bigint, limit: number) => Row[], pause
 }
 
 /** A minimal EntryInfo for an entry named by its ID and key (enough for an explanation). */
-const named = (entryId: bigint, event: string, reference: string, operationId?: string): EntryInfo => ({ entryId: Number(entryId), event, reference,
+const named = (entryId: bigint, event: string, reference: string, operationId?: string): EntryInfo => ({ entryId, event, reference,
   paymentHash: event.startsWith('budget-') ? undefined : reference, operationId, origin: undefined, postedAt: undefined });
 
 /**
@@ -847,7 +937,11 @@ async function payerRecords(db: DatabaseSync, context: { records: Map<string, bi
   ['reservation_id', 'entry_id', 'event', 'account', 'direction', 'amount_msat']);
   await forEachBatch(reservationRows, pause, (rows, lower, upper) => {
     const posted = new Map<string, { amount: bigint; first: bigint; event: string }>();
+    /** The budget events each reservation has an entry (with a line) for. */
+    const eventsOf = new Map<string, Set<string>>();
     for (const row of budgetLines(lower, upper)) {
+      const reservation = String(row.reservation_id);
+      eventsOf.set(reservation, (eventsOf.get(reservation) ?? new Set<string>()).add(String(row.event)));
       const account = textOf(row, 'account');
       const direction = textOf(row, 'direction');
       const amount = intOf(row, 'amount_msat');
@@ -884,6 +978,13 @@ async function payerRecords(db: DatabaseSync, context: { records: Map<string, bi
       add(records, ACCOUNT.budgetCommitments, -committed);
       if ((entry?.amount ?? 0n) !== committed) {
         const reason = `reservation ${id} is ${view.state} for ${committed} msat; its entries commit ${entry?.amount ?? 0n} msat`;
+        flag(account, first, reason, view.paymentHash);
+        flag(ACCOUNT.budgetCommitments, first, reason, view.paymentHash);
+      }
+      // A release nets to zero, so the amount alone would not miss a released reservation's whole history: both entries must be there.
+      const missing = view.state === 'released' ? ['budget-held', 'budget-released'].filter(event => eventsOf.get(id)?.has(event) !== true) : [];
+      if (missing.length > 0) {
+        const reason = `reservation ${id} is released; it has no ${missing.join(' or ')} entry (a released reservation was held, then released)`;
         flag(account, first, reason, view.paymentHash);
         flag(ACCOUNT.budgetCommitments, first, reason, view.paymentHash);
       }

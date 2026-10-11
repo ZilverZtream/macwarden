@@ -4,7 +4,6 @@ import { constants, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writ
 import * as fs from 'node:fs/promises';
 import { renderChunks, type OutputResult } from '../src/output/index.js';
 import { dirname, join, relative, resolve } from 'node:path';
-import { performance } from 'node:perf_hooks';
 import { expect, it } from 'vitest';
 import { scan } from '../src/scan/index.js';
 
@@ -118,10 +117,10 @@ it.each(['open', 'read'] as const)('RR-111/walk-portable RR-04 an interrupt ends
     const pending = withCancellation(controller.signal, () => scan([dir], { fs: io }));
     pending.catch(() => {});
     await blocked;
-    const started = performance.now();
     controller.abort();
+    // The stuck call never settles, so only the interrupt can end the scan: its rejection is the
+    // signal (a scan that waited on the call would never return), not a wall-clock bound.
     await expect(pending).rejects.toBeInstanceOf(Cancelled);
-    expect(performance.now() - started).toBeLessThan(2_000);
   }
   // The command reports the interrupt as exit 6, step cancelled.
   const { run } = await import('../src/commands/scan.js');

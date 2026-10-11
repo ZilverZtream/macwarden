@@ -99,6 +99,29 @@ it('RECOMMEND/target-file a default macaroon is selected by its identifier, neve
   expect(await run(['0', ...s.args], s.deps)).toMatchObject({ ok: false, error: { code: 2, step: 'R6' } });
 });
 
+it('RECOMMEND/target-file a credential without a registry label is suggested as narrowed, numbered past active labels', async () => {
+  const admin = readFileSync(join(repo, 'test/vectors/default-admin.macaroon'));
+  // "narrowed" and "narrowed2" are active on the node: bake --label would refuse both (B8).
+  const s = setup([entry('narrowed', '4294967341', ['info:read']), entry('narrowed2', '4294967342', ['info:read'])],
+    [record(identityOf(admin), '0', '/lnrpc.Lightning/ListChannels', 4)]);
+  writeFileSync(join(s.dir, 'app.macaroon'), admin);
+  const result = await run(['--target-file', join(s.dir, 'app.macaroon'), '--accept-short-observation', ...s.args], s.deps);
+  expect(result.result).toMatchObject({ selector: identityOf(admin), label: null, recommended: ['offchain:read'] });
+  const commands = (result.result as { commands: string[] }).commands;
+  expect(commands[0].startsWith('macwarden bake --label narrowed3 --uri ')).toBe(true);
+  // No revoke step: the selection was one credential, never a whole root key.
+  expect(commands).toHaveLength(1);
+});
+
+it('RECOMMEND/target-file stdin (-) and a literal credential are refused at parse (exit 2, R1), as revoke refuses them', async () => {
+  const admin = readFileSync(join(repo, 'test/vectors/default-admin.macaroon'));
+  const s = setup([], [record(identityOf(admin), '0', '/lnrpc.Lightning/ListChannels', 4)]);
+  for (const target of ['-', admin.toString('base64'), admin.toString('hex')]) {
+    expect(await run(['--target-file', target, ...s.args], s.deps)).toMatchObject({ ok: false, result: null, error: { code: 2, step: 'R1',
+      message: '--target-file must be a file path; stdin (-) and literal credentials are refused' } });
+  }
+});
+
 it('RECOMMEND/limits unmapped methods block the narrowing command; no observations say how to collect them', async () => {
   const s = setup([entry('app1', '4294967341', ['info:read'])], [record('id:1111111111111111', '4294967341', '/custom.Svc/Do', 1)]);
   const unmapped = await run(['app1', ...s.args], s.deps);

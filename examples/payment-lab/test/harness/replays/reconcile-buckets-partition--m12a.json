@@ -1,0 +1,84 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "reconcile-buckets-partition",
+  "rule": "receiver reconcile counts every invoice it covers exactly once (resolved + open + unknown = targets), each in its own bucket (resolved: final when listed, or settled, canceled or not-created as LND or the record decided it; open: OPEN or ACCEPTED in LND as the pass looked it up; unknown: only when the pass was stopped, a lookup of it got no answer, a cancel of it by the pass failed, or a creating invoice was not found within its creation window), and exits 75 iff unknown > 0, else 0.",
+  "message": "reconcile counted resolved 0, open 1, unknown 0, but 1 target(s) can only be resolved: o2#1 open->canceled [CANCELED] may be resolved",
+  "seed": 1,
+  "case": 8,
+  "config": {
+    "scale": "small",
+    "budget": false,
+    "limit": "10000"
+  },
+  "failingStep": 4,
+  "originalSteps": 28,
+  "events": [
+    {
+      "t": "create",
+      "p": "p0",
+      "order": 2,
+      "hold": false
+    },
+    {
+      "t": "answer",
+      "kind": "create",
+      "pick": 0.5,
+      "mode": "ok"
+    },
+    {
+      "t": "invoice",
+      "what": "misreport",
+      "pick": 0.8333
+    },
+    {
+      "t": "rreconcile",
+      "p": "p1",
+      "order": null,
+      "cli": false
+    },
+    {
+      "t": "answer",
+      "kind": "lookup",
+      "pick": 0.75,
+      "mode": "ok"
+    }
+  ],
+  "states": {
+    "targets": [
+      "o2#1"
+    ],
+    "result": {
+      "resolved": 0,
+      "open": 1,
+      "unknown": 0
+    },
+    "answers": {
+      "2161f746823902e1e4c3e933c9cd628e303fbe6b251fee2d7d752ac76f2ffc8a": [
+        "CANCELED"
+      ]
+    },
+    "after": {
+      "invoices": {
+        "o2#1": {
+          "order": "o2",
+          "state": "canceled",
+          "amount": "7000",
+          "amtPaid": "0"
+        }
+      },
+      "orders": {
+        "o2": "canceled"
+      },
+      "fulfillments": [],
+      "ledger": [],
+      "cursor": {
+        "settle": "0",
+        "add": "0"
+      },
+      "entries": [],
+      "outbox": []
+    }
+  },
+  "mutant": "reconcile-buckets-partition--m12a.cjs"
+}

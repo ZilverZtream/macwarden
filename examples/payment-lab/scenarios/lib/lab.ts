@@ -1,10 +1,9 @@
-import { paymentsForHash } from '../../src/analysis/payments.ts';
+import { paymentsForHash, type PaymentView } from '../../src/analysis/payments.ts';
 import {
   NODE_NAMES, PAYER_PROFILES, RECEIVER_PROFILES, databasePath, loadLab, readApi,
   type Lab, type NodeName, type PayerProfile, type ReceiverProfile,
 } from '../../src/config.ts';
 import type { ReadApi } from '../../src/lnd/api.ts';
-import type { Payment } from '../../src/lnd/types.ts';
 import { PayerStore } from '../../src/payer/store.ts';
 import { ReceiverStore } from '../../src/receiver/store.ts';
 import { fact, say, step, title, Verdict, warn } from '../../lab/narrate.ts';
@@ -36,7 +35,7 @@ export function withReceiver<T>(context: Context, profile: ReceiverProfile, work
 }
 
 /** Every payment the node holds for a hash, from ListPayments with the read-only credential. */
-export async function lndPayments(context: Context, node: NodeName, paymentHash: string): Promise<{ payments: Payment[]; complete: boolean }> {
+export async function lndPayments(context: Context, node: NodeName, paymentHash: string): Promise<{ payments: PaymentView[]; complete: boolean }> {
   const result = await paymentsForHash(context.read[node], paymentHash);
   return { payments: result.payments, complete: result.complete };
 }

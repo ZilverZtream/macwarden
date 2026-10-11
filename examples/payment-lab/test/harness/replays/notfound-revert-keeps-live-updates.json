@@ -2,7 +2,7 @@
   "schema": 1,
   "kind": "macwarden-payment-lab-harness-replay",
   "predicate": "notfound-revert-keeps-live-updates",
-  "rule": "An update or refusal for the live submission applies (IN_FLIGHT -> in_flight, FAILED or a definite refusal -> failed), also after a NotFound sent the record back to intent.",
+  "rule": "An update or refusal for the live submission applies (IN_FLIGHT -> in_flight, FAILED or a definite refusal -> failed), also after a NotFound sent the record back to intent; a TrackPaymentV2 snapshot LND took before the live submission's request reached it (every HTLC attempt in it first shown for an earlier submission, or none and created no later than a payment shown for an earlier submission, or before the live submission was sent when none was) is an earlier submission's answer and changes neither the payment, its operation nor its reservation.",
   "message": "hand-written scenario (no violation recorded)",
   "seed": null,
   "case": null,
@@ -12,7 +12,7 @@
     "limit": "10000"
   },
   "failingStep": -1,
-  "originalSteps": 8,
+  "originalSteps": 18,
   "events": [
     {
       "t": "intent",
@@ -52,8 +52,55 @@
     {
       "t": "send.deliver",
       "pick": 0
+    },
+    {
+      "t": "retry",
+      "p": "p0",
+      "op": 0
+    },
+    {
+      "t": "submit",
+      "p": "p0",
+      "op": 0,
+      "inv": 0
+    },
+    {
+      "t": "reconcile",
+      "p": "p1",
+      "op": 0,
+      "inv": 0
+    },
+    {
+      "t": "track.deliver",
+      "pick": 0
+    },
+    {
+      "t": "send.arrive",
+      "pick": 0
+    },
+    {
+      "t": "lnd.payment",
+      "pick": 0,
+      "what": "attempt"
+    },
+    {
+      "t": "lnd.payment",
+      "pick": 0,
+      "what": "succeed"
+    },
+    {
+      "t": "send.deliver",
+      "pick": 0
+    },
+    {
+      "t": "send.deliver",
+      "pick": 0
+    },
+    {
+      "t": "send.deliver",
+      "pick": 0
     }
   ],
   "states": {},
-  "note": "Submission 1 is on its way when another process's TrackPaymentV2 answers NotFound and the record returns to intent; the request then reaches LND, and its own IN_FLIGHT and FAILED still apply."
+  "note": "Submission 1 is on its way when another process's TrackPaymentV2 answers NotFound and the record returns to intent; the request then reaches LND, and its own IN_FLIGHT and FAILED still apply. Then the payment is retried and submitted again; before the retry's request reaches LND, another process's TrackPaymentV2 reads the FAILED LND still shows for submission 1: it changes nothing (the retry stays submitting, its reservation held), and the retry then succeeds."
 }

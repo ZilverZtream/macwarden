@@ -16,7 +16,7 @@ import { markMutationSent } from '../process-error-context.js';
 import { openRegistry, RegistryInputError, RegistryUsageError, type RegistryEntry, hasCustomCaveat, isStagedReplacement, recordedFileRelation, replacementLinkProblems } from '../registry/index.js';
 import { DecodeError, LndError, LndUncertainError, UsageError } from '../errors.js';
 import { Secret } from '../secret.js';
-import { rotateConfirmation, rotatePlanResult, writeRotateFinishPlan, writeRotateStagePlan, writeRotatePrompt,
+import { rotateConfirmation, rotatePlanResult, unreproducedCaveatTypes, writeRotateFinishPlan, writeRotateStagePlan, writeRotatePrompt,
   type OutputResult, type RotatePlan, type RotateStagedResult, type RotateFinishedResult } from '../output/index.js';
 import { namesRegistryFile, REGISTRY_OUT_REFUSAL } from './bake/out-registry.js';
 import { reserveOut, type ReservedOut } from './bake/write-out.js';
@@ -122,6 +122,29 @@ const CUSTOM_CAVEAT_REFUSAL = 'this credential carries a custom caveat (a canary
 
 const OLD_FILE_TAMPERED = 'old credential file carries the registry entry\'s fingerprint on another root key ID: ' +
   'the registry entry was edited; restore the registry from a trusted copy';
+
+function unreproducedCaveatRefusal(types: string[], label: string): string {
+  return `this credential carries caveats a rotation does not reproduce (${types.join(', ')}): the replacement would be ` +
+    'baked without them, so an IP lock or another restriction would be gone. Bake a new credential with macwarden bake, ' +
+    `attenuate it with macwarden attenuate, then revoke this one with macwarden revoke ${label}`;
+}
+
+/**
+ * The caveat types of O that a stage would not carry over to the replacement (1.3.1): every
+ * recorded caveat other than the one `time-before` S11 re-applies from its `requested` duration,
+ * and, when O's decoded file is at hand, every caveat in it other than that recorded expiry, or
+ * caveats the decoder did not keep. The file decides as much as the editable registry list does.
+ */
+export function rotationDropsCaveats(entry: Pick<RegistryEntry, 'caveats'>, file?: MacaroonFacts): string[] {
+  const dropped = new Set(unreproducedCaveatTypes(entry.caveats));
+  if (file) {
+    const recorded = new Set(entry.caveats.filter(caveat => caveat.type === 'time-before' && caveat.requested !== undefined)
+      .map(caveat => caveat.value));
+    for (const caveat of file.caveats) if (caveat.type !== 'time-before' || !recorded.has(caveat.value)) dropped.add(caveat.type);
+    if (file.warnings.includes('caveats-exceed-bounds')) dropped.add('caveats-exceed-bounds');
+  }
+  return [...dropped].sort();
+}
 
 /** Active entries with this label that are not a staged replacement (SPEC 6 S3; RL-07). */
 function originals(entries: RegistryEntry[], label: string): RegistryEntry[] {
@@ -302,6 +325,17 @@ async function finishSteps(request: Request, deps: Deps, state: RunState): Promi
         return fail(3, 'F9', 'old or replacement entry changed since F3; nothing sent to LND', warnings);
       registry.reload(current.entries);
     } catch { return fail(3, 'F9', 'unreadable or invalid registry on reread; nothing sent to LND', warnings); }
+    // The F7 local check is as old as the prompt as well: the operator just confirmed that the app
+    // uses N's file, so N's file must still hold the credential F7 read (same canonical fingerprint,
+    // root key ID and decoded facts). A file removed or overwritten meanwhile must not let O be
+    // deleted. This is a local read only: it adds no LND call to the finish sequence.
+    let reread: Target | undefined;
+    try { reread = await readTarget(next.outPath, deps); } catch { /* reported below */ }
+    if (!reread || reread.facts.fingerprint !== replacement.facts.fingerprint
+      || reread.facts.rootKeyId !== replacement.facts.rootKeyId || !isDeepStrictEqual(reread.facts, replacement.facts))
+      return fail(3, 'F7', 'staged replacement file was removed or changed while waiting for confirmation; ' +
+        'nothing changed; restore the replacement the app uses and rerun, ' +
+        `or abandon it with macwarden revoke ${next.rootKeyId}`, warnings);
     // The F7 proof is as old as the confirmation prompt: a replacement whose time-before caveat
     // passed while the prompt was open must not let O be deleted (or recorded revoked).
     if (!usable(replacement, deps.clock()))
@@ -445,6 +479,12 @@ async function runSteps(args: string[], deps: Deps, state: RunState): Promise<Ro
     return fail(2, 'S5', `unassessed permissions: ${assessment.unassessed.join(', ')}`);
   if (assessment.grade === 'ADMIN' && !request.allowAdmin)
     return fail(2, 'S5', 'ADMIN permissions require --allow-admin');
+  // S11 re-applies one time-before from O's recorded duration and nothing else: any other caveat
+  // of O, recorded or in its decoded file (an IP lock above all), would be dropped silently and the
+  // registry would record the narrower list as fact. Refused here, before any lock or LND call
+  // (1.3.1); --finish is unaffected, its replacement already exists. Re-applying IP locks is planned.
+  const dropped = rotationDropsCaveats(old, oldFacts);
+  if (dropped.length) return fail(3, 'S5', unreproducedCaveatRefusal(dropped, request.label));
   // S11 reuses O's recorded expiry duration: it is checked here, before any lock or LND call,
   // so a bad value can never leave a baked root key behind (RL-03).
   const expires = old.caveats.find(caveat => caveat.type === 'time-before' && caveat.requested !== undefined)?.requested;

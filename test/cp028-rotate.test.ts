@@ -1,6 +1,6 @@
 import { liveProductLock } from './helpers/cp042-lock-process.js';
 import { revealSecret } from './helpers/secret-bytes.js';
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -9,6 +9,7 @@ import { expect, it, vi } from 'vitest';
 import { Secret } from '../src/secret.js';
 import { decodeMacaroon } from '../src/decode/index.js';
 import { render } from './helpers/render-adversarial.js';
+import { onRegistryOpen, onRegistryResolve } from './helpers/integration-registry-read.js';
 import { directory, entry, otherPubkey, ownId, permissionsResponse, register, wireFixture } from './helpers/cp026-revoke-support.mjs';
 import { afterFailure, failure, fault, fingerprint, instant, invoke, newId, oldId, recovery,
   safe, save, scratch, unchanged } from './helpers/cp028-rotate-support.js';
@@ -52,10 +53,9 @@ it.each(['invalid JSON', 'invalid schema', 'unreadable'])(
   'CP-028/S3 %s registry exits input error offline', async kind => scratch(async f => {
     if (kind === 'invalid JSON') writeFileSync(f.registry, '{');
     if (kind === 'invalid schema') writeFileSync(f.registry, JSON.stringify({ schema: 9, entries: [] }));
-    if (kind === 'unreadable') f.deps.fs.readFile = vi.fn(async (...params: Parameters<typeof fs.readFile>) => {
-      if (params[0] === f.registry) throw Object.assign(new Error('registry read fault'), { code: 'EACCES' });
-      return fs.readFile(...params);
-    }) as typeof fs.readFile;
+    if (kind === 'unreadable') f.deps.fs.open = onRegistryOpen(f.deps.fs, f.registry, () => {
+      throw Object.assign(new Error('registry read fault'), { code: 'EACCES' });
+    });
     failure(f, await invoke(f), 3, 'S3'); expect(f.calls).toEqual([]);
   }));
 it.each(['missing label', 'revoked old'])(
@@ -180,16 +180,17 @@ it('CP-028/S6-S7 held lock preserves owner metadata and refuses before reservati
 }));
 it.each(['changed old', 'new pending', 'reread failure'])('CP-028/S6-S7 %s after lock stops with nothing sent', async kind => scratch(async f => {
   let changed!: Buffer;
-  f.deps.fs.readFile = vi.fn(async (...params: Parameters<typeof fs.readFile>) => {
-    if (params[0] === f.registry && existsSync(`${f.registry}.lock`)) {
-      if (kind === 'reread failure') throw Object.assign(new Error('reread fault'), { code: 'EACCES' });
-      const rows = [f.old, f.other];
-      if (kind === 'changed old') rows[0] = { ...f.old, fingerprint: 'fp:0000000000000000' };
-      else rows.push(entry('preset-invoice-only', newId, { replaces: oldId }));
-      save(f, rows); changed = readFileSync(f.registry);
-    }
-    return fs.readFile(...params);
-  }) as typeof fs.readFile;
+  const underLock = () => existsSync(`${f.registry}.lock`);
+  if (kind === 'reread failure') f.deps.fs.open = onRegistryOpen(f.deps.fs, f.registry, () => {
+    if (underLock()) throw Object.assign(new Error('reread fault'), { code: 'EACCES' });
+  });
+  else f.deps.fs.realpath = onRegistryResolve(f.deps.fs, f.registry, () => {
+    if (!underLock()) return;
+    const rows = [f.old, f.other];
+    if (kind === 'changed old') rows[0] = { ...f.old, fingerprint: 'fp:0000000000000000' };
+    else rows.push(entry('preset-invoice-only', newId, { replaces: oldId }));
+    save(f, rows); changed = readFileSync(f.registry);
+  });
   const before = readFileSync(f.registry); failure(f, await invoke(f), 3, 'S7');
   expect(f.calls).toEqual([]); unchanged(f, changed ?? before);
 }));
@@ -235,7 +236,8 @@ it('CP-028/S8-S9 snapshot drift warns while dry-run reports both plans without l
   for (const [path, flags] of vi.mocked(f.deps.fs.open).mock.calls) {
     expect(path).not.toBe(f.out);
     expect(path).not.toBe(`${f.registry}.lock`);
-    expect([f.oldBytesPath, f.own, resolve('test/fixture/wrong-tls.cert')]).toContain(path);
+    // The registry itself is read through a read-only open of the checked file (audit 1.4.0).
+    expect([f.oldBytesPath, f.own, resolve('test/fixture/wrong-tls.cert'), realpathSync.native(f.registry)]).toContain(path);
     if (typeof flags === 'number') {
       const { constants } = await import('node:fs');
       expect(flags & (constants.O_WRONLY | constants.O_RDWR | constants.O_CREAT |

@@ -65,6 +65,15 @@ const JOURNAL_RETRY_MS = 5;
 // Consecutive unreadable lines a reader tolerates: each crash leaves at most one partial line and
 // one partial repair, so a longer run is not a journal watch wrote (audit 1.2.1), wherever it lies.
 export const JOURNAL_MAX_INVALID_RUN = 64;
+/**
+ * Record times within a run follow the system clock only while it moves with the monotonic clock:
+ * a reading that differs by more than this from the time the monotonic clock gives since the last
+ * reading taken is a clock step, and the record takes the monotonic time instead (audit 1.4.0: a
+ * forward step that NTP then corrected pinned every later record to the stepped time, since times
+ * never go back within a run, and a real gap read as covered). The same tolerance as reconcile's
+ * CLOCK_TOLERANCE_MS: within it a payment is never reported as clearly covered.
+ */
+export const JOURNAL_CLOCK_STEP_MS = 60_000;
 
 export type UnregisterReason = 'stream-lost' | 'stopping' | 'refresh';
 type Base = { v: 1; time: string; run: string };
@@ -282,9 +291,10 @@ export type Coverage = { covered: [number, number][]; gaps: Gap[]; coveredMs: nu
  * when a run has neither (watch still running, killed or crashed), its last record
  * (`unconfirmed`). A `drop` record removes [first, last] from coverage (`dropped`, with its
  * count; listed even when it lasted no measurable time). Before the node's first run the gap
- * is `before-journal`. An end reason survives even when nothing covered precedes it: a run that
- * ends (`run-end`, `full`) without a registration, or a registered span a drop consumed whole,
- * still changes the reason of the gap from that time on.
+ * is `before-journal`; from a run's `run-start` to its registration, `not-registered`. An end
+ * reason survives even when nothing covered precedes it: a run that ends (`run-end`, `full`)
+ * without a registration, or a registered span a drop consumed whole, still changes the reason
+ * of the gap from that time on.
  */
 export function journalCoverage(records: JournalRecord[], node: string, from: number, to: number): Coverage {
   type Span = { from: number; to: number; end: GapReason };
@@ -304,6 +314,9 @@ export function journalCoverage(records: JournalRecord[], node: string, from: nu
       if (current !== null) close('unconfirmed', last);
       current = record.node === node ? record.run : null;
       if (current !== null && firstRun === null) firstRun = at;
+      // From its start until it registers, a run is running but not registered (audit 1.4.0: the
+      // time before a run's registration took the reason of whatever came before the run).
+      if (current !== null) markers.push({ at, end: 'not-registered' });
       last = at;
       continue;
     }
@@ -453,6 +466,11 @@ function ownerOnlyProblem(stat: { mode: number; uid: number }, platform: NodeJS.
 export type WriterDeps = {
   fs: typeof nodeFs;
   clock: () => Date;
+  /**
+   * A monotonic clock in milliseconds (default performance.now): record times follow `clock`
+   * only while it moves with this one (JOURNAL_CLOCK_STEP_MS).
+   */
+  monotonic?: () => number;
   /** Takes `<journal>.lock` (one writer per journal); returns its release. */
   lock: (path: string) => Promise<() => Promise<void>>;
   platform?: NodeJS.Platform;
@@ -511,7 +529,11 @@ export class PaymentJournal {
   // Records dropped because the line queue was full: reported by a drop record before the next line.
   private lineDrop: Drops | null = null;
   private lastTime = 0;
-  private lastWrite = Date.now();
+  // The last system clock reading taken as a record time, with the monotonic clock at that moment.
+  private anchor: { wall: number; mono: number } | null = null;
+  // The monotonic clock at the last write, for the keep-alive gate: on the system clock a backward
+  // step of X delayed the next alive record by X (audit 1.4.0).
+  private lastWrite = NaN;
   private session = 0;
   private registeredSession: number | null = null;
   private aliveTimer: ReturnType<typeof setInterval> | undefined;
@@ -520,8 +542,15 @@ export class PaymentJournal {
   readonly stats: JournalStats;
 
   private constructor(private readonly handle: nodeFs.FileHandle, private size: number, private readonly release: () => Promise<void>,
-    private readonly clock: () => Date, path: string, private readonly onStop?: WriterDeps['onStop']) {
+    private readonly clock: () => Date, path: string, private readonly onStop?: WriterDeps['onStop'],
+    private readonly monotonic: () => number = () => performance.now()) {
     this.stats = { path, payments: 0, deletions: 0, dropped: 0, stopped: null };
+    this.lastWrite = this.monotonicNow();
+  }
+
+  /** The monotonic clock, or NaN when it cannot be read: the keep-alive then writes on every tick. */
+  private monotonicNow(): number {
+    try { const now = this.monotonic(); return Number.isFinite(now) ? now : NaN; } catch { return NaN; }
   }
 
   /**
@@ -539,6 +568,9 @@ export class PaymentJournal {
     const fs = deps.fs;
     const platform = deps.platform ?? process.platform;
     if (isProtectedPath(path)) throw new JournalError('protected payment journal path');
+    // The path as given must not be a symbolic link (audit 1.4.0: it was resolved first, so a link
+    // to a journal was followed and journaled to its target); the resolved path is checked below.
+    if (await isSymbolicLink(path, fs)) throw new JournalError('payment journal is not a regular file');
     let target: string;
     try { target = await resolveUnprotectedPath(path, fs); }
     catch { throw new JournalError('protected or unresolvable payment journal path'); }
@@ -548,6 +580,7 @@ export class PaymentJournal {
     try { existing = await fs.lstat(target); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new JournalError('cannot read payment journal'); }
     if (existing && (!existing.isFile() || existing.isSymbolicLink())) throw new JournalError('payment journal is not a regular file');
+    if (await isSymbolicLink(`${target}.lock`, fs)) throw new JournalError(`payment journal lock ${target}.lock is not a regular file`);
     let release: () => Promise<void>;
     try { release = await deps.lock(`${target}.lock`); }
     catch { throw new JournalError(`another watch writes this payment journal (lock ${target}.lock)`); }
@@ -606,7 +639,7 @@ export class PaymentJournal {
         const line = previous < 0 && length < size ? null : tail.toString('utf8', previous + 1, length - 1);
         repairedTail = newline || line === null || parseRecord(line) === null;
       }
-      const journal = new PaymentJournal(handle, size, release, deps.clock, target, deps.onStop);
+      const journal = new PaymentJournal(handle, size, release, deps.clock, target, deps.onStop, deps.monotonic);
       journal.aclWarning = aclWarning;
       // The run-start has no earlier record to fall back on: a clock the reader cannot take is refused.
       const startAt = journal.clockTime();
@@ -633,7 +666,20 @@ export class PaymentJournal {
    * NaN threw out of the decoding turn and crashed watch; past the year 9999 every later record
    * was one the reader refuses).
    */
-  private clockTime(): number | null { return readClock(this.clock); }
+  private clockTime(): number | null {
+    const wall = readClock(this.clock);
+    if (wall === null) return null;
+    let mono: number;
+    try { mono = this.monotonic(); } catch { mono = NaN; }
+    if (!Number.isFinite(mono)) return wall;
+    const anchor = this.anchor;
+    const expected = anchor ? anchor.wall + Math.floor(mono - anchor.mono) : wall;
+    // A reading that moved with the monotonic clock is taken, and anchors the next comparison; a
+    // step is not: the record takes the monotonic time, and the system clock is taken again once
+    // it agrees (corrected) or never in this run (a lasting step; the next run starts from it).
+    if (Math.abs(wall - expected) <= JOURNAL_CLOCK_STEP_MS) { this.anchor = { wall, mono }; return wall; }
+    return expected <= MAX_RECORD_TIME ? expected : null;
+  }
 
   /** The record time: the clock, never earlier than this run's previous record; the previous time when the clock is invalid. */
   private now(): string {
@@ -679,8 +725,9 @@ export class PaymentJournal {
 
   private keepAlive(): void {
     if (this.registeredSession === null || this.stats.stopped || this.closing) return;
-    if (Date.now() - this.lastWrite < JOURNAL_ALIVE_MS) return;
-    this.lastWrite = Date.now();
+    const now = this.monotonicNow();
+    if (now - this.lastWrite < JOURNAL_ALIVE_MS) return;
+    this.lastWrite = now;
     this.marker(time => ({ ...this.base(time), type: 'alive' }));
   }
 
@@ -857,7 +904,7 @@ export class PaymentJournal {
     }
     this.pending.push(line);
     this.pendingBytes += bytes;
-    this.lastWrite = Date.now();
+    this.lastWrite = this.monotonicNow();
   }
 
   private stop(reason: NonNullable<JournalStats['stopped']>): void {
@@ -897,12 +944,18 @@ export class PaymentJournal {
       }
       try {
         await writeAll(this.handle, text);
-        await this.handle.sync();
-        this.size += Buffer.byteLength(text);
       } catch {
         // A failed append may have left part of a line: nothing more is written in this run, so
         // the next run's `repairedTail` and the reader's rule account for it.
         this.discard(lines.slice(0, take));
+        this.stop('write-failed');
+        return;
+      }
+      this.size += Buffer.byteLength(text);
+      try { await this.handle.sync(); }
+      catch {
+        // Every line reached the file; only its durability is unknown (audit 1.4.0: the records were
+        // un-counted though a reader finds them). They stay counted; nothing more is written.
         this.stop('write-failed');
         return;
       }
@@ -946,7 +999,10 @@ export class PaymentJournal {
   /**
    * Ends the run: remaining intake is decoded, `unregistered` (if still registered) and
    * `run-end` are appended and synced, the file is closed and the lock released. Captures after
-   * this are counted as dropped. Returns the run's statistics.
+   * this are counted as dropped: they were not journaled. The run-end record is queued when close()
+   * begins, so the statistics returned exceed its `dropped` by the calls captured while the last
+   * lines were written (audit 1.4.0); those calls fall after the run's `unregistered`, outside
+   * coverage. Returns the run's statistics.
    */
   close(): Promise<JournalStats> {
     // One drain: a second close waits for the first instead of returning before the run-end is synced.
@@ -971,6 +1027,15 @@ export class PaymentJournal {
     await this.handle.close().catch(() => undefined);
     await this.release().catch(() => undefined);
     return this.stats;
+  }
+}
+
+/** Whether `path` itself (not what it names) is a symbolic link; a missing path is not. Other lstat failures refuse. */
+async function isSymbolicLink(path: string, fs: Pick<typeof nodeFs, 'lstat'>): Promise<boolean> {
+  try { return (await fs.lstat(path)).isSymbolicLink(); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw new JournalError('cannot read payment journal');
   }
 }
 

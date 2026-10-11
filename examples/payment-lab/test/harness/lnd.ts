@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import type { HtlcAttempt, Invoice, InvoiceApi, Lab, Payment, PayerApi, StreamDecision } from './lab.ts';
 
 /**
@@ -59,6 +60,8 @@ export interface Call {
   inTransit: boolean;
   /** A lookup's answer as the client received it: the invoice state, or not-found (undefined: no answer, or an error). */
   answered?: string;
+  /** How the client's side of the call ended: resolved ('ok') or rejected ('error'); undefined while it waits. */
+  outcome?: 'ok' | 'error';
   onUpdate: ((value: never) => StreamDecision) | undefined;
   resolve: (value?: unknown) => void;
   reject: (error: unknown) => void;
@@ -77,7 +80,15 @@ export interface LndPayment {
   failureReason: string;
   htlcs: HtlcAttempt[];
   index: number;
+  /**
+   * When LND (re)initialised the payment, in the payer's clock (wallClockNs in src/payer/store.ts): a SendPaymentV2
+   * for a hash LND holds as FAILED initialises it again, deleting the old HTLC attempts and setting a new creation time.
+   */
+  creationTimeNs: bigint;
 }
+
+/** Wall-clock nanoseconds, computed as src/payer/store.ts's wallClockNs is (the harness also runs older sources without it). */
+const wallClockNs = (): bigint => BigInt(Math.round(performance.timeOrigin * 1e6)) + BigInt(Math.round(performance.now() * 1e6));
 
 export interface LndInvoice {
   hash: string;
@@ -93,6 +104,17 @@ export interface LndInvoice {
    * cancel" the README's settled-outranks-canceled rule is for). Its later states are reported truthfully.
    */
   misreported: boolean;
+  /**
+   * A resettle fault reported it again for another amount: LND is not one source of truth for it any more, so the oracle
+   * runs the receiver's ledger verify without LND for the rest of the case (its settlement rules judge what the store did).
+   */
+  resettled?: boolean;
+}
+
+/** ListPayments and ListInvoices as `ledger verify` reads them (src/ledger/verify.ts, LndLedgerSource). */
+export interface LedgerSource {
+  listPaymentsPage(indexOffset: bigint, maxPayments: number): Promise<{ payments: Payment[]; lastIndexOffset: bigint }>;
+  listInvoicesPage(indexOffset: bigint, maxInvoices: number): Promise<{ invoices: Invoice[]; lastIndexOffset: bigint }>;
 }
 
 /** Payment and invoice facts a predicate needs at the moment of a call (see Oracle.onSettleCall). */
@@ -136,6 +158,20 @@ export class FakeLnd {
   #settleIndex = 0n;
   #creates = new Map<string, number>();
   #foreign = 0;
+  /** Per payment hash and submission: when that submission's first SendPaymentV2 call was made (wall-clock ns). */
+  #sendMade = new Map<string, bigint>();
+  /**
+   * Per payment hash: the highest submission a SendPaymentV2 call was made for, the submission LND holds the payment for
+   * from then on (the harness claims and sends in one step, so it is the payer's current submission). What a stream shows
+   * the payer is recorded under it, not under the submission the stream was opened for: a stream opened for an earlier
+   * submission can observe the current one's payment (a tracking request that reaches LND after the retry's send did).
+   */
+  #latestSend = new Map<string, number>();
+  /** Per HTLC attempt: the submission LND held the payment for (#latestSend) when a payment stream first delivered it to the payer. */
+  #attemptFirstSeen = new Map<string, number | undefined>();
+  /** Per payment hash and submission (#latestSend when delivered): the highest creation time a payment stream showed the payer. */
+  #creationSeen = new Map<string, { submission: number; creationTimeNs: bigint }>();
+  #lastNs = 0n;
 
   constructor(lab: Lab, hooks: LndHooks) {
     this.lab = lab;
@@ -164,15 +200,21 @@ export class FakeLnd {
       const dead = Promise.reject(new this.lab.TransportError('process killed', 'connect'));
       return { call: undefined as unknown as Call, promise: dead };
     }
-    let resolve!: (value?: unknown) => void;
-    let reject!: (error: unknown) => void;
-    const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
+    let settle!: (value?: unknown) => void;
+    let fail!: (error: unknown) => void;
+    const promise = new Promise((done, failed) => { settle = done; fail = failed; });
+    // The first way the call ends is its outcome (a promise settles once).
+    const resolve = (value?: unknown): void => { call.outcome ??= 'ok'; settle(value); };
+    const reject = (error: unknown): void => { call.outcome ??= 'error'; fail(error); };
     const workflow = this.hooks.currentWorkflow();
     const call: Call = { id: ++this.#callSeq, kind, proc, label, hash, workflow, submission: undefined, open: true, queue: [], serverDone: false,
       arrived: false, inTransit: false, onUpdate, resolve, reject, request };
     if (workflow !== undefined) workflow.lastCall = call;
     this.calls.push(call);
     this.hooks.callCreated(call);
+    const made = `${hash}#${String(call.submission)}`;
+    if (kind === 'send' && !this.#sendMade.has(made)) this.#sendMade.set(made, this.#now());
+    if (kind === 'send' && call.submission !== undefined && (this.#latestSend.get(hash) ?? 0) < call.submission) this.#latestSend.set(hash, call.submission);
     this.hooks.progress();
     if (signal !== undefined) {
       const abort = (): void => this.cut(call, new this.lab.TransportError('aborted by the caller', 'response'));
@@ -297,6 +339,19 @@ export class FakeLnd {
       call.reject(error);
       return;
     }
+    // The payer recorded these attempts (a handler that returns has applied the update): note under which submission each was
+    // first shown, the one LND holds the payment for now (#latestSend), whichever submission this stream was opened for.
+    if ('payment' in item) {
+      const current = this.#latestSend.get(item.payment.paymentHash) ?? call.submission;
+      for (const attempt of item.payment.htlcs) if (!this.#attemptFirstSeen.has(attempt.attemptId)) this.#attemptFirstSeen.set(attempt.attemptId, current);
+      if (current !== undefined) {
+        const key = `${item.payment.paymentHash}#${current}`;
+        const seen = this.#creationSeen.get(key);
+        if (seen === undefined || item.payment.creationTimeNs > seen.creationTimeNs) {
+          this.#creationSeen.set(key, { submission: current, creationTimeNs: item.payment.creationTimeNs });
+        }
+      }
+    }
     if (decision === 'stop' || (call.serverDone && call.queue.length === 0)) {
       this.#close(call);
       call.resolve();
@@ -344,6 +399,35 @@ export class FakeLnd {
     return true;
   }
 
+  /** Ends a SubscribeInvoices stream while its process lives: the server closing it (eof) or the connection dropping (transport). */
+  endSub(call: Call, mode: string): boolean {
+    if (!call.open || call.kind !== 'sub') return false;
+    this.#close(call);
+    if (mode === 'eof') call.resolve();
+    else call.reject(new this.lab.TransportError('socket hang up', 'response'));
+    return true;
+  }
+
+  /** ListPayments and ListInvoices over what LND holds, oldest first, paged by payment index and add index. */
+  ledgerSource(): LedgerSource {
+    const page = <T>(items: { index: bigint; item: T }[], offset: bigint, max: number): { items: T[]; last: bigint } => {
+      const chosen = items.filter(entry => entry.index > offset).sort((a, b) => (a.index < b.index ? -1 : a.index > b.index ? 1 : 0)).slice(0, max);
+      return { items: chosen.map(entry => entry.item), last: chosen.at(-1)?.index ?? offset };
+    };
+    return {
+      listPaymentsPage: (offset, max) => {
+        const { items, last } = page([...this.payments.values()].filter(item => item.index > 0)
+          .map(item => ({ index: BigInt(item.index), item: this.#snapshot(item) })), offset, max);
+        return Promise.resolve({ payments: items, lastIndexOffset: last });
+      },
+      listInvoicesPage: (offset, max) => {
+        const { items, last } = page([...this.invoices.values()]
+          .map(item => ({ index: item.addIndex, item: this.#invoice(item) })), offset, max);
+        return Promise.resolve({ invoices: items, lastIndexOffset: last });
+      },
+    };
+  }
+
   // ------------------------------------------------------------------------------------------
   // Payments.
 
@@ -351,10 +435,46 @@ export class FakeLnd {
     return new this.lab.LndError(message, 5, 404);
   }
 
+  /** Wall-clock nanoseconds, strictly increasing across this LND's payments and calls. */
+  #now(): bigint {
+    const now = wallClockNs();
+    this.#lastNs = now > this.#lastNs ? now : this.#lastNs + 1n;
+    return this.#lastNs;
+  }
+
+  /**
+   * Whether a payment snapshot shows the payment as LND held it before `submission`'s first SendPaymentV2 call
+   * was made, as far as the payer can know: every HTLC attempt in it was first shown to the payer while LND held the
+   * payment for an earlier submission (#latestSend when delivered, not the submission the delivering stream was opened
+   * for), or it has no attempts and LND created it no later than a payment shown for an earlier submission (else, when
+   * none was, before that call). Such a snapshot is an earlier submission's answer (oracle predicate
+   * notfound-revert-keeps-live-updates).
+   */
+  predatesSubmission(snapshot: Payment, submission: number): boolean {
+    if (submission <= 1) return false;
+    if (snapshot.htlcs.length > 0) {
+      return snapshot.htlcs.every(attempt => {
+        const seen = this.#attemptFirstSeen.get(attempt.attemptId);
+        return seen !== undefined && seen < submission;
+      });
+    }
+    // Without attempts: created no later than a creation time an earlier submission's stream showed the payer (both LND's
+    // clock), or, when none did, created before the submission's SendPaymentV2 call was made.
+    let earlier: bigint | undefined;
+    for (const [key, seen] of this.#creationSeen) {
+      if (key.startsWith(`${snapshot.paymentHash}#`) && seen.submission < submission && (earlier === undefined || seen.creationTimeNs > earlier)) {
+        earlier = seen.creationTimeNs;
+      }
+    }
+    if (earlier !== undefined) return snapshot.creationTimeNs <= earlier;
+    const made = this.#sendMade.get(`${snapshot.paymentHash}#${submission}`);
+    return made !== undefined && snapshot.creationTimeNs < made;
+  }
+
   #snapshot(payment: LndPayment): Payment {
     return { paymentHash: payment.hash, status: payment.status, valueMsat: payment.valueMsat, feeMsat: payment.status === 'SUCCEEDED' ? payment.feeMsat : 0n,
       preimage: payment.status === 'SUCCEEDED' ? payment.preimage : undefined, paymentRequest: `lnbcrt-${payment.label}`,
-      failureReason: payment.status === 'FAILED' ? payment.failureReason : 'FAILURE_REASON_NONE', creationTimeNs: 1n,
+      failureReason: payment.status === 'FAILED' ? payment.failureReason : 'FAILURE_REASON_NONE', creationTimeNs: payment.creationTimeNs,
       paymentIndex: String(payment.index), htlcs: payment.htlcs.map(item => ({ ...item, route: { ...item.route, hops: [...item.route.hops] } })) };
   }
 
@@ -382,9 +502,15 @@ export class FakeLnd {
     const info = this.paymentLabels.get(call.hash);
     if (info === undefined) throw new Error(`no payment known for ${call.hash}`);
     const payment: LndPayment = existing ?? { hash: call.hash, label: info.label, status: 'IN_FLIGHT', valueMsat: info.amountMsat, feeMsat: 0n,
-      preimage: info.preimage, failureReason: 'FAILURE_REASON_NONE', htlcs: [], index: 0 };
+      preimage: info.preimage, failureReason: 'FAILURE_REASON_NONE', htlcs: [], index: 0, creationTimeNs: 0n };
+    // A new payment, or a FAILED one LND initialises again (channeldb InitPayment): the old HTLC attempts are deleted and the
+    // creation time is new. Until this request arrived, TrackPaymentV2 showed the earlier FAILED, attempts and all.
     payment.status = 'IN_FLIGHT';
     payment.failureReason = 'FAILURE_REASON_NONE';
+    payment.valueMsat = info.amountMsat;
+    payment.feeMsat = 0n;
+    payment.htlcs = [];
+    payment.creationTimeNs = this.#now();
     payment.index = ++this.#paymentIndex;
     this.payments.set(call.hash, payment);
     this.#push(payment);
@@ -406,6 +532,9 @@ export class FakeLnd {
     const inFlight = payment.htlcs.filter(item => item.status === 'IN_FLIGHT');
     switch (what) {
       case 'attempt':
+        // The harness pays with max_parts 1: each attempt carries the whole amount, so LND has at most one in flight at a
+        // time (a new one after the last failed), never two whose principals would add up to more than the payment.
+        if (inFlight.length > 0) return false;
         payment.htlcs.push(this.#attempt(payment, 'IN_FLIGHT'));
         break;
       case 'attempt-fail': {
@@ -422,11 +551,14 @@ export class FakeLnd {
       case 'succeed': {
         // LND reports the value it paid; a fault reports another than the invoice's amount (the record's amount-mismatch event).
         payment.valueMsat = skewed(payment.valueMsat, amount, PAYMENT_SKEW_MSAT);
-        const shards = inFlight.length > 0 ? inFlight : [this.#attempt(payment, 'IN_FLIGHT')];
-        if (inFlight.length === 0) payment.htlcs.push(shards[0] as HtlcAttempt);
-        for (const item of shards) Object.assign(item, { status: 'SUCCEEDED', resolveTimeNs: item.attemptTimeNs + 1n });
+        // One shard (max_parts 1) succeeds, carrying the value LND paid: the successful principals sum to the payment's value.
+        const shard = inFlight[0] ?? this.#attempt(payment, 'IN_FLIGHT');
+        if (inFlight.length === 0) payment.htlcs.push(shard);
+        Object.assign(shard, { status: 'SUCCEEDED', resolveTimeNs: shard.attemptTimeNs + 1n, principalMsat: payment.valueMsat,
+          route: { ...shard.route, totalAmtMsat: payment.valueMsat + FEE_PER_SHARD_MSAT,
+            hops: shard.route.hops.map(hop => ({ ...hop, amtToForwardMsat: payment.valueMsat })) } });
         payment.status = 'SUCCEEDED';
-        payment.feeMsat = FEE_PER_SHARD_MSAT * BigInt(shards.length);
+        payment.feeMsat = FEE_PER_SHARD_MSAT;
         break;
       }
     }
@@ -444,7 +576,9 @@ export class FakeLnd {
   }
 
   #notifySubscribers(item: LndInvoice): void {
-    // SubscribeInvoices reports additions and settlements.
+    // SubscribeInvoices reports additions and settlements. LND's invoice registry does not dispatch accepted and canceled
+    // updates to SubscribeInvoices clients ("for backwards compatibility"; only SubscribeSingleInvoice gets them), so
+    // neither does the fake.
     if (item.state !== 'OPEN' && item.state !== 'SETTLED') return;
     const snapshot = this.#invoice(item);
     for (const call of this.calls) if (call.kind === 'sub' && call.open) this.#queue(call, { invoice: snapshot });
@@ -467,14 +601,21 @@ export class FakeLnd {
         return { value: created.hold ? { paymentRequest, addIndex: created.addIndex } : { paymentHash: call.hash, paymentRequest, addIndex: created.addIndex } };
       }
       case 'settle':
-        if (item?.state === 'SETTLED') return { value: undefined };
-        if (item?.state !== 'ACCEPTED') return { error: new this.lab.LndError('invoice still open', 2, 500) };
+        // LND's own errors (invoices.ErrInvoiceNotFound, ErrInvoiceAlreadyCanceled, ErrInvoiceStillOpen), all gRPC Unknown (2),
+        // HTTP 500 through the REST proxy. An invoice already settled is the exception: the RPC treats the registry's
+        // ErrInvoiceAlreadySettled as success (lnrpc/invoicesrpc/invoices_server.go, SettleInvoice: "If the invoice is already
+        // settled, this call will succeed"), so a retry after a lost answer succeeds.
+        if (item === undefined) return { error: new this.lab.LndError('unable to locate invoice', 2, 500) };
+        if (item.state === 'SETTLED') return { value: undefined };
+        if (item.state === 'CANCELED') return { error: new this.lab.LndError('invoice already canceled', 2, 500) };
+        if (item.state !== 'ACCEPTED') return { error: new this.lab.LndError('invoice still open', 2, 500) };
         item.state = 'SETTLED';
         item.settleIndex = ++this.#settleIndex;
         this.#notifySubscribers(item);
         return { value: undefined };
       case 'cancel':
-        if (item === undefined) return { error: this.notFound('unable to locate invoice') };
+        // CancelInvoice of a hash LND does not hold: invoices.ErrInvoiceNotFound, gRPC Unknown (2), HTTP 500 (not NotFound, 5/404).
+        if (item === undefined) return { error: new this.lab.LndError('unable to locate invoice', 2, 500) };
         if (item.state === 'SETTLED') return { error: new this.lab.LndError('invoice already settled', 2, 500) };
         item.state = 'CANCELED';
         item.amtPaidMsat = 0n;
@@ -562,13 +703,14 @@ export class FakeLnd {
     return true;
   }
 
-  /** What happens to an invoice outside the receiver: a payer pays it, a held HTLC times out, it expires. */
-  invoiceEvent(hash: string, what: 'pay' | 'htlc-timeout' | 'expire' | 'misreport' | 'resettle', amount?: AmountVariant): boolean {
+  /** What happens to an invoice outside the receiver: a payer pays it, a held HTLC times out (canceling it), it expires. */
+  invoiceEvent(hash: string, what: 'pay' | 'htlc-timeout' | 'expire' | 'misreport' | 'resettle' | 'delete', amount?: AmountVariant): boolean {
     const item = this.invoices.get(hash);
     if (item === undefined) return false;
     if (what === 'misreport' && (item.state === 'OPEN' || item.state === 'ACCEPTED') && !item.misreported) {
       item.misreported = true;
     } else if (what === 'resettle' && item.state === 'SETTLED') {
+      item.resettled = true;
       // A hostile or buggy node reports the settled invoice again, for another amount: under the invoice's amount
       // when it was paid in full, the full amount when it was underpaid.
       item.amtPaidMsat = item.amtPaidMsat >= item.valueMsat ? item.valueMsat - INVOICE_SKEW_MSAT : item.valueMsat;
@@ -582,10 +724,19 @@ export class FakeLnd {
         this.#notifySubscribers(item);
       }
     } else if (what === 'htlc-timeout' && item.state === 'ACCEPTED') {
-      item.state = 'OPEN';
+      // A held HTLC reaching its expiry: lnd's expiry watcher force-cancels an accepted invoice at its block-based expiry
+      // (invoice_expiry_watcher.go, cancelNextHeightExpiredInvoice: "so that we can cancel invoices that have been accepted but
+      // not yet resolved"), the HTLC returns to the payer, and the invoice is CANCELED; lnd never returns an invoice to OPEN
+      // (a single HTLC is canceled only on an open invoice: invoiceregistry.go, cancelSingleHtlc; invoices/update.go never sets
+      // ContractOpen). On an OPEN invoice a partial payment's HTLC timing out leaves it open, which this receiver cannot see
+      // (one HTLC per payment, no HTLCs in lookups): no event.
+      item.state = 'CANCELED';
       item.amtPaidMsat = 0n;
     } else if (what === 'expire' && item.state === 'OPEN') {
       item.state = 'CANCELED';
+    } else if (what === 'delete' && item.state === 'CANCELED') {
+      // LND deletes canceled invoices (gc-canceled-invoices-on-startup / -on-the-fly, DeleteCanceledInvoice): lookups answer NotFound.
+      this.invoices.delete(hash);
     } else return false;
     this.hooks.progress();
     return true;

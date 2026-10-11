@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { observeEmptyBake } from '../test/fixture/observe-empty.mjs';
 
 const root = process.cwd();
@@ -119,6 +119,23 @@ const presets = [
   ['pay-only', ['info:read', 'uri:/routerrpc.Router/SendPaymentV2', 'uri:/routerrpc.Router/TrackPaymentV2', 'uri:/lnrpc.Lightning/DecodePayReq'], 'SPEND'],
 ];
 
+/**
+ * Replaces directory `out` with `stage` (both on one file system): the old directory is moved
+ * aside, the new one renamed into place, and only then is the old one removed. If the second
+ * rename fails, the old directory is put back, so a failure never leaves `out` missing.
+ */
+export function replaceDirectory(stage, out) {
+  const previous = existsSync(out) ? `${out}.previous-${process.pid}` : null;
+  if (previous) renameSync(out, previous);
+  try { renameSync(stage, out); }
+  catch (error) {
+    if (previous) renameSync(previous, out);
+    throw error;
+  }
+  if (previous) rmSync(previous, { recursive: true, force: true });
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
 let stage, baseTmp;
 try {
   const info = checked('getinfo');
@@ -128,10 +145,11 @@ try {
   const methods = Object.fromEntries(Object.entries(rawPermissions).map(([method, value]) => [method, (value.permissions || []).map(p => `${p.entity}:${p.action}`)]));
   const emptyBake = await observeEmptyBake();
   if (emptyBake.status < 400 || !emptyBake.message) throw new Error('REFERENCE_CONFLICT: LND accepted an empty permission list');
-  baseTmp = resolve(process.env.MACWARDEN_TEST_TMP || join(tmpdir(), 'macwarden-test-tmp'));
-  mkdirSync(baseTmp, { recursive: true });
-  stage = join(baseTmp, `cp004-vectors-${process.pid}`);
-  mkdirSync(stage, { recursive: true });
+  // Stage inside the repository's ignored private scratch (test/.tmp): owner-only, and on the
+  // same file system as test/vectors, so the final swap is a rename (no EXDEV from a tmpfs).
+  baseTmp = resolve(root, 'test', '.tmp');
+  mkdirSync(baseTmp, { recursive: true, mode: 0o700 });
+  stage = mkdtempSync(join(baseTmp, 'cp004-vectors-'));
   const vectors = []; const notBakeable = [];
   function add(name, data, purpose, source, expectedGrade, canonicalLength = data.length) {
     const file = `${name}.macaroon`;
@@ -206,8 +224,7 @@ try {
   writeFileSync(join(stage, 'README.md'), '# Test vectors\n\nThese files are throwaway regtest credentials from a disposable node. They carry no production authority. Regenerate with `npm run fixture:up` then `node scripts/make-vectors.mjs`. Structural files are labeled `hand-made` in the manifest and make no LND acceptance claim.\n');
   const out = join(root, 'test', 'vectors');
   if (resolve(out) !== resolve(root, 'test', 'vectors') || !resolve(out).startsWith(resolve(root) + sep)) throw new Error('Unsafe vector output path');
-  if (existsSync(out)) rmSync(out, { recursive: true, force: true });
-  renameSync(stage, out); stage = null;
+  replaceDirectory(stage, out); stage = null;
   const snapshotDir = join(root, 'src', 'grade'); mkdirSync(snapshotDir, { recursive: true });
   writeFileSync(join(snapshotDir, 'lnd-permissions.json'), JSON.stringify({ lndVersion: '0.21.4-beta', methods }, null, 2) + '\n');
   process.stdout.write(`Generated ${vectors.length} vectors and ${Object.keys(methods).length} method permissions; ${notBakeable.length} rows could not bake.\n`);
@@ -221,4 +238,5 @@ try {
       process.exitCode = 1;
     } else rmSync(stage, { recursive: true, force: true });
   }
+}
 }

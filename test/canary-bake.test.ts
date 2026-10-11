@@ -5,6 +5,7 @@ import { expect, it } from 'vitest';
 import { run } from '../src/commands/bake/index.js';
 import { Secret } from '../src/secret.js';
 import { directory, fixture } from './helpers/cp025-bake-support.mjs';
+import { expectSchemaValid } from './helpers/output-schema.js';
 
 function canaryArgs(args: string[], extra: string[] = []): string[] {
   const at = args.indexOf('--preset');
@@ -72,6 +73,8 @@ it('CANARY/dry-run plans a canary without creating its configuration or contacti
   f.lnd.getInfo = async () => { f.state.calls.push('GetInfo'); return { alias: 'fixture', version: '0.21.4-beta', pubkey: `02${'ab'.repeat(32)}`, network: 'regtest' }; };
   const result = await run(canaryArgs(f.args, ['--dry-run']), f.deps);
   expect(result).toMatchObject({ ok: true, result: { dryRun: true, canary: true, grade: 'READ' } });
+  // The --json document of a canary plan matches schemas/output/bake.schema.json.
+  expectSchemaValid(result);
   expect(existsSync(`${f.registry}.canary.json`)).toBe(false);
   expect(f.state.calls).not.toContain('BakeMacaroon');
 });

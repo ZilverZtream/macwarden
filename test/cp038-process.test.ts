@@ -36,11 +36,17 @@ it.each(cancellationCases)('CP-038/A5-cancellation %s %s %s observable mutation 
     const state = JSON.parse(readFileSync(marker, 'utf8')) as { registry: string; out: string; id: string; ids: string[]; oldId: string };
     expect(existsSync(state.registry + '.lock')).toBe(false);
     if (mode === 'stage' || mode === 'bake') expect(existsSync(state.out)).toBe(false);
-    if (point === 'after') expect(actual).toEqual({ code: 7, signal: null });
-    else { expect(actual.signal).toBeNull(); expect(actual.code).not.toBe(0); }
+    // bake and stage pause in ListMacaroonIDs, before BakeMacaroon is sent: nothing can have
+    // changed, so the run is cancelled (exit 6). revoke and finish pause inside the
+    // DeleteMacaroonID call (the request is already sent, only its answer is withheld), so
+    // LND may have changed and the exit is 7 at either point (audit 1.4.0: any nonzero passed).
+    const expected = point === 'after' || mode === 'revoke' || mode === 'finish' ? 7 : 6;
+    expect(actual).toEqual({ code: expected, signal: null });
     expect(cancellationMs).toBeLessThan(3000);
     const document = JSON.parse(stdout) as { error: { code: number; message: string } };
-    if (point === 'after') { expect(document.error.code).toBe(7); expect(document.error.message).toContain('macwarden'); }
+    const step = (document.error as { step?: string }).step;
+    if (expected === 7) { expect(document.error.code).toBe(7); expect(document.error.message).toContain('macwarden'); }
+    else expect({ code: document.error.code, step }).toEqual({ code: 6, step: 'cancelled' });
     if ((mode === 'stage' || mode === 'bake') && point === 'after') {
       const stored = JSON.parse(readFileSync(state.registry, 'utf8')) as { entries: Array<{ rootKeyId: string; verified: boolean }> };
       expect(stored.entries.find(row => row.rootKeyId === state.id)).toMatchObject({ verified: false });

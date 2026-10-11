@@ -11,6 +11,7 @@ const SIGNATURE_WORDS = 104; // 65 bytes of signature and recovery ID
 const TIMESTAMP_WORDS = 7;
 const CHECKSUM_WORDS = 6;
 const MAX_LENGTH = 8192;
+const PRINTABLE_ASCII = /^[\x21-\x7e]+$/;
 
 function polymod(values: readonly number[]): number {
   let checksum = 1;
@@ -25,6 +26,9 @@ function polymod(values: readonly number[]): number {
 /** The 5-bit words after the separator, checksum verified and removed; undefined when the string is not valid bech32. */
 function bech32Words(paymentRequest: string): { hrp: string; words: number[] } | undefined {
   if (paymentRequest.length > MAX_LENGTH) return undefined;
+  // Printable ASCII before any case folding: toLowerCase maps look-alikes such as U+212A (Kelvin sign) to ASCII
+  // letters, which would read a string LND refuses as a valid invoice.
+  if (!PRINTABLE_ASCII.test(paymentRequest)) return undefined;
   const lower = paymentRequest.toLowerCase();
   if (lower !== paymentRequest && paymentRequest.toUpperCase() !== paymentRequest) return undefined; // mixed case is invalid
   const separator = lower.lastIndexOf('1');
@@ -77,7 +81,10 @@ export function bolt11PaymentHash(paymentRequest: string): string | undefined {
  */
 export function damagedPaymentRequest(paymentRequest: string): boolean {
   const lower = paymentRequest.toLowerCase();
-  if (!/^ln[0-9a-z]*1[0-9a-z]+$/.test(lower)) return true;
+  // `ln`, letters and digits, and a `1` with at least one character after it. Checked without a regex that
+  // backtracks over the position of the `1`, which took quadratic time on a long string.
+  const one = lower.indexOf('1', 2);
+  if (!/^ln[0-9a-z]+$/.test(lower) || one < 0 || one > lower.length - 2) return true;
   const data = lower.slice(lower.lastIndexOf('1') + 1);
   const bech32Alphabet = [...data].every(char => CHARSET.includes(char));
   return bech32Alphabet && bech32Words(paymentRequest) === undefined;

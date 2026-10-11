@@ -1,6 +1,6 @@
 - id: macwarden-scan
   name: macwarden scan
-  description: Refuse commits that add Lightning credentials (LND macaroons, lndconnect URIs, NWC strings).
+  description: Refuse commits that add Lightning credentials (LND macaroons, lndconnect URIs, NWC strings, L402 tokens, Core Lightning runes).
   # Runs an installed macwarden (npm install --save-dev macwarden, or globally). The compiled
   # dist/ is not committed, so pre-commit cannot build this repository as a node hook.
   # Create an empty .macwardenignore at the repository root before first use.

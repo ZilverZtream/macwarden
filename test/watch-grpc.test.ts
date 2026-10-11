@@ -247,14 +247,18 @@ it('WATCH/grpc-liveness a peer that stops answering is detected by HTTP/2 PING a
 it('WATCH/grpc-registration a repeated reg_complete confirms the registration once', async () => {
   const p = await peer();
   let confirmations = 0;
+  let intercepted = 0;
   const session = registerMiddleware({ ...p.url, tlsCert: good.ca, macaroon: new Secret(own) },
-    { name: 'macwarden-watch', readOnly: true }, () => '', () => { confirmations += 1; });
+    { name: 'macwarden-watch', readOnly: true }, () => { intercepted += 1; return ''; }, () => { confirmations += 1; });
   await until(() => p.received().length >= 1);
   p.stream()!.write(frame(vi(8, 1)));
   await until(() => confirmations >= 1);
   p.stream()!.write(frame(vi(8, 1)));
   p.stream()!.write(frame(vi(8, 1)));
-  await new Promise(resolve => setTimeout(resolve, 200));
+  // An intercept sent after the repeats is read after them on the same stream: once it is
+  // answered, both repeats have been processed (a positive signal, not a fixed wait).
+  p.stream()!.write(frame(Buffer.concat([vi(1, 5), ld(5, ld(1, Buffer.from('/lnrpc.Lightning/GetInfo'))), vi(7, 7)])));
+  await until(() => intercepted >= 1 && p.received().length >= 2);
   expect(confirmations).toBe(1);
   session.close();
   await session.ended;

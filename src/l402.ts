@@ -29,9 +29,15 @@ const INT64_MAX = (1n << 63n) - 1n;
 // JavaScript dates reach 8.64e15 ms either side of the epoch.
 const DATE_LIMIT_SECONDS = 8_640_000_000_000n;
 
-/** A _valid_until value as Go's strconv.ParseInt(value, 10, 64) reads it, else undefined. */
+/** Digits of the int64 range (9223372036854775807) after leading zeros; longer is out of range. */
+const INT64_DIGITS = 19;
+
+/**
+ * A _valid_until value as Go's strconv.ParseInt(value, 10, 64) reads it, else undefined. Go
+ * accepts any number of leading zeros, so only the significant digits are bounded.
+ */
 export function parseValidUntil(value: string): bigint | undefined {
-  if (!/^[+-]?[0-9]+$/.test(value) || value.length > 40) return undefined;
+  if (!/^[+-]?[0-9]+$/.test(value) || value.replace(/^[+-]?0*/, '').length > INT64_DIGITS) return undefined;
   const seconds = BigInt(value);
   return seconds < INT64_MIN || seconds > INT64_MAX ? undefined : seconds;
 }

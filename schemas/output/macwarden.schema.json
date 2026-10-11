@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ZilverZtream/macwarden/blob/main/schemas/output/macwarden.schema.json",
   "title": "macwarden --json output without a command",
-  "description": "Normative source: docs/spec.md, Output > Help and --json. `macwarden --help --json` (ok: true, the general usage lines and every command with its summary), or a usage error before any command is known (ok: false, exit 2, step null).",
+  "description": "Normative source: docs/spec.md, Output > Help and --json. `macwarden --help --json` (ok: true, the general usage lines and every command with its summary), `macwarden --version --json` (ok: true, `{\"version\"}`), or a usage error before any command is known (ok: false, exit 2, step null).",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -36,6 +36,9 @@
         },
         {
           "$ref": "#/$defs/result"
+        },
+        {
+          "$ref": "#/$defs/version"
         }
       ]
     },
@@ -65,7 +68,14 @@
       "then": {
         "properties": {
           "result": {
-            "$ref": "#/$defs/result"
+            "oneOf": [
+              {
+                "$ref": "#/$defs/result"
+              },
+              {
+                "$ref": "#/$defs/version"
+              }
+            ]
           },
           "error": {
             "type": "null"
@@ -322,6 +332,19 @@
               }
             }
           }
+        }
+      }
+    },
+    "version": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version"
+      ],
+      "properties": {
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$"
         }
       }
     }

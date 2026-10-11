@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ZilverZtream/macwarden/blob/main/schemas/output/reconcile.schema.json",
   "title": "macwarden reconcile --json output",
-  "description": "Normative source: docs/spec.md, Commands > 12. reconcile. Observation (the payment journal) and settlement (LND) are separate evidence. Exit 1 (ok: true) when the reconciliation is incomplete: a coverage gap, an unattributed LND payment, a journaled payment without a final outcome, a request without a hash, an ambiguous attribution, a journaled deletion or a limited lookup.",
+  "description": "Normative source: docs/spec.md, Commands > 12. reconcile. Observation (the payment journal) and settlement (LND) are separate evidence. Exit 1 (ok: true) when the reconciliation is incomplete: a coverage gap, an unattributed LND payment, a journaled payment without a final outcome, a request without a hash, an ambiguous, historical or unidentified attribution, a journaled deletion or a limited lookup.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -732,7 +732,8 @@
                 "enum": [
                   "single",
                   "ambiguous",
-                  "historical"
+                  "historical",
+                  "unidentified"
                 ]
               },
               "credentials": {

@@ -1,6 +1,6 @@
 # CI integration
 
-No mainstream secret scanner (gitleaks, TruffleHog, GitHub secret scanning, GitGuardian) has a detector for LND macaroons, `lndconnect://` URIs or Nostr Wallet Connect strings. macwarden finds them, decodes macaroons offline and grades what they can do. This page shows how to run it in CI. The examples are not enabled in this repository.
+No dedicated detector for LND macaroons, `lndconnect://` URIs or Nostr Wallet Connect strings was found in gitleaks, TruffleHog or GitHub's secret scanning catalog ([references](references.md#existing-tools)); gitleaks has a rule for Fly.io macaroons. macwarden finds them, decodes macaroons offline and grades what they can do. This page shows how to run it in CI. The examples are not enabled in this repository.
 
 Every format reports only location, kind, grade, fingerprint and root key ID. No format contains the matched credential.
 
@@ -26,8 +26,8 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
-      - run: npx --yes macwarden@1.3.0 scan . --git-history --format sarif > macwarden.sarif
-        continue-on-error: true     # upload the results even when credentials were found
+      - run: npx --yes macwarden@1.3.1 scan . --git-history --format sarif > macwarden.sarif
+        continue-on-error: true     # findings alone exit 0 without --fail-on; this keeps the job going past a scan error (exit 2 or 3)
       - uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: macwarden.sarif
@@ -39,7 +39,7 @@ Each result carries `partialFingerprints.macwardenFingerprint/v1`, so an alert k
 ## GitHub annotations (free on private repositories)
 
 ```yaml
-      - run: npx --yes macwarden@1.3.0 scan . --git-history --fail-on READ --format github
+      - run: npx --yes macwarden@1.3.1 scan . --git-history --fail-on READ --format github
 ```
 
 Each finding becomes an inline `::error`, `::warning` or `::notice` annotation on the file and line. `--fail-on READ` makes the job fail when any credential is found.
@@ -50,12 +50,12 @@ Each finding becomes an inline `::error`, `::warning` or `::notice` annotation o
 
 ## Pre-commit
 
-As a [pre-commit](https://pre-commit.com) hook, so a credential never reaches a commit. The hook runs an installed `macwarden` (`npm install -g macwarden@1.3.0`). Create an empty `.macwardenignore` at the repository root first.
+As a [pre-commit](https://pre-commit.com) hook, so a credential macwarden can read never reaches a commit. Files whose names look like wallet secrets (`*.key`, names containing `seed`, `password` or `passwd` as a word, `macaroons.db`, `wallet.db`) are never opened (SAFE-02): they are reported as skipped (`never-open`) and named in text, JSON, SARIF and GitHub output, not scanned, and do not count toward `--fail-on`, so keep credentials out of files with such names. The hook runs an installed `macwarden` (`npm install -g macwarden@1.3.1`). Create an empty `.macwardenignore` at the repository root first.
 
 ```yaml
 repos:
   - repo: https://github.com/ZilverZtream/macwarden
-    rev: v1.3.0
+    rev: v1.3.1
     hooks:
       - id: macwarden-scan
 ```

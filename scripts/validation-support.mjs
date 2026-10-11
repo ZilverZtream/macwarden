@@ -3,9 +3,10 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 import { findLeaks, sentinelRedactor } from './leak-check.mjs';
-import { platformVariants } from './platform-variants.mjs';
+import { platformVariants, requiredPlatformFiles } from './platform-variants.mjs';
 
 export function resolveVitestConfig(root, kind = 'unit', optional = false) {
   const bases = { unit: 'vitest.config', oracle: 'vitest.oracle.config', harness: 'vitest.harness.config', cln: 'vitest.cln.config' };
@@ -210,6 +211,14 @@ export function fullSuite(root, kind, report, checks) {
         test.status === 'passed' && mapped(test.fullName || '', ...item.requiredCase.split('/')))));
     checks.push({ name: 'platform-variants', status: covered ? 'PASS' : 'FAIL',
       detail: JSON.stringify({ platform: process.platform, excluded: variants }) });
+    // This platform's own variants must exist, not be excluded, and run at least one passing test.
+    const platformFiles = requiredPlatformFiles(process.platform);
+    const absent = platformFiles.filter(file => !candidates.includes(file) || excluded.includes(file) ||
+      !suites(report).some(suite => relative(root, resolve(root, typeof suite.name === 'string' ? suite.name : ''))
+        .replaceAll('\\', '/') === file && Array.isArray(suite.assertionResults)
+        && suite.assertionResults.some(test => test.status === 'passed')));
+    checks.push({ name: 'platform-required', status: absent.length ? 'FAIL' : 'PASS',
+      detail: JSON.stringify({ platform: process.platform, required: platformFiles, absent }) });
   }
 }
 
@@ -226,6 +235,31 @@ function scrubStrings(value, redact) {
   return value;
 }
 
+const collectScript = join(dirname(fileURLToPath(import.meta.url)), 'collect-test-names.mjs');
+
+/**
+ * The duplicate-name condition of fullSuite (`new Set(titles).size === titles.length` over
+ * the reporter's fullName, or title, of every unit and harness test), from a collection
+ * before any test runs. Returns the collection commands, whether every collection succeeded,
+ * the number of names and the duplicated names.
+ */
+export function collectedNameDuplicates(root, env, scratch, timeout) {
+  const configs = [resolveVitestConfig(root), resolveVitestConfig(root, 'harness', true)].filter(Boolean);
+  const commands = [];
+  const titles = [];
+  for (const [index, config] of configs.entries()) {
+    const output = join(scratch, `collected-names-${index}.json`);
+    const argv = [collectScript, config, output];
+    const result = run(process.execPath, argv, root, env, undefined, timeout);
+    commands.push({ argv, exitCode: result.exitCode, timedOut: result.timedOut, output: result.output });
+    if (result.exitCode !== 0) return { collected: false, commands, count: titles.length, duplicates: [] };
+    titles.push(...JSON.parse(readFileSync(output, 'utf8')).map(test => test.fullName || test.title));
+  }
+  const seen = new Set();
+  const duplicates = titles.filter(title => seen.has(title) || !seen.add(title));
+  return { collected: true, commands, count: titles.length, duplicates };
+}
+
 export function safeSerialize(value, options) {
   const scrubbed = scrubStrings(value, sentinelRedactor(options));
   const serialized = JSON.stringify(scrubbed, null, 2);
@@ -234,11 +268,32 @@ export function safeSerialize(value, options) {
   return serialized;
 }
 
-// Counts .only, .skip and .todo on Vitest test functions in the source, including
-// renamed imports and namespace imports, so no test can be disabled in code.
-function sourceModifierCount(path) {
+// Properties a test chain may use: each case still runs and reports its own result.
+const TEST_CHAIN_PROPERTIES = new Set(['each', 'for', 'concurrent', 'sequential']);
+// Capability skips and early returns allowed per file, as { skipIf, return } counts. Empty: the
+// ones that predated this check moved onto the platform-variant contract
+// (scripts/platform-variants.mjs) or became requirements of the platform (audit 1.4.0), so
+// every skipIf and early return in any file counts.
+/** @type {Readonly<Record<string, Readonly<{ skipIf?: number; return?: number }>>>} */
+export const SOURCE_SKIP_ALLOWANCE = Object.freeze({});
+
+// Counts every way a source can disable, invert or empty a Vitest test: .only,
+// .skip, .todo, .fails, .skipIf, .runIf and any other property not in
+// TEST_CHAIN_PROPERTIES; computed access; aliases or other non-call uses of
+// it/test/describe/suite (renamed and namespace imports included); empty literal
+// .each/.for tables; the context skip(); and a return before the end of a test
+// body. Anything unrecognised on a test chain counts, so the check fails closed.
+function sourceModifierFindings(path, file = '') {
   const source = ts.createSourceFile(path, readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true);
   const testNames = new Set(['it', 'test', 'describe', 'suite']);
+  // A global name the file declares itself (a parameter, a destructured helper)
+  // is not the Vitest global; imported names are added back below.
+  const declares = node => {
+    if ((ts.isVariableDeclaration(node) || ts.isParameter(node) || ts.isBindingElement(node) || ts.isFunctionDeclaration(node))
+      && node.name && ts.isIdentifier(node.name)) testNames.delete(node.name.text);
+    ts.forEachChild(node, declares);
+  };
+  declares(source);
   const namespaces = new Set();
   for (const statement of source.statements) {
     if (!ts.isImportDeclaration(statement) || statement.moduleSpecifier.text !== 'vitest') continue;
@@ -246,36 +301,105 @@ function sourceModifierCount(path) {
     if (bindings && ts.isNamespaceImport(bindings)) namespaces.add(bindings.name.text);
     else if (bindings && ts.isNamedImports(bindings)) {
       for (const element of bindings.elements) {
-        if (testNames.has((element.propertyName || element.name).text)) testNames.add(element.name.text);
+        if (['it', 'test', 'describe', 'suite'].includes((element.propertyName || element.name).text)) testNames.add(element.name.text);
       }
     }
   }
-  const property = node => ts.isPropertyAccessExpression(node) ? node.name.text
-    : ts.isElementAccessExpression(node) && ts.isStringLiteralLike(node.argumentExpression) ? node.argumentExpression.text : null;
+  const unwrap = node => {
+    while (node && (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isSatisfiesExpression(node)
+      || ts.isNonNullExpression(node) || ts.isTypeAssertionExpression(node))) node = node.expression;
+    return node;
+  };
+  // The root of a test chain: a test binding, or namespace.testName.
+  const isTestRoot = node => ts.isIdentifier(node) && testNames.has(node.text)
+    || ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression) && namespaces.has(node.expression.text)
+      && testNames.has(node.name.text);
   function isTestChain(node) {
-    if (ts.isIdentifier(node)) return testNames.has(node.text);
-    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
-      if (ts.isIdentifier(node.expression) && namespaces.has(node.expression.text) && testNames.has(property(node))) return true;
-      return isTestChain(node.expression);
-    }
-    if (ts.isCallExpression(node) || ts.isTaggedTemplateExpression(node) || ts.isParenthesizedExpression(node)) {
+    node = unwrap(node);
+    if (!node) return false;
+    if (isTestRoot(node)) return true;
+    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) return isTestChain(node.expression);
+    if (ts.isCallExpression(node) || ts.isTaggedTemplateExpression(node)) {
       return isTestChain(ts.isTaggedTemplateExpression(node) ? node.tag : node.expression);
     }
     return false;
   }
-  let count = 0;
+  const findings = [];
+  const allowance = { skipIf: 0, return: 0, ...SOURCE_SKIP_ALLOWANCE[file] };
+  let current;
+  const violation = reason => {
+    findings.push({ file, line: source.getLineAndCharacterOfPosition(current.getStart(source)).line + 1, reason });
+  };
+  // A name being declared, or a property name, rather than a reference.
+  const declarationName = node => {
+    const parent = node.parent;
+    if (ts.isBindingElement(parent) && parent.propertyName === node) return true;
+    return parent.name === node && (ts.isPropertySignature(parent) || ts.isPropertyAssignment(parent)
+      || ts.isPropertyDeclaration(parent) || ts.isMethodDeclaration(parent) || ts.isMethodSignature(parent)
+      || ts.isGetAccessor(parent) || ts.isSetAccessor(parent) || ts.isEnumMember(parent) || ts.isPropertyAccessExpression(parent)
+      || ts.isBindingElement(parent) || ts.isVariableDeclaration(parent) || ts.isParameter(parent) || ts.isFunctionDeclaration(parent))
+      || ts.isQualifiedName(parent) && parent.right === node;
+  };
+  // A return that is not the last statement of a test body leaves the rest unrun.
+  const earlyReturn = body => {
+    if (!body || !ts.isBlock(body)) return false;
+    let found = false;
+    const visit = node => {
+      if (found || node !== body && ts.isFunctionLike(node)) return;
+      if (ts.isReturnStatement(node) && body.statements.at(-1) !== node) found = true;
+      ts.forEachChild(node, visit);
+    };
+    visit(body);
+    return found;
+  };
   function visit(node) {
-    if (['only', 'skip', 'todo'].includes(property(node)) && isTestChain(node.expression)) count++;
+    current = node;
+    // A test binding used other than as a call or as the object of an allowed property.
+    if (ts.isIdentifier(node) && testNames.has(node.text) && !ts.isImportSpecifier(node.parent) && !isTestRoot(node.parent)
+      && !declarationName(node)) {
+      let use = node, parent = node.parent;
+      while (ts.isParenthesizedExpression(parent) || ts.isAsExpression(parent) || ts.isNonNullExpression(parent)) { use = parent; parent = parent.parent; }
+      const called = ts.isCallExpression(parent) && parent.expression === use || ts.isTaggedTemplateExpression(parent) && parent.tag === use;
+      const accessed = (ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) && parent.expression === use;
+      const namespaceName = ts.isPropertyAccessExpression(parent) && parent.name === node;
+      if (!called && !accessed && !namespaceName) violation(`${node.text} used other than as a test call`);
+    }
+    if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && !isTestRoot(node) && isTestChain(node.expression)) {
+      const name = ts.isPropertyAccessExpression(node) ? node.name.text : null;
+      if (name === 'skipIf' && allowance.skipIf > 0) allowance.skipIf--;
+      else if (name === null || !TEST_CHAIN_PROPERTIES.has(name)) violation(name === null ? 'computed test-chain property' : `.${name} on a test chain`);
+      else if ((name === 'each' || name === 'for') && ts.isCallExpression(node.parent) && node.parent.expression === node) {
+        const table = unwrap(node.parent.arguments[0]);
+        if (!table || ts.isArrayLiteralExpression(table) && table.elements.length === 0) violation(`empty .${name} table`);
+      }
+    }
+    // The test context's skip(), called or destructured, under any name.
+    if (ts.isPropertyAccessExpression(node) && node.name.text === 'skip' && !isTestChain(node.expression)) violation('context skip()');
+    if (ts.isBindingElement(node) && (node.propertyName ?? node.name).getText(source) === 'skip') violation('context skip binding');
+    // The test body passed to a test call.
+    if (ts.isCallExpression(node) && isTestChain(node.expression)) {
+      for (const argument of node.arguments) {
+        const body = unwrap(argument);
+        if (body && (ts.isArrowFunction(body) || ts.isFunctionExpression(body)) && earlyReturn(body.body)) {
+          if (allowance.return > 0) allowance.return--; else violation('return before the end of a test body');
+        }
+      }
+    }
     ts.forEachChild(node, visit);
   }
   visit(source);
-  return count;
+  return findings;
 }
 
 export function skippedSourceCount(root) {
+  return skippedSourceFindings(root).length;
+}
+
+/** Each place in a test source that disables, inverts or empties a test: { file, line, reason }. */
+export function skippedSourceFindings(root) {
   const dir = join(root, 'test');
-  if (!existsSync(dir)) return 0;
-  let count = 0;
+  if (!existsSync(dir)) return [];
+  const findings = [];
   function walk(path) {
     for (const item of readdirSync(path, { withFileTypes: true })) {
       const child = join(path, item.name);
@@ -283,11 +407,11 @@ export function skippedSourceCount(root) {
       if (privateScratch(root, child)) continue;
       if (item.isDirectory()) walk(child);
       else if (/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(item.name)) {
-        count += sourceModifierCount(child);
+        findings.push(...sourceModifierFindings(child, relative(root, child).replaceAll('\\', '/')));
       }
     }
   }
-  walk(dir); return count;
+  walk(dir); return findings;
 }
 
 // True when the checkout has no changes and its only untracked files lie inside ownedPaths.
@@ -299,4 +423,39 @@ export function candidateInputsClean(root, ownedPaths = []) {
     const path = relative(resolve(base), resolve(root, file));
     return path === '' || (!path.startsWith('..') && !isAbsolute(path));
   }));
+}
+
+/**
+ * Tests a Vitest JSON report did not run to a pass: skipped, pending, todo or
+ * failed. A test in a file with a recorded capability skip (SOURCE_SKIP_ALLOWANCE)
+ * may be skipped up to that file's count. Returns [{ file, name, status }].
+ */
+export function unfinishedTests(root, report) {
+  const unfinished = [];
+  if (!suites(report).length || report?.numTodoTests) unfinished.push({ file: '', name: 'report', status: 'incomplete' });
+  for (const suite of suites(report)) {
+    const file = relative(root, resolve(root, typeof suite.name === 'string' ? suite.name : '')).replaceAll('\\', '/');
+    let allowed = SOURCE_SKIP_ALLOWANCE[file]?.skipIf ?? 0;
+    for (const test of Array.isArray(suite.assertionResults) ? suite.assertionResults : []) {
+      if (test?.status === 'passed') continue;
+      if ((test?.status === 'pending' || test?.status === 'skipped') && allowed > 0) { allowed--; continue; }
+      unfinished.push({ file, name: String(test?.fullName ?? test?.title ?? ''), status: String(test?.status) });
+    }
+  }
+  return unfinished;
+}
+
+// CLI for CI: node scripts/validation-support.mjs --no-pending <vitest-json-report>...
+// Exits 1 when a report is missing, unreadable or holds a test that did not pass.
+if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url)) && process.argv[2] === '--no-pending') {
+  const reports = process.argv.slice(3);
+  let failed = reports.length === 0;
+  for (const path of reports) {
+    let unfinished;
+    try { unfinished = unfinishedTests(process.cwd(), JSON.parse(readFileSync(path, 'utf8'))); }
+    catch { unfinished = [{ file: path, name: 'report', status: 'unreadable' }]; }
+    for (const test of unfinished) console.error(`${test.status}: ${test.file} ${test.name}`);
+    if (unfinished.length) failed = true;
+  }
+  process.exitCode = failed ? 1 : 0;
 }

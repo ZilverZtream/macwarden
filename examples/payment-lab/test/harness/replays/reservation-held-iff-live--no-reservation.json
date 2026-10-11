@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "reservation-held-iff-live",
+  "rule": "A budgeted payment (its operation names a budget, or it has a reservation) holds exactly one reservation, at its amount and fee limit, while it is unresolved; failed releases it; succeeded consumes exactly one, at LND's value plus the actual fee.",
+  "message": "op0/i0 is intent with 0 held and 0 consumed reservation(s)",
+  "seed": 1,
+  "case": 0,
+  "config": {
+    "scale": "small",
+    "budget": true,
+    "limit": "3200"
+  },
+  "failingStep": 0,
+  "originalSteps": 3,
+  "events": [
+    {
+      "t": "intent",
+      "p": "p0",
+      "op": 0,
+      "inv": 0
+    }
+  ],
+  "states": {
+    "after": {
+      "payments": {
+        "op0/i0": {
+          "op": "op0",
+          "state": "intent",
+          "subs": 0,
+          "amount": "1000",
+          "feeLimit": "100"
+        }
+      },
+      "operations": {
+        "op0": "open"
+      },
+      "opBudgets": {
+        "op0": "B"
+      },
+      "reservations": [],
+      "ledger": [],
+      "events": {
+        "op0/i0": [
+          "intent-recorded"
+        ]
+      },
+      "budgets": {
+        "B": "3200"
+      },
+      "entries": [],
+      "outbox": []
+    }
+  },
+  "mutant": "reservation-held-iff-live--no-reservation.cjs"
+}

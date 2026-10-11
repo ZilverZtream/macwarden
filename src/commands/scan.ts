@@ -75,7 +75,7 @@ export async function run(args: string[], deps: ScanDeps = { fs, env: { ...proce
       continue;
     }
     if (!endOfFlags && arg.startsWith('-'))
-      return fail(2, null, 'unknown flag; scan takes: [paths...] --fail-on --include-dirs --ignore-file --git-history --allow-shallow --json (use -- before a path starting with -)');
+      return fail(2, null, 'unknown flag; scan takes: [paths...] --fail-on --include-dirs --ignore-file --git-history --allow-shallow --agent-configs --format --json (use -- before a path starting with -)');
     paths.push(arg);
   }
   if (allowShallow && !gitHistory) return fail(2, null, '--allow-shallow requires --git-history');
@@ -83,7 +83,7 @@ export async function run(args: string[], deps: ScanDeps = { fs, env: { ...proce
     // With --agent-configs and no paths, only the agent locations are scanned.
     const discovery = agentConfigs
       ? await discoverAgentConfigs(agentConfigCandidates((deps.agentEnvironment ?? defaultAgentEnvironment)()),
-        path => deps.fs.lstat(path))
+        path => deps.fs.lstat(path), path => deps.fs.stat(path))
       : undefined;
     const targets = [...(paths.length || agentConfigs ? paths : ['.']), ...(discovery?.found.map(item => item.path) ?? [])];
     const result = await scan(targets, { fs: deps.fs, includeDirs, ignoreFile, gitHistory, allowShallow });

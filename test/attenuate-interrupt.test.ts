@@ -9,7 +9,7 @@ function result(dryRun: boolean) {
     result: { dryRun, out: dryRun ? null : '/tmp/copy.macaroon', parentFingerprint: '0123456789abcdef', added: [] } };
 }
 
-it.each([[false, /written copy is complete and kept/], [true, /interrupted before mutation/]] as const)(
+it.each([[false, /written copy is complete and kept/], [true, /^interrupted$/]] as const)(
   'ATTENUATE/interrupt-after-write dryRun=%s reports whether the copy was written', async (dryRun, message) => {
     let out = '';
     vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: string | Uint8Array) => { out += String(chunk); return true; }) as typeof process.stdout.write);

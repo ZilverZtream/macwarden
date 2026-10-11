@@ -30,12 +30,14 @@ process.on('warning', warning => { if (warning.name !== 'ExperimentalWarning') p
 
 const args = process.argv.slice(2);
 const option = name => { const at = args.indexOf(name); return at < 0 ? undefined : args[at + 1]; };
-const number = (name, fallback) => {
+/** A non-negative integer option up to `max` (999,999,999 by default; a seed goes up to 2^32 - 1, which covers every seed the runner prints). */
+const number = (name, fallback, max = 999_999_999) => {
   const value = option(name);
   if (value === undefined) return fallback;
-  if (!/^[0-9]{1,9}$/.test(value)) { process.stderr.write(`${name} must be a non-negative integer\n`); process.exit(2); }
+  if (!/^[0-9]{1,10}$/.test(value) || Number(value) > max) { process.stderr.write(`${name} must be an integer from 0 to ${max}\n`); process.exit(2); }
   return Number(value);
 };
+const MAX_SEED = 2 ** 32 - 1;
 const known = new Set(['--seed', '--cases', '--start', '--steps', '--lab-src', '--replay-out', '--replay', '--shrink-budget', '--mutant']);
 const flags = new Set(['--no-shrink', '--expect-violation', '--collect']);
 for (let index = 0; index < args.length; index += 1) {
@@ -64,6 +66,11 @@ if (mutant !== undefined) {
 if (option('--replay') !== undefined) {
   const expectViolation = args.includes('--expect-violation');
   const outcomes = await harness.replay({ path: option('--replay'), labSrc });
+  if (outcomes.length === 0) {
+    // A directory without replay files proves nothing, also not with --expect-violation.
+    process.stderr.write(`no replay files (*.json) in ${option('--replay')}\n`);
+    process.exit(2);
+  }
   let bad = 0;
   let skipped = 0;
   let invalid = 0;
@@ -96,7 +103,7 @@ if (option('--replay') !== undefined) {
     + `, lab source ${labSrc ?? 'examples/payment-lab/src'}\n`);
   process.exitCode = invalid > 0 ? 2 : bad === 0 ? 0 : 1;
 } else {
-  const seed = number('--seed', randomInt(2 ** 31));
+  const seed = number('--seed', randomInt(2 ** 31), MAX_SEED);
   const cases = number('--cases', 500);
   const replayOut = option('--replay-out') ?? mkdtempSync(join(tmpdir(), 'macwarden-lab-replays-'));
   process.stdout.write(`payment lab harness: seed ${seed}, ${cases} cases\n`);

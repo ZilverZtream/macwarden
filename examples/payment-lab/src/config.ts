@@ -99,3 +99,16 @@ export function readApi(lab: Lab, node: NodeName): ReadApi {
 export function databasePath(lab: Lab, file: string): string {
   return join(lab.dir, 'data', file);
 }
+
+/** The lab's effect directory per component: receipts (receiver) and confirmations (payer); outbox/effects.ts EFFECT_DIRS names the same. */
+export const EFFECT_DIR = { receiver: 'receipts', payer: 'confirmations' } as const;
+
+/**
+ * Where a profile's outbox worker writes its effects: `<lab>/receipts/<profile>` or `<lab>/confirmations/<profile>`. One
+ * directory per profile, as one database per profile: the same order or operation ID in two profiles (the two receivers,
+ * the two payers) names two files, not one. The profile is one of the fixed names above, so it is a safe directory name.
+ */
+export function effectDir(lab: Lab, component: 'payer' | 'receiver', profile: string): string {
+  if (!Object.hasOwn(component === 'payer' ? PAYER_PROFILES : RECEIVER_PROFILES, profile)) throw new Error(`unknown ${component} profile ${profile}`);
+  return join(lab.dir, EFFECT_DIR[component], profile);
+}

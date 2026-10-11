@@ -44,7 +44,11 @@ function ownAuthenticationFailure(response: Response): boolean {
   try {
     const value: unknown = JSON.parse(response.body);
     if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-    const message = (value as Record<string, unknown>).message;
+    // grpc-gateway writes a server-streaming call's failure before its first message (TrackPaymentV2)
+    // as {"error": {"code", "message"}}; a unary call's failure carries the message at the top level.
+    const failure = (value as Record<string, unknown>).error;
+    const nested = failure && typeof failure === 'object' && !Array.isArray(failure) ? (failure as Record<string, unknown>).message : undefined;
+    const message = typeof nested === 'string' ? nested : (value as Record<string, unknown>).message;
     if (typeof message !== 'string') return false;
     // A bounded prefix and fixed phrases (audit 1.2.1): the wildcard alternatives this replaced
     // backtracked quadratically, so a hostile 1 MiB error body stalled every call for 65 s.
@@ -101,6 +105,7 @@ function ids(body: string): bigint[] {
   if (!match) throw new LndError(5, stage, 'invalid LND response');
   const entries = match[1].trim();
   if (!entries) return [];
+  const seen = new Set<bigint>();
   return entries.split(',').map(entry => {
     const token = entry.trim();
     const digits = /^"(0|[1-9][0-9]*)"$/.exec(token)?.[1]
@@ -108,6 +113,9 @@ function ids(body: string): bigint[] {
     if (digits === undefined || digits.length > 20) throw new LndError(5, stage, 'invalid LND response');
     const id = BigInt(digits);
     if (id > MAX_ROOT_KEY_ID) throw new LndError(5, stage, 'invalid LND response');
+    // LND lists each root key ID once (one bucket key each); a repeated ID is not an LND answer.
+    if (seen.has(id)) throw new LndError(5, stage, 'invalid LND response');
+    seen.add(id);
     return id;
   });
 }
@@ -383,6 +391,10 @@ const MAX_CREATION_NS = 253_402_300_799_999n * 1_000_000n;
 const PAYMENT_STATUS: Record<string, LndPayment['status']> = { SUCCEEDED: 'succeeded', FAILED: 'failed', IN_FLIGHT: 'in-flight',
   INITIATED: 'in-flight', UNKNOWN: 'unknown' };
 
+// Own entries only: a status named after an Object.prototype member (`constructor`, `__proto__`)
+// would otherwise read the inherited function or object instead of falling back to 'unknown'.
+const known = <T>(table: Record<string, T>, key: string): T | undefined => Object.hasOwn(table, key) ? table[key] : undefined;
+
 function paymentLookup(call: ReturnType<typeof transport>['call'], read: ReturnType<typeof transport>['read']): PaymentLookup {
   // grpc-gateway writes int64 and uint64 as JSON strings; a safe JSON integer is accepted too.
   const integer = (value: unknown, stage: string, signed = false): bigint => {
@@ -416,7 +428,7 @@ function paymentLookup(call: ReturnType<typeof transport>['call'], read: ReturnT
       const total = integer(route.total_amt_msat, stage);
       const fees = integer(route.total_fees_msat, stage);
       if (total > MAX_INT64 || total < fees) throw new LndError(5, stage, 'invalid LND response');
-      const status = HTLC_STATUS[string(htlc.status, stage)] ?? 'unknown';
+      const status = known(HTLC_STATUS, string(htlc.status, stage)) ?? 'unknown';
       if (status === 'succeeded') { succeededAttempts += 1; succeededMsat += total - fees; succeededFeesMsat += fees; }
       else if (status === 'in-flight') inFlightMsat += total - fees;
       // The sums are bounded too (audit 1.2.1): no payment moves more than an int64 of
@@ -428,7 +440,7 @@ function paymentLookup(call: ReturnType<typeof transport>['call'], read: ReturnT
     // Only these fields are read; the preimage and the payment request LND also returns are never kept.
     return {
       paymentHash: hash,
-      status: PAYMENT_STATUS[string(item.status, stage)] ?? 'unknown',
+      status: known(PAYMENT_STATUS, string(item.status, stage)) ?? 'unknown',
       createdAtNs, valueMsat, feeMsat,
       attempts: htlcs.length, succeededAttempts, succeededMsat, succeededFeesMsat, inFlightMsat,
       failureReason: reason === 'FAILURE_REASON_NONE' ? null : reason.slice('FAILURE_REASON_'.length).toLowerCase().replaceAll('_', '-'),
@@ -489,13 +501,15 @@ export type MiddlewareCall = {
   requestId: bigint;
   method: string;
   isError: boolean;
+  /** The call is a streaming RPC (RPCMessage.stream_rpc; always true for stream_auth). Absent means false. */
+  streamRpc?: boolean;
   customCaveatCondition: string;
   /**
    * The intercepted caller's macaroon; null when the call carried none. Read it while the
    * handler runs: it is copied on first read, and afterwards it is null.
    */
   readonly macaroon: Secret | null;
-  /** A macaroon above MAX_MACAROON_BYTES was presented; it was not copied. */
+  /** A macaroon above MAX_MACAROON_BYTES was presented; only a bounded prefix holding its header is passed on (middleware-proto.ts). */
   oversizedMacaroon?: boolean;
   /** Size of the macaroon bytes held by this call (0 without one), for memory accounting. */
   macaroonBytes?: number;
@@ -565,7 +579,7 @@ export function registerMiddleware(config: { host: string; port: number; tlsCert
     let rawPayload: Buffer | null = request.payload.length ? request.payload : null;
     let payload: Buffer | null = null;
     const call: MiddlewareCall = { kind: request.kind, requestId: request.requestId, method: request.method,
-      isError: request.isError, customCaveatCondition: request.customCaveatCondition,
+      isError: request.isError, streamRpc: request.streamRpc, customCaveatCondition: request.customCaveatCondition,
       get macaroon() { if (raw) { macaroon = new Secret(raw); raw = null; } return macaroon; },
       get payload() { if (rawPayload) { payload = Buffer.from(rawPayload); rawPayload = null; } return payload; },
       macaroonBytes: request.rawMacaroon.length, payloadBytes: request.payload.length,

@@ -59,7 +59,9 @@ it('WATCH/unread-exit close drops and counts queued lines and stops a writer tha
   stopped = true;
   queue.close();
   const before = attempts;
-  await new Promise(done => setTimeout(done, 50));
+  // The write in flight ends (its writer gives up because the queue is stopped): a positive
+  // signal, after which no attempt can be scheduled, instead of a fixed 50 ms window.
+  expect(await queue.settle(10_000)).toBe(true);
   // At most the one write already in flight completes; nothing retries afterwards.
   expect(attempts - before).toBeLessThanOrEqual(1);
   expect(queue.dropped()).toBeGreaterThanOrEqual(99);

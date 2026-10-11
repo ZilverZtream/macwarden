@@ -5,12 +5,15 @@
 // a regular empty file after) is removed; anything that existed before, or holds data, is kept.
 // Windows variant (scripts/platform-variants.mjs): the helper exists only there.
 import { EventEmitter } from 'node:events';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { expect, it, vi } from 'vitest';
 
-type Plan = { lines: string[]; create?: string };
+// exitOnVerify: the helper exits when asked to verify, without a VERIFIED reply (as when its timeout
+// kills it). hold: another process keeps a handle to the created file open.
+type Plan = { lines: string[]; create?: string; exitOnVerify?: boolean; hold?: boolean };
+const held: number[] = [];
 let plan: (path: string) => Plan = () => ({ lines: [] });
 
 vi.mock('node:child_process', async original => {
@@ -22,9 +25,11 @@ vi.mock('node:child_process', async original => {
     const steps = plan(options.env.MACWARDEN_PRIVATE_OUT);
     setTimeout(() => {
       if (steps.create !== undefined) writeFileSync(options.env.MACWARDEN_PRIVATE_OUT, steps.create);
+      if (steps.hold) held.push(openSync(options.env.MACWARDEN_PRIVATE_OUT, 'r'));
       let all = '';
       for (const line of steps.lines) { all += `${line}\n`; child.stdout.write(`${line}\n`); }
       const finish = () => setTimeout(() => callback(steps.lines.length ? null : new Error('timed out'), all), 5);
+      if (steps.exitOnVerify) child.stdin.once('data', finish);
       if (steps.lines.some(line => line.startsWith('CREATED '))) child.stdin.on('finish', finish); else finish();
     }, 5);
     return child;
@@ -67,4 +72,27 @@ it('a file that holds data is never removed', async () => {
   plan = () => ({ create: 'not ours', lines: [] });
   await expect(reserveOwnerOnly(path)).rejects.toBeInstanceOf(PrivateFileError);
   expect(readFileSync(path, 'utf8')).toBe('not ours');
+});
+
+const created = 'CREATED {"sid":"S-1-5-21-1-2-3-1001","noAcl":false}';
+
+// SAFE-06 (CP-023): a verification that cannot read the object fails closed and removes nothing,
+// even the empty file the helper created (a documented limitation).
+it('a helper that exits without verifying the file fails closed and leaves the file in place', async () => {
+  const path = join(dir(), 'out.macaroon');
+  plan = () => ({ create: '', lines: [created], exitOnVerify: true });
+  await expect(reserveOwnerOnly(path)).rejects.toMatchObject({ kind: 'share', message: expect.stringMatching(/opened or replaced by another process/) });
+  expect(existsSync(path), 'unverified file is not removed').toBe(true);
+});
+
+it('a file another process holds open is removed only while it is empty', async () => {
+  for (const [content, kept] of [['not ours', true], ['', false]] as const) {
+    const path = join(dir(), 'out.macaroon');
+    plan = () => ({ create: content, lines: [created], hold: true });
+    try {
+      await expect(reserveOwnerOnly(path)).rejects.toMatchObject({ kind: 'share' });
+      expect(existsSync(path), content ? 'file holding data' : 'empty file the helper created').toBe(kept);
+      if (kept) expect(readFileSync(path, 'utf8')).toBe(content);
+    } finally { for (const fd of held.splice(0)) closeSync(fd); }
+  }
 });

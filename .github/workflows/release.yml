@@ -5,11 +5,16 @@ on:
 permissions:
   contents: read
 jobs:
-  publish:
+  # Builds, tests and packs without an OIDC token: nothing in this job can mint
+  # a publishing credential, whatever the dependencies' scripts do.
+  verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: read
-      id-token: write
+    outputs:
+      tarball: ${{ steps.pack.outputs.tarball }}
+      sha256: ${{ steps.pack.outputs.sha256 }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
         with:
@@ -19,22 +24,72 @@ jobs:
           # Trusted publishing (OIDC) needs Node >= 22.14 and npm >= 11.5.1; the package needs
           # a July 2026 security release (engines in package.json).
           node-version: '22.23.2'
-          registry-url: https://registry.npmjs.org
+      # test/payment-lab-harness.test.ts replays against `git archive v1.2.0`; a depth-1
+      # checkout has no tags, so fetch that one tag alone.
+      - run: git fetch --no-tags --depth=1 origin tag v1.2.0
       - run: npm install --global npm@11.6.2
       - run: npm ci
-      # npm test builds first (pretest); npm publish rebuilds the published dist (prepack).
+      # npm test builds first (pretest); npm pack rebuilds the packed dist (prepack).
       - run: npm test
       - run: npm run test:harness
       - run: npm run lint
+      - name: Pack
+        id: pack
+        # The tag must match package.json before anything is packed.
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then echo "tag $GITHUB_REF_NAME does not match package.json version $version" >&2; exit 1; fi
+          tarball=$(npm pack --silent | tail -n 1)
+          test -f "$tarball"
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum "$tarball" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: package
+          path: ${{ steps.pack.outputs.tarball }}
+          if-no-files-found: error
+          retention-days: 7
+  # Publishes the tarball the verify job tested, from a commit on main, after the
+  # npm-publish environment's protection rules (required reviewers) pass. No
+  # dependency script runs while the OIDC token is available.
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '22.23.2'
+          registry-url: https://registry.npmjs.org
+      - run: npm install --global npm@11.6.2
+      - name: Tagged commit is on main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - run: npm ci --ignore-scripts
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: package
+          path: package
       - name: Publish
         env:
           # Fallback only: trusted publishing needs no token. If the package is not yet
           # configured as a trusted publisher on npm, set the NPM_TOKEN repository secret.
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          TARBALL: ${{ needs.verify.outputs.tarball }}
+          SHA256: ${{ needs.verify.outputs.sha256 }}
         # A prerelease version (one containing -, such as 1.0.0-rc.1) is published to the
-        # next dist-tag so it never becomes latest. The tag must match package.json.
+        # next dist-tag so it never becomes latest. The tag must match package.json, and the
+        # tarball must be the one the verify job packed.
         run: |
           version=$(node -p "require('./package.json').version")
           if [ "v$version" != "$GITHUB_REF_NAME" ]; then echo "tag $GITHUB_REF_NAME does not match package.json version $version" >&2; exit 1; fi
           case "$version" in *-*) tag=next ;; *) tag=latest ;; esac
-          npm publish --provenance --tag "$tag"
+          echo "$SHA256  package/$TARBALL" | sha256sum --check --strict -
+          npm publish --provenance --tag "$tag" --ignore-scripts "package/$TARBALL"

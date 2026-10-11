@@ -6,10 +6,12 @@ import { createPrivateDirectory } from '../../scripts/private-scratch.mjs';
 import { childEnvironment } from '../helpers/environment.js';
 
 it('CP-050/B3 fixed isolated fixture owners use distinct projects and loopback ports', () => {
-  const fixtures = ['1', '2', '3', '4'].map(shard => fixtureTopology({ MACWARDEN_FIXTURE_SHARD: shard }));
-  expect(new Set(fixtures.map(f => f.project)).size).toBe(4);
-  expect(new Set(fixtures.map(f => f.restPort)).size).toBe(4);
-  expect(new Set(fixtures.map(f => f.grpcPort)).size).toBe(4);
+  const fixtures = ['1', '2', '3', '4', '5', '6', '7', '8'].map(shard => fixtureTopology({ MACWARDEN_FIXTURE_SHARD: shard }));
+  expect(new Set(fixtures.map(f => f.project)).size).toBe(8);
+  expect(new Set(fixtures.map(f => f.restPort)).size).toBe(8);
+  expect(new Set(fixtures.map(f => f.grpcPort)).size).toBe(8);
+  // No owner's REST port is another owner's gRPC port, or the unsharded fixture's.
+  expect(new Set([...fixtures, fixtureTopology({})].flatMap(f => [f.restPort, f.grpcPort])).size).toBe(18);
   expect(fixtureTopology({}).restPort).toBe(18080);
   expect(fixtureTopology({}).grpcPort).toBe(18009);
   expect(fixtureTopology({}).composeArgs).not.toContain('-p');
@@ -45,7 +47,7 @@ it.each(['up', 'down'])('CP-050/B3 unavailable shard %s is INVALID and still tea
   await expect(fixture.up()).rejects.toMatchObject({ name: 'FixtureInvalidError' });
   expect(calls).toEqual(failure === 'up' ? ['down', 'up', 'down'] : ['down', 'down']);
 });
-it.each(['', '0', '5', '01', '-p injected', '../1', '1\n'])('CP-050/B3 invalid fixture identity %j is refused before Docker', value => {
+it.each(['', '0', '9', '01', '-p injected', '../1', '1\n'])('CP-050/B3 invalid fixture identity %j is refused before Docker', value => {
   expect(() => fixtureTopology({ MACWARDEN_FIXTURE_SHARD: value })).toThrow(/Fixture shard/);
 });
 it('CP-050/B3 fixture identity propagates to subprocesses', () => {

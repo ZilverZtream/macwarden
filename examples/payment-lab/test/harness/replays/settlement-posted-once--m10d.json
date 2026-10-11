@@ -1,0 +1,94 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "settlement-posted-once",
+  "rule": "Every settlement LND reports is posted exactly once (one ledger entry for the amount paid, however often it is delivered; the first settlement recorded wins over a later report of another amount); per payment hash only one invoice-settled (paid in full) or underpaid-settlement entry, and a double-payment entry exactly when an invoice-settled one has no fulfillment; settled is final; an order has at most one fulfillment, and is fulfilled iff it has one; at the end of a case every invoice LND holds SETTLED is recorded settled with exactly one settlement entry, whatever it was paid (unless an explicit cursor-set skipped it, or the subscription cursor never left 0, where LND replays nothing).",
+  "message": "order o1 is awaiting-payment with 1 fulfillment(s)",
+  "seed": 1,
+  "case": 1,
+  "config": {
+    "scale": "small",
+    "budget": true,
+    "limit": "10000"
+  },
+  "failingStep": 3,
+  "originalSteps": 30,
+  "events": [
+    {
+      "t": "create",
+      "p": "p1",
+      "order": 1,
+      "hold": false
+    },
+    {
+      "t": "answer",
+      "kind": "create",
+      "pick": 0.25,
+      "mode": "ok"
+    },
+    {
+      "t": "invoice",
+      "what": "pay",
+      "pick": 0.5,
+      "amount": "exact"
+    }
+  ],
+  "states": {
+    "after": {
+      "invoices": {
+        "o1#1": {
+          "order": "o1",
+          "state": "settled",
+          "amount": "6000",
+          "amtPaid": "6000"
+        }
+      },
+      "orders": {
+        "o1": "awaiting-payment"
+      },
+      "fulfillments": [
+        {
+          "hash": "o1#1",
+          "order": "o1"
+        }
+      ],
+      "ledger": [
+        {
+          "hash": "o1#1",
+          "order": "o1",
+          "amount": "6000"
+        }
+      ],
+      "cursor": {
+        "settle": "0",
+        "add": "0"
+      },
+      "entries": [
+        {
+          "id": "1",
+          "event": "invoice-settled",
+          "hash": "o1#1",
+          "op": "o1",
+          "amount": "6000"
+        }
+      ],
+      "outbox": [
+        {
+          "id": "1",
+          "kind": "fulfill-order",
+          "key": "o1:1ad822e0c8ec407198bd5f6ded0bd0eb2126d2e5cb98d429f35d7efabc474f81",
+          "subject": "o1",
+          "payload": {
+            "orderId": "o1",
+            "paymentHash": "o1#1",
+            "amountMsat": "6000",
+            "settleIndex": "1",
+            "ledgerEntryId": 1
+          },
+          "state": "pending"
+        }
+      ]
+    }
+  },
+  "mutant": "settlement-posted-once--m10d.cjs"
+}

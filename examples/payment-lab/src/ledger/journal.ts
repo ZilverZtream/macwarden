@@ -26,6 +26,13 @@ import { EVENTS, isAccount, type LedgerEvent } from './accounts.ts';
  * A live entry's posted_at never goes back: `post` takes the later of the clock and the last live
  * entry's posted_at (as the usage file does), so a wall clock stepped back (NTP) posts at the
  * previous time rather than before it, and an entry earlier than its predecessor is corruption.
+ * The clamp is bounded by MAX_CLOCK_STEP_MS: a last entry further ahead of the clock than that
+ * (a clock stepped forward once, or an entry moved forward) is not followed; the entry is posted
+ * at the clock, and `ledger verify` names the one ahead.
+ *
+ * - journal_migration  one row: the highest entry ID the 1.3 ledger migration posted (0 when it
+ *                      converted nothing). Entries at or below it are `migrated`, above it `live`;
+ *                      `ledger verify` checks the origin against it.
  */
 
 const EVENT_LIST = EVENTS.map(event => `'${event}'`).join(', ');
@@ -69,7 +76,23 @@ CREATE TABLE IF NOT EXISTS balances (
   last_entry_id INTEGER NOT NULL CHECK (typeof(last_entry_id) = 'integer'),
   updated_at TEXT NOT NULL CHECK (typeof(updated_at) = 'text')
 );
+CREATE TABLE IF NOT EXISTS journal_migration (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  migrated_through INTEGER NOT NULL CHECK (typeof(migrated_through) = 'integer' AND migrated_through >= 0),
+  recorded_at TEXT NOT NULL CHECK (typeof(recorded_at) = 'text')
+);
 `;
+
+/**
+ * How far a live entry's time may be held at the last live entry's when the clock is behind it: a
+ * day. An NTP step back stays well inside it; a last entry further ahead than this is not a clock
+ * step but a clock that ran ahead once (or an entry moved forward), and later entries are not
+ * pinned to it. `ledger verify` uses the same bound for a live entry ahead of its own clock.
+ */
+export const MAX_CLOCK_STEP_MS = 24 * 60 * 60 * 1000;
+
+/** The largest entry ID a JavaScript number holds exactly (outbox payloads and reports carry IDs as numbers). */
+export const MAX_SAFE_ENTRY_ID = BigInt(Number.MAX_SAFE_INTEGER);
 
 export type Direction = 'debit' | 'credit';
 /** The legacy view's name for a line (what the 1.2 ledger_entries rows called it), if it has one. */
@@ -98,13 +121,15 @@ export const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$/;
 
 /**
  * A live entry's time: the later of `at` and the last live entry's posted_at (when that one is
- * readable), so live times never decrease whatever the wall clock does.
+ * readable and at most MAX_CLOCK_STEP_MS ahead of `at`), so live times never decrease when the wall
+ * clock steps back, and one entry far ahead does not pin every later one.
  */
 function liveTime(db: DatabaseSync, at: string): string {
   const last = db.prepare(`SELECT posted_at FROM journal_entries WHERE origin = 'live' ORDER BY entry_id DESC LIMIT 1`).get();
   const previous = last?.posted_at;
   if (typeof previous !== 'string' || !ISO_TIME.test(previous) || !ISO_TIME.test(at)) return at;
-  return Date.parse(previous) > Date.parse(at) ? previous : at;
+  const ahead = Date.parse(previous) - Date.parse(at);
+  return ahead > 0 && ahead <= MAX_CLOCK_STEP_MS ? previous : at;
 }
 
 /** A signed decimal balance as stored; anything else is a damaged row. */
@@ -144,7 +169,12 @@ export function post(db: DatabaseSync, posting: Posting): number | undefined {
     VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (event, reference) DO NOTHING`)
     .run(posting.event, posting.reference, posting.operationId ?? null, posting.paymentHash ?? null, origin, now);
   if (Number(inserted.changes) !== 1) return undefined;
-  const entryId = Number(inserted.lastInsertRowid);
+  const rowid = BigInt(inserted.lastInsertRowid);
+  // The ID goes into outbox payloads and reports as a number: one it can not hold exactly is refused (the caller rolls back).
+  if (rowid > MAX_SAFE_ENTRY_ID || rowid < -MAX_SAFE_ENTRY_ID) {
+    throw new Error(`${posting.event} ${posting.reference}: the journal assigned entry ID ${rowid}, outside ±(2^53 - 1); the journal's IDs were changed`);
+  }
+  const entryId = Number(rowid);
   const running = new Map<string, bigint>();
   const balanceOf = (account: string): bigint => {
     const known = running.get(account);
@@ -188,7 +218,16 @@ export interface JournalEntry {
 /** The entries of one operation (payer) or order (receiver), with their lines, in posting order. */
 export function entriesFor(db: DatabaseSync, operationId: string): JournalEntry[] {
   const entries = db.prepare('SELECT * FROM journal_entries WHERE operation_id = ? ORDER BY entry_id').all(operationId);
-  const lines = db.prepare('SELECT * FROM journal_lines WHERE entry_id = ? ORDER BY line_no');
+  // Every line of those entries in one query (one per entry took seconds at 50,000 entries), grouped by entry.
+  const lines = new Map<number, JournalLine[]>();
+  for (const item of db.prepare(`SELECT l.* FROM journal_lines l JOIN journal_entries e ON e.entry_id = l.entry_id
+      WHERE e.operation_id = ? ORDER BY l.entry_id, l.line_no`).all(operationId)) {
+    const entryId = Number(int(item, 'entry_id'));
+    let list = lines.get(entryId);
+    if (list === undefined) lines.set(entryId, list = []);
+    list.push({ lineNo: Number(int(item, 'line_no')), account: text(item, 'account'), direction: text(item, 'direction') as Direction,
+      amountMsat: int(item, 'amount_msat'), leg: optionalText(item, 'leg') as Leg | undefined });
+  }
   return entries.map(row => ({
     entryId: Number(int(row, 'entry_id')),
     event: text(row, 'event') as LedgerEvent,
@@ -197,8 +236,7 @@ export function entriesFor(db: DatabaseSync, operationId: string): JournalEntry[
     paymentHash: optionalText(row, 'payment_hash'),
     origin: text(row, 'origin') as JournalEntry['origin'],
     postedAt: text(row, 'posted_at'),
-    lines: lines.all(int(row, 'entry_id')).map(item => ({ lineNo: Number(int(item, 'line_no')), account: text(item, 'account'),
-      direction: text(item, 'direction') as Direction, amountMsat: int(item, 'amount_msat'), leg: optionalText(item, 'leg') as Leg | undefined })),
+    lines: lines.get(Number(int(row, 'entry_id'))) ?? [],
   }));
 }
 

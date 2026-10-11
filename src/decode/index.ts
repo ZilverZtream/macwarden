@@ -3,6 +3,7 @@ import { createECDH, createHash, createHmac } from 'node:crypto';
 import { Secret } from '../secret.js';
 import { DecodeError, UsageError, type DecodeStage, type NwcStage } from '../errors.js';
 import { decodeRuneText, RUNE_ALPHABET, RUNE_SHORTEST_TEXT, RUNE_TEXT_LIMIT, type RuneFacts } from './rune.js';
+import { gradeFacts, type Grade } from '../grade/index.js';
 
 export { DecodeError } from '../errors.js';
 export type { DecodeStage } from '../errors.js';
@@ -32,10 +33,16 @@ function fail(stage: DecodeStage): never {
   throw new DecodeError(stage);
 }
 
+/** Thrown when an identifier check runs out of its parse budget; see validMacaroonIdentifier. */
+const meterExhausted = Symbol('identifier parse budget exhausted');
+/** The budget of the identifier check in progress, when its caller gave one (synchronous, never nested). */
+let identifierMeter: { remaining: number } | null = null;
+
 function varint(data: Buffer, start: number, end: number, stage: DecodeStage): [bigint, number] {
   let value = 0n;
   for (let i = 0; i < 10; i++) {
     const offset = start + i;
+    if (identifierMeter !== null && --identifierMeter.remaining < 0) throw meterExhausted;
     if (offset >= end) return fail(stage);
     const byte = data[offset];
     if (i === 9 && byte > 1) return fail(stage);
@@ -192,6 +199,7 @@ function protobuf(data: Buffer, visit: (field: number, wire: number, value: Buff
 
 /** A proto3 string field: LND refuses the whole identifier when one is not valid UTF-8. */
 function checkedString(value: Buffer): void {
+  if (identifierMeter !== null && (identifierMeter.remaining -= value.length) < 0) throw meterExhausted;
   try { utf8.decode(value); } catch { fail('identifier-proto'); }
 }
 
@@ -409,13 +417,44 @@ export function macaroonId(mac: Secret): { rootKeyId: bigint; id: string } {
   // macaroon padded with 1,900 caveats cost 25 times a plain one per call and exhaust the
   // attribution budget at 450 calls per second.
   const data = revealSecret(mac);
-  if (data[0] !== 2) {
-    if (data.subarray(0, 3).toString('ascii') === '001') throw new DecodeError('v2-header', 'macaroon v1 format is not supported');
-    return fail('v2-header');
+  let id: Buffer;
+  if (data[0] === 2) id = section(data, 1, true)[0].identifier;
+  else if (v1HexDigit(data[0]) >= 0) id = v1Identifier(data);
+  else return fail('v2-header');
+  const { rootKeyId } = identifier(id);
+  return { rootKeyId, id: `id:${createHash('sha256').update(id).digest('hex').slice(0, 16)}` };
+}
+
+// go-macaroon's UnmarshalBinary (v2.0.0, LND v0.21.4) also reads the v1 binary format when the
+// first byte is a lowercase hex digit: packets of a 4-digit lowercase hex length (covering the
+// whole packet), a field name, a space, the value and a newline; "location" then "identifier"
+// first (packet-v1.go parsePacketV1, marshal-v1.go parseBinaryV1). The identifier and signature
+// are the same as in the v2 form, so a holder can re-encode a credential as v1 and LND accepts
+// it: the identity is read from either form. Header only, as for v2.
+function v1HexDigit(byte: number | undefined): number {
+  if (byte === undefined) return -1;
+  if (byte >= 0x30 && byte <= 0x39) return byte - 0x30;
+  return byte >= 0x61 && byte <= 0x66 ? byte - 0x61 + 10 : -1;
+}
+
+function v1Packet(data: Buffer, start: number, field: string): [Buffer, number] {
+  if (data.length - start < 6) return fail('packet');
+  let size = 0;
+  for (let i = 0; i < 4; i++) {
+    const digit = v1HexDigit(data[start + i]);
+    if (digit < 0) return fail('packet');
+    size = size * 16 + digit;
   }
-  const [header] = section(data, 1, true);
-  const { rootKeyId } = identifier(header.identifier);
-  return { rootKeyId, id: `id:${createHash('sha256').update(header.identifier).digest('hex').slice(0, 16)}` };
+  if (size > data.length - start || size < 4) return fail('packet');
+  const body = data.subarray(start + 4, start + size);
+  const space = body.indexOf(0x20);
+  if (space <= 0 || body[body.length - 1] !== 0x0a || body.subarray(0, space).toString('latin1') !== field) return fail('packet');
+  return [body.subarray(space + 1, body.length - 1), start + size];
+}
+
+function v1Identifier(data: Buffer): Buffer {
+  const [, afterLocation] = v1Packet(data, 0, 'location');
+  return v1Packet(data, afterLocation, 'identifier')[0];
 }
 
 function encodeVarint(value: number): Buffer {
@@ -471,8 +510,18 @@ export function timeBeforeCondition(expires: string, clock: () => Date): string 
   return `time-before ${instant.toISOString().replace(/\.\d{3}Z$/, 'Z')}`;
 }
 
-export function validMacaroonIdentifier(data: Buffer): boolean {
-  try { identifier(data); return true; } catch { return false; }
+/**
+ * Whether LND would accept the identifier. With `meter`, every byte the protobuf parser reads
+ * (each varint byte and each string it checks) is charged to `meter.remaining`; a check that
+ * runs out returns true without finishing, so recognition, the only caller with a meter, treats
+ * the candidate as a credential and redacts more, never less (audit 1.4.0).
+ */
+export function validMacaroonIdentifier(data: Buffer, meter?: { remaining: number }): boolean {
+  if (meter !== undefined && meter.remaining <= 0) return true;
+  identifierMeter = meter ?? null;
+  try { identifier(data); return true; }
+  catch (error) { return error === meterExhausted; }
+  finally { identifierMeter = null; }
 }
 
 // NIP-47 Nostr Wallet Connect URIs. The URI is held verbatim in a Secret
@@ -652,8 +701,13 @@ export type L402Facts = {
   preimageSource: 'credential' | 'caveat' | null;
   warnings: string[];
 };
-/** An L402 form that carries an LND macaroon instead: it is inspected as that macaroon. */
-export type L402Decoded = { l402: L402Facts } | { lnd: Secret };
+/**
+ * An L402 form that carries an LND macaroon instead: it is inspected as that macaroon. `index`
+ * is that macaroon's position among the ones the form carries.
+ */
+export type L402Decoded = { l402: L402Facts } | { lnd: Secret; index: number };
+/** Which LND macaroon an L402 form with several reports: the first rank wins. */
+const LND_GRADE_RANK: readonly Grade[] = ['ADMIN', 'UNASSESSED', 'SPEND', 'OPERATE', 'RECEIVE', 'READ'];
 
 function l402Fail(stage: 'l402-form' | 'l402-preimage', message?: string): never {
   throw new DecodeError(stage, message ?? `invalid L402 credential ${stage}`);
@@ -766,15 +820,25 @@ function parsedL402(mac: Secret): ParsedL402Macaroon {
  * The facts of an L402 credential: one or more macaroons (in order) and the preimage presented
  * with them. Throws DecodeError for a macaroon that does not parse. `presented` is the
  * separately presented preimage (Authorization value, pair or token file), null when there is
- * none. With several macaroons, the primary one is the first with an L402 identifier (else the
- * first); its facts are reported and the preimage is checked against its payment hash.
+ * none. A form carrying an LND macaroon is that LND macaroon. Otherwise, with several
+ * macaroons, the primary one is the first with an L402 identifier (else the first); its facts
+ * are reported and the preimage is checked against its payment hash.
  */
 export function decodeL402Macaroons(macs: Secret[], presented: Secret | null, form: L402Form,
   scheme: 'L402' | 'LSAT' | null = null): L402Decoded {
   if (macs.length === 0 || macs.length > L402_MAX_MACAROONS) return l402Fail('l402-form');
   const parsed = macs.map(parsedL402);
-  // A credential that carries exactly one LND macaroon carries that LND macaroon.
-  if (parsed.length === 1 && validMacaroonIdentifier(parsed[0].header.identifier)) return { lnd: new Secret(parsed[0].data) };
+  // A credential that carries an LND macaroon carries that LND macaroon, wherever it stands
+  // among the others: LND honours it, so it is never reported as an L402 token (audit 1.4.0).
+  // With several, the one with the highest grade is reported (ADMIN first, then UNASSESSED,
+  // which fails closed, then SPEND to READ), the first of equals.
+  let lnd: { index: number; rank: number } | null = null;
+  for (const [index, item] of parsed.entries()) {
+    if (!validMacaroonIdentifier(item.header.identifier)) continue;
+    const rank = parsed.length === 1 ? 0 : LND_GRADE_RANK.indexOf(gradeFacts(decodeMacaroon(new Secret(item.data))).grade);
+    if (lnd === null || rank < lnd.rank) lnd = { index, rank };
+  }
+  if (lnd !== null) return { lnd: new Secret(parsed[lnd.index].data), index: lnd.index };
   const primary = parsed.find(item => isL402Identifier(item.header.identifier)) ?? parsed[0];
   const warnings: string[] = [];
   if (parsed.length > 1) warnings.push('l402-several-macaroons');
@@ -790,10 +854,11 @@ export function decodeL402Macaroons(macs: Secret[], presented: Secret | null, fo
   const presentedBytes = presented === null ? null : revealSecret(presented);
   let preimage: Buffer | null = presentedBytes;
   let preimageSource: L402Facts['preimageSource'] = presentedBytes === null ? null : 'credential';
+  // Aperture's HasCaveat decodes every caveat ID, a third-party caveat's included; such a caveat
+  // can carry the preimage in its ID and is withheld below like any other that holds it.
   if (preimage === null) {
     let last: string | undefined;
     for (const value of primary.caveats) {
-      if (value.vid !== null && value.vid.length > 0) continue;
       const text = value.identifier.toString('utf8');
       if (text.startsWith('preimage=')) last = text.slice('preimage='.length);
     }
@@ -807,9 +872,12 @@ export function decodeL402Macaroons(macs: Secret[], presented: Secret | null, fo
     // Nothing reported may carry the preimage: such a caveat or location is withheld.
     const secret = preimage;
     let withheld = false;
-    caveats = caveats.map(caveat => {
+    caveats = caveats.map((caveat, index) => {
       if (caveat.type === 'preimage') return caveat;
-      if (![caveat.condition, caveat.value].some(text => text !== null && containsSecret(text, secret))) return caveat;
+      // A third-party caveat reports its location only; its ID is checked too.
+      const texts = caveat.type === 'third-party' ? [caveat.value, primary.caveats[index].identifier.toString('utf8')]
+        : [caveat.condition, caveat.value];
+      if (!texts.some(text => text !== null && containsSecret(text, secret))) return caveat;
       withheld = true;
       return { type: 'withheld', condition: null, value: null };
     });
@@ -873,7 +941,8 @@ function decodeL402Text(text: string): L402Decoded {
 export function decodeL402(secret: Secret): L402Decoded {
   const bytes = revealSecret(secret);
   const text = l402Text(bytes);
-  if (text !== null) return decodeL402Text(text);
+  // Every L402 form is ASCII (audit 1.4.0): text narrowed from wider characters is refused.
+  if (text !== null) return /[\u0080-\uffff]/.test(text) ? l402Fail('l402-form') : decodeL402Text(text);
   if (bytes.length > 0 && bytes[0] === 0) {
     const layout = tokenFileLayout(bytes);
     // Neither a macaroon (first byte 2) nor a token store file.

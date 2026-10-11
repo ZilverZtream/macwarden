@@ -2,6 +2,7 @@ import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
 import globals from 'globals';
 import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // Credential access is an import capability. Secret instances expose no bytes.
 const capabilityBoundary = {
@@ -138,13 +139,20 @@ const capabilityBoundary = {
       ExportDefaultDeclaration(node) { if (capabilityAlias(node.declaration)) report(node); },
       ExportAllDeclaration: source,
       ImportExpression: report,
+      // Ambient declarations emit nothing yet bind any runtime name for the
+      // type checker; production sources declare nothing they do not define.
+      'VariableDeclaration[declare=true], TSDeclareFunction[declare=true], ClassDeclaration[declare=true], TSModuleDeclaration, TSEnumDeclaration[declare=true]': report,
+      TSImportEqualsDeclaration(node) { if (node.moduleReference.type === 'TSExternalModuleReference') report(node); },
       CallExpression(node) {
         const callee = node.callee;
         if (callee.type === 'MemberExpression' && callee.object.type === 'Identifier'
           && callee.object.name === 'Object' && propertyName(callee) === 'getOwnPropertyDescriptor'
           && ['constructor', '__proto__'].includes(constantKey(node.arguments[1]))) report(node);
       },
+      // The build runs each module inside a loader whose bindings these names
+      // would reach (scripts/build.mjs); a declaration does not make them local.
       Identifier(node) {
+        if (['require', 'module', 'exports'].includes(node.name)) { report(node); return; }
         if (['process', 'globalThis', 'global', 'navigator'].includes(node.name)) {
           const reference = context.sourceCode.getScope(node).references.find(item => item.identifier === node);
           if (reference?.isRead() && !reference.resolved?.defs.length
@@ -181,5 +189,15 @@ export default [
     files: ['src/**/*.ts'],
     plugins: { macwarden: { rules: { 'capability-boundary': capabilityBoundary } } },
     rules: { 'macwarden/capability-boundary': 'error', 'no-eval': 'error', 'no-new-func': 'error' },
+  },
+  // The three credential consumers are linted with type information: nothing they throw may
+  // carry a raw value out (scripts/build.mjs applies the matching type rules at build time).
+  {
+    files: ['src/decode/index.ts', 'src/lnd/index.ts', 'src/commands/bake/write-out.ts'],
+    languageOptions: { parserOptions: { projectService: true, tsconfigRootDir: dirname(fileURLToPath(import.meta.url)) } },
+    rules: {
+      '@typescript-eslint/only-throw-error': ['error', { allowThrowingUnknown: true, allowThrowingAny: false, allow: [{ from: 'file', name: 'meterExhausted', path: 'src/decode/index.ts' }] }],
+      '@typescript-eslint/no-explicit-any': 'error',
+    },
   },
 ];

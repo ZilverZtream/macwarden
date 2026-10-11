@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { lstat, mkdtemp, realpath, rm } from 'node:fs/promises';
+import { lstat, mkdtemp, readdir, realpath, rm } from 'node:fs/promises';
 import { join, resolve, win32 } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -63,13 +63,26 @@ async function windowsIdentityAndAcl(directory, restrict = false) {
   }
 }
 
-async function realDirectory(directory) {
-  const path = resolve(directory);
-  const info = await lstat(path);
-  const canonical = await realpath(path);
-  if (!info.isDirectory() || info.isSymbolicLink() ||
-      (process.platform === 'win32' ? canonical.toLowerCase() !== path.toLowerCase() : canonical !== path)) {
-    throw new Error('scratch root must be a real directory');
+/** A directory reached through no symbolic link or junction in any component of its path. On
+ * Windows the canonical path can differ from the given one without a link: an 8.3 short name
+ * (TEMP is often C:\Users\FIRSTN~1\...) is expanded by realpath. There, every component is
+ * checked with lstat instead (Node reports junctions as symbolic links).
+ * @param {string} directory
+ * @param {{ lstat?: typeof lstat, realpath?: typeof realpath, platform?: NodeJS.Platform }} [io]
+ */
+export async function realDirectory(directory, io = {}) {
+  const look = io.lstat ?? lstat, canonicalise = io.realpath ?? realpath;
+  const windows = (io.platform ?? process.platform) === 'win32';
+  const path = windows ? win32.resolve(directory) : resolve(directory);
+  const info = await look(path);
+  const canonical = await canonicalise(path);
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('scratch root must be a real directory');
+  if (windows ? canonical.toLowerCase() !== path.toLowerCase() : canonical !== path) {
+    if (!windows) throw new Error('scratch root must be a real directory');
+    for (let component = win32.dirname(path), previous = path; component !== previous;
+      previous = component, component = win32.dirname(component)) {
+      if ((await look(component)).isSymbolicLink()) throw new Error('scratch root must be a real directory');
+    }
   }
   return info;
 }
@@ -164,6 +177,9 @@ export async function createPrivateDirectory(parent, prefix) {
       await windowsIdentityAndAcl(directory, true);
       await realDirectory(directory);
     } else await assertPrivateDirectory(directory);
+    // On Windows the new directory inherits its parent's permissions until the ACL is replaced:
+    // anything created in it during that window was not made by this caller, so it is refused.
+    if ((await readdir(directory)).length !== 0) throw new Error('scratch root was not empty after it was restricted');
     return directory;
   } catch (error) {
     await rm(directory, { recursive: true, force: true });

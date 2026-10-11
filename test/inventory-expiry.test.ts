@@ -15,7 +15,7 @@ const cert = resolve('test/fixture/wrong-tls.cert');
 const own = resolve('test/vectors/default-readonly.macaroon');
 const before = (instant: string) => ({ type: 'time-before', value: instant });
 
-function entry(rootKeyId: string, label: string, caveats: { type: string; value: string }[], status: 'active' | 'revoked' = 'active') {
+function entry(rootKeyId: string, label: string, caveats: { type: string; value: string; requested?: string }[], status: 'active' | 'revoked' = 'active') {
   return { nodePubkey: pubkey, label, rootKeyId, permissions: ['info:read'], caveats, grade: 'READ',
     fingerprint: `fp:${rootKeyId.padStart(16, '0')}`, outPath: null, createdAt: '2026-09-01T00:00:00Z', verified: true,
     status, revokedAt: status === 'revoked' ? '2026-09-02T00:00:00Z' : null, revokeEvidence: status === 'revoked' ? 'by-id-only' : null,
@@ -24,7 +24,8 @@ function entry(rootKeyId: string, label: string, caveats: { type: string; value:
 
 const entries = [
   entry('10', 'Expired', [before('2026-10-01T00:00:00Z')]),
-  entry('11', 'Soon', [before('2026-10-06T12:00:00Z')]),
+  // Its expiry carries the duration it was baked with, so rotate can reproduce it (S5/S11, 1.3.1).
+  entry('11', 'Soon', [{ ...before('2026-10-06T12:00:00Z'), requested: '30d' }]),
   entry('12', 'Later', [before('2026-12-01T00:00:00Z')]),
   // LND enforces every caveat, so the earlier of two expiries is the effective one.
   entry('13', 'TwoCaveats', [before('2027-01-01T00:00:00Z'), before('2026-10-05T00:00:00Z')]),
@@ -88,6 +89,8 @@ it('UX/inventory-expiry text output has an EXPIRES column and an actionable hint
   expect(text).toMatch(/^10 +Expired +READ +33d +2026-10-01 +active; expired; revoke with: macwarden revoke Expired$/m);
   // SPEC 3 changed in 1.1.1 (RL-05): rotate requires --out, so the advice carries a default.
   expect(text).toMatch(/^11 +Soon +READ +33d +2026-10-06 +active; expires in 2d; rotate with: macwarden rotate Soon --out Soon-2026-10-04\.macaroon$/m);
+  // An expiry without a recorded duration is one rotate S5 refuses to drop: no rotate advice (1.3.1).
+  expect(text).toMatch(/^13 +TwoCaveats +READ +33d +2026-10-05 +active; expires in 1d$/m);
   expect(text).toMatch(/^14 +NoExpiry +READ +33d +— +active$/m);
 });
 
@@ -117,8 +120,16 @@ it('UX/inventory-expiry scan text marks a finding whose time-before is past, lik
   const run = spawnSync(process.execPath, [resolve('dist/bin.js'), 'scan', resolve('test/vectors/time-before.macaroon')],
     { env: childEnvironment(), encoding: 'utf8', timeout: 30_000, windowsHide: true });
   const line = run.stdout.split('\n')[0];
-  if (Date.now() >= instant) expect(line).toMatch(/ root key 0 \(expired\)$/);
-  else expect(line).not.toContain('(expired)');
+  // The vector's caveat passed on 2026-10-02, so the real clock is always past it here; the
+  // not-yet-expired branch is checked below with an injected clock (audit 1.4.0: it never ran).
+  expect(Date.now()).toBeGreaterThanOrEqual(instant);
+  expect(line).toMatch(/ root key 0 \(expired\)$/);
+  const { scan } = await import('../src/scan/index.js');
+  const textAt = async (at: number) => render({ command: 'scan', ok: true, warnings: [], error: null,
+    result: await scan([resolve('test/vectors/time-before.macaroon')], { clock: () => new Date(at) }) } as OutputResult, 'text')
+    .split('\n')[0];
+  expect(await textAt(instant - 1)).toMatch(/ root key 0$/);
+  expect(await textAt(instant + 1)).toMatch(/ root key 0 \(expired\)$/);
   const fresh = spawnSync(process.execPath, [resolve('dist/bin.js'), 'scan', resolve('test/vectors/default-readonly.macaroon')],
     { env: childEnvironment(), encoding: 'utf8', timeout: 30_000, windowsHide: true });
   expect(fresh.stdout).not.toContain('(expired)');

@@ -47,7 +47,7 @@ The external sources macwarden's documentation and design rely on, with their st
 
 - LND and macaroon source files checked for [architecture.md](architecture.md): [lnrpc/lightning.yaml](https://github.com/lightningnetwork/lnd/blob/master/lnrpc/lightning.yaml), [lnrpc/lightning.proto](https://github.com/lightningnetwork/lnd/blob/master/lnrpc/lightning.proto), [rpcserver.go](https://github.com/lightningnetwork/lnd/blob/master/rpcserver.go), [macaroons/constraints.go](https://github.com/lightningnetwork/lnd/blob/master/macaroons/constraints.go), [cmd_macaroon.go](https://github.com/lightningnetwork/lnd/blob/master/cmd/commands/cmd_macaroon.go), [go-macaroon v2](https://github.com/go-macaroon/macaroon/blob/v2/marshal-v2.go), [lndconnect spec](https://github.com/LN-Zap/lndconnect/blob/master/lnd_connect_uri.md). *Verified 2026-10-02.*
 
-LND behaviour not yet confirmed against a running node is listed in [architecture.md](architecture.md#assumptions-to-confirm) under "Assumptions to confirm" (1–12).
+LND behaviour not yet confirmed against a running node is listed in [architecture.md](architecture.md#assumptions-to-confirm) under "Assumptions to confirm" (1–13).
 
 ## Release and tooling
 

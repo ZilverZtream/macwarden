@@ -29,11 +29,12 @@ it('CLI/interrupt-exit scan --agent-configs stalled on a hung mount exits 6 prom
       proc.on('message', (message: { kind?: string }) => { if (message?.kind === 'stalled') done(); });
       exited.then(code => fail(new Error(`child exited ${code} before stalling`)));
     });
-    const signalled = Date.now();
     proc.send({ kind: 'signal', signal: 'SIGINT' });
-    const code = await Promise.race([exited, new Promise<'alive'>(done => setTimeout(() => done('alive'), 2_000))]);
-    expect(code, 'process still alive 2 s after the interrupt result').toBe(6);
-    expect(Date.now() - signalled).toBeLessThan(2_000);
+    // The stalled lstat would keep the process alive for 120 s (test/support/stalled-lstat-child.mjs):
+    // exiting at all well before then is the signal. 30 s separates the outcomes without measuring
+    // the runner (the old 2 s bound did, on a loaded machine).
+    const code = await Promise.race([exited, new Promise<'alive'>(done => setTimeout(() => done('alive'), 30_000))]);
+    expect(code, 'process still alive 30 s after the interrupt (its stalled call holds it 120 s)').toBe(6);
     expect(JSON.parse(stdout)).toMatchObject({ command: 'scan', ok: false, error: { code: 6, step: 'cancelled' } });
   } finally { if (proc.exitCode === null) proc.kill(); }
-});
+}, 60_000);

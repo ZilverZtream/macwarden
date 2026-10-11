@@ -353,6 +353,9 @@
                   "value"
                 ]
               }
+            },
+            "canary": {
+              "const": true
             }
           }
         },

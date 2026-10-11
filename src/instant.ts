@@ -22,3 +22,29 @@ export function isInstant(value: unknown): value is string {
   return month >= 1 && month <= 12 && day >= 1 && day <= daysIn(year, month)
     && hour <= 23 && minute <= 59 && second <= 59 && Number.isFinite(Date.parse(value));
 }
+
+/**
+ * The later of two instants, compared as instants: as text, `…:00Z` sorts after the later
+ * `…:00.900Z`. Keeps `a` on a tie; a value Date.parse cannot read never wins over one it can.
+ */
+export function laterInstant(a: string, b: string): string {
+  const left = Date.parse(a), right = Date.parse(b);
+  if (Number.isNaN(right)) return a;
+  if (Number.isNaN(left)) return b;
+  return right > left ? b : a;
+}
+
+/** Unix nanoseconds of 0000-01-01T00:00:00Z and of 10000-01-01T00:00:00Z: RFC 3339 has four-digit years only. */
+const FIRST_NS = -62_167_219_200n * 1_000_000_000n;
+const END_NS = 253_402_300_800n * 1_000_000_000n;
+
+/**
+ * An instant given in Unix nanoseconds as `YYYY-MM-DDThh:mm:ssZ` (the fraction dropped), or
+ * null when it lies outside the years 0000 to 9999 that RFC 3339 can write.
+ */
+export function secondsInstant(nanoseconds: bigint): string | null {
+  if (nanoseconds < FIRST_NS || nanoseconds >= END_NS) return null;
+  const remainder = nanoseconds % 1_000_000_000n;
+  const seconds = nanoseconds / 1_000_000_000n - (remainder < 0n ? 1n : 0n);
+  return new Date(Number(seconds) * 1_000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+}

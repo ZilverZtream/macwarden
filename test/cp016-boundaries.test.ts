@@ -63,7 +63,10 @@ it('CP-016/B17 build type-checks ordinary test and nested helper errors and acce
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
         const path = join(dir, entry.name);
         if (entry.isDirectory()) {
-          if (resolve(path) !== resolve(testTmp)) copyCodeSources(path);
+          // test/.tmp is git-ignored runner scratch that the build never type-checks (wildcards
+          // skip dot directories); oracle runs beside full validation's unit phase create and
+          // remove directories there while this walk is in progress.
+          if (resolve(path) !== resolve(testTmp) && resolve(path) !== resolve(repo, 'test/.tmp')) copyCodeSources(path);
         } else if (entry.isFile() && /\.(?:ts|tsx|mts|cts|js|mjs|cjs)$/.test(entry.name)) {
           const destination = join(source, path.slice(repo.length + 1));
           mkdirSync(dirname(destination), { recursive: true });

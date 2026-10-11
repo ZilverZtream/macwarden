@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, it } from 'vitest';
 import { captureMain } from './support/capture.js';
+import { compare, LINEAR_4X } from './helpers/growth.js';
 
 // MW102-06: the repository-location preflight walks include and alternates graphs that the
 // scanned repository controls. Its own work must scale with the distinct files and edges,
@@ -51,7 +52,6 @@ it('git-history/preflight a shared include graph is read once per distinct file 
     sharedIncludeGraph(dir);
     const { locateRepository } = await import('../src/scan/git-history.js');
     const stats: Record<string, number> = {};
-    const started = performance.now();
     await locateRepository(dir, { limits: unlimited, stats });
     // .git/config (1 edge) + c0..c6 (8 edges each) = 57 distinct edges; commondir, alternates,
     // config.worktree (absent), .git/config and c0..c7 are each looked at once.
@@ -59,9 +59,15 @@ it('git-history/preflight a shared include graph is read once per distinct file 
     expect(stats.files).toBe(12);
     // What git would traverse: 1 + E(c0) with E(c7) = 0 and E(k) = 8 * (1 + E(k + 1)).
     expect(stats.expandedEdges).toBe(2_396_745);
-    expect(performance.now() - started).toBeLessThan(2_000);
+    // Cost as growth, not against a fixed limit: four times the distinct edges (fanout 32, 225
+    // edges) must cost about four times as much, although git would expand 32^7 times more.
+    await withRepo(async larger => {
+      sharedIncludeGraph(larger, 8, 32);
+      const timing = await compare(() => locateRepository(dir, { limits: unlimited }), () => locateRepository(larger, { limits: unlimited }));
+      expect(timing.ratio, timing.summary).toBeLessThan(LINEAR_4X);
+    });
   });
-});
+}, 60_000);
 
 it('git-history/preflight a shared include graph beyond the budget fails closed with exit 3, quickly', async () => {
   await withRepo(async dir => {

@@ -64,7 +64,7 @@ it('CP-001/B10 pins the package, lockfile, scripts and strict TypeScript', () =>
   const lock = JSON.parse(read('package-lock.json'));
   const tsconfig = JSON.parse(read('tsconfig.json'));
   expect(pkg).toMatchObject({
-    name: 'macwarden', version: '1.3.0', type: 'module', license: 'MIT',
+    name: 'macwarden', version: '1.3.1', type: 'module', license: 'MIT',
     engines: { node: '^22.23.2 || ^24.18.1 || >=26.5.1' },
   });
   expect(pkg.dependencies ?? {}).toEqual({});
@@ -73,7 +73,7 @@ it('CP-001/B10 pins the package, lockfile, scripts and strict TypeScript', () =>
   expect(pkg.devDependencies).toEqual(pinned);
   expect(pkg.scripts).toMatchObject(scripts);
   expect(lock.packages['']).toMatchObject({
-    name: 'macwarden', version: '1.3.0', devDependencies: pinned,
+    name: 'macwarden', version: '1.3.1', devDependencies: pinned,
   });
   expect(tsconfig.compilerOptions.strict).toBe(true);
 });
@@ -132,8 +132,20 @@ it('CP-001/B12 runs the pinned CI matrix and commands', () => {
   const runsFor = (job: string) => [...job.matchAll(/^\s*-?\s*run:\s*(.+?)\s*$/gm)].map(match => match[1]);
   // npm test builds first (pretest) and runs the product project; the harness-docs project, which
   // npm test does not select, runs next, so harness and documentation contracts gate CI (audit F20).
-  expect(runsFor(testJob)).toEqual(['npm ci', 'npm run lint', 'npm test', 'npm run test:harness']);
-  expect(runsFor(oracleJob)).toEqual(['npm ci', 'npm run build', 'npm run fixture:up', 'npm run test:oracle', 'npm run fixture:down']);
+  // Both runs write a JSON report; Vitest exits 0 with skipped tests, so a check reads both
+  // reports and fails on any test that did not run and pass (audit TOOLING-11).
+  // test/payment-lab-harness.test.ts needs the v1.2.0 tag, which a depth-1 checkout lacks.
+  expect(runsFor(testJob)).toEqual(['git fetch --no-tags --depth=1 origin tag v1.2.0', 'npm ci', 'npm run lint',
+    'npm test -- --reporter=default --reporter=json --outputFile.json=${{ runner.temp }}/vitest-product.json',
+    'npm run test:harness -- --reporter=default --reporter=json --outputFile.json=${{ runner.temp }}/vitest-harness.json',
+    'node scripts/validation-support.mjs --no-pending "${{ runner.temp }}/vitest-product.json" "${{ runner.temp }}/vitest-harness.json"']);
+  // Superseded runs are cancelled except on main, where every commit keeps its result (audit TOOLING-14).
+  expect(blockFor(yaml, 'concurrency', 0)).toBe(
+    "concurrency:\n  group: ci-${{ github.workflow }}-${{ github.ref }}\n  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}");
+  // Four duration-balanced quarters of the LND oracle files, one per matrix job (oracle-shards.test.ts proves the cover).
+  expect(runsFor(oracleJob)).toEqual(['npm ci', 'npm run build', 'npm run fixture:up',
+    'npm run test:oracle -- $(node scripts/oracle-shards.mjs --files ${{ matrix.shard }}/4)', 'npm run fixture:down']);
+  expect(oracleJob).toMatch(/^ {6}fail-fast: false\n {6}matrix:\n {8}shard: \[1, 2, 3, 4\]$/m);
   expect(oracleJob).toMatch(/^ {6}- if: always\(\)\n {8}run: npm run fixture:down$/m);
   // The Core Lightning comparison is its own job: an LND oracle failure cannot skip it.
   expect(runsFor(clnJob)).toEqual(['npm ci', 'npm run build', 'npm run fixture:cln:up', 'npm run test:cln-oracle', 'npm run fixture:cln:down']);
@@ -183,14 +195,37 @@ it('CP-001/B12 the pre-commit hook receives binary files as well as text', () =>
 });
 
 // Audit F20 and O05: the release runs both Vitest projects and lint before publishing, and
-// builds only through npm test's pretest and npm publish's prepack.
-it('CP-001/B12 the release workflow runs both test projects and lint before publishing, without a separate build', () => {
+// builds only through npm test's pretest and npm pack's prepack.
+// Audit TOOLING-06: a verify job without an OIDC token tests and packs; a publish job in the
+// npm-publish environment checks the tagged commit is on main, runs no dependency script and
+// publishes the tarball the verify job packed, after checking its digest.
+it('CP-001/B12 the release workflow verifies and packs without a token, then publishes that tarball from main', () => {
   const yaml = read('.github/workflows/release.yml');
-  const runs = [...yaml.matchAll(/^\s*-?\s*run:\s*(.+?)\s*$/gm)].map(match => match[1]);
+  const jobs = blockFor(yaml, 'jobs', 0);
+  expect([...jobs.matchAll(/^ {2}([\w-]+):\s*$/gm)].map(match => match[1])).toEqual(['verify', 'publish']);
+  const verify = blockFor(jobs, 'verify', 2), publish = blockFor(jobs, 'publish', 2);
+  const runsFor = (job: string) => [...job.matchAll(/^\s*-?\s*run:\s*(.+?)\s*$/gm)].map(match => match[1]);
   // The npm upgrade before npm ci is pinned by test/packaging.test.ts.
-  expect(runs[0]).toMatch(/^npm install --global npm@\d+\.\d+\.\d+$/);
-  expect(runs.slice(1)).toEqual(['npm ci', 'npm test', 'npm run test:harness', 'npm run lint', '|']);
-  const publish = yaml.indexOf('npm publish --provenance');
-  expect(publish).toBeGreaterThan(yaml.indexOf('run: npm run test:harness'));
+  expect(runsFor(verify)).toEqual(['git fetch --no-tags --depth=1 origin tag v1.2.0', expect.stringMatching(/^npm install --global npm@\d+\.\d+\.\d+$/),
+    'npm ci', 'npm test', 'npm run test:harness', 'npm run lint', '|']);
+  expect(blockFor(verify, 'permissions', 4)).toBe('    permissions:\n      contents: read');
+  expect(verify).not.toMatch(/id-token/);
+  expect(verify).toMatch(/^ {10}tarball=\$\(npm pack --silent \| tail -n 1\)$/m);
+  expect(verify).toMatch(/^ {6}- uses: actions\/upload-artifact@[0-9a-f]{40}$/m);
+
+  expect(publish).toMatch(/^ {4}needs: verify$/m);
+  expect(publish).toMatch(/^ {4}environment: npm-publish$/m);
+  expect(blockFor(publish, 'permissions', 4)).toBe('    permissions:\n      contents: read\n      id-token: write');
+  expect(publish).toMatch(/^ {10}fetch-depth: 0$/m);
+  expect(runsFor(publish)).toEqual([expect.stringMatching(/^npm install --global npm@\d+\.\d+\.\d+$/),
+    'git merge-base --is-ancestor "$GITHUB_SHA" origin/main', 'npm ci --ignore-scripts', '|']);
+  expect(publish).toMatch(/^ {6}- uses: actions\/download-artifact@[0-9a-f]{40}$/m);
+  expect(publish.indexOf('merge-base --is-ancestor')).toBeLessThan(publish.indexOf('npm publish'));
+  expect(publish).toMatch(/^ {10}echo "\$SHA256 {2}package\/\$TARBALL" \| sha256sum --check --strict -$/m);
+  expect(publish).toMatch(/^ {10}npm publish --provenance --tag "\$tag" --ignore-scripts "package\/\$TARBALL"$/m);
   expect(yaml).not.toMatch(/npm run build/);
+  for (const job of [verify, publish]) {
+    expect(job).toMatch(/^ {6}- uses: actions\/checkout@[^\r\n]+\n {8}with:\n {10}persist-credentials: false$/m);
+    for (const uses of job.matchAll(/^\s*-?\s*uses:\s*(\S+)\s*$/gm)) expect(uses[1]).toMatch(/@[0-9a-f]{40}$/);
+  }
 });

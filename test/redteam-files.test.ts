@@ -33,15 +33,22 @@ const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 const scratch = () => { const dir = mkdtempSync(join(tmpdir(), 'mw-redteam-')); dirs.push(dir); return dir; };
 
-it('RED-TEAM/amplification a small identifier that would expand to megabytes of permissions stays bounded and fails closed', () => {
+it('RED-TEAM/amplification a small identifier that would expand to megabytes of permissions stays bounded and fails closed', async () => {
   // The audit's file: a 16,000-byte entity times 15,000 one-byte actions (~240 MB of text).
   // LND honours such a macaroon, so it is decoded (parser review 2026-10-08, MEDIUM-2), but
   // only what fits the bounds is expanded and the grade fails closed.
   const bomb = macaroon([operation('e'.repeat(16_000), Array.from({ length: 15_000 }, () => 'r'))]);
   expect(bomb.length).toBeLessThan(70_000);
-  const started = performance.now();
+  // Cost against a macaroon of about the same size that expands to nothing large (the same
+  // actions on a 16-byte entity, padded with ordinary operations), timed alternately in this
+  // process: expanding the bomb (~240 MB of text) would cost thousands of times more, a
+  // bounded decoder about the same. No fixed time limit, which would measure the runner.
+  const plain = macaroon([operation('e'.repeat(16), Array.from({ length: 15_000 }, () => 'r')),
+    ...Array.from({ length: 64 }, (_, i) => operation('pad', [String(i).padEnd(250, 'p')]))]);
+  expect(Math.abs(plain.length - bomb.length)).toBeLessThan(bomb.length / 4);
+  const timing = await compare(() => decodeMacaroon(new Secret(plain)), () => decodeMacaroon(new Secret(bomb)));
+  expect(timing.ratio, timing.summary).toBeLessThan(LINEAR_4X);
   const facts = decodeMacaroon(new Secret(bomb));
-  expect(performance.now() - started).toBeLessThan(1_000);
   expect(facts.permissions).toEqual([]);
   expect(facts.warnings).toContain('identifier-exceeds-bounds');
   expect(gradeFacts(facts).grade).toBe('UNASSESSED');
@@ -88,27 +95,16 @@ it('RED-TEAM/amplification many worst-case accepted copies in one 4 MB file scan
   expect(timing.ratio, timing.summary).toBeLessThan(LINEAR_4X);
 }, 180_000);
 
-it('RED-TEAM/forging a file name cannot start a text line with a GitHub workflow command or reorder the terminal', async () => {
-  if (process.platform === 'win32') {
-    // Windows file names cannot contain ':' or the bidi controls used here; check the renderer directly.
-    const finding = { path: '::stop-commands::x', line: 1, column: 1, kind: 'macaroon-hex', fingerprint: 'fp:0123456789abcdef',
-      grade: 'READ', rootKeyId: '0', permissions: [], caveats: [], warnings: [] };
-    const text = render({ command: 'scan', ok: true, warnings: [], error: null, result: { findings: [finding,
-      { ...finding, path: 'safe‮gnp.exe' }], skipped: [],
-      summary: { findings: 2, distinct: 1, filesScanned: 1, filesSkipped: 0, ignored: 0 }, failOn: null } } as never, 'text');
-    for (const line of text.split('\n')) expect(line.startsWith('::')).toBe(false);
-    expect(text).toContain('./::stop-commands::x');
-    expect(text).not.toContain('‮');
-    expect(text).toContain('\\u202e');
-    return;
-  }
-  const dir = scratch();
-  const admin = macaroon([operation('info', ['read'])]).toString('hex');
-  writeFileSync(join(dir, '::stop-commands::x'), `${admin}\n`);
-  writeFileSync(join(dir, 'safe‮gnp.txt'), `${admin}\n`);
-  const result = await scanCommand([dir]);
-  const text = render(result, 'text');
+// Every platform: the renderer itself. The same names as real scanned files are the POSIX variant
+// test/redteam-file-names.posix.test.ts (Windows file names cannot contain ':' or bidi controls).
+it('RED-TEAM/forging a rendered path cannot start a text line with a GitHub workflow command or reorder the terminal', () => {
+  const finding = { path: '::stop-commands::x', line: 1, column: 1, kind: 'macaroon-hex', fingerprint: 'fp:0123456789abcdef',
+    grade: 'READ', rootKeyId: '0', permissions: [], caveats: [], warnings: [] };
+  const text = render({ command: 'scan', ok: true, warnings: [], error: null, result: { findings: [finding,
+    { ...finding, path: 'safe‮gnp.exe' }], skipped: [],
+    summary: { findings: 2, distinct: 1, filesScanned: 1, filesSkipped: 0, ignored: 0 }, failOn: null } } as never, 'text');
   for (const line of text.split('\n')) expect(line.startsWith('::')).toBe(false);
+  expect(text).toContain('./::stop-commands::x');
   expect(text).not.toContain('‮');
   expect(text).toContain('\\u202e');
 });

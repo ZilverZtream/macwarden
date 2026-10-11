@@ -1,4 +1,4 @@
-import { closeSync, openSync } from 'node:fs';
+import { closeSync, existsSync, openSync } from 'node:fs';
 import { DatabaseSync, type SQLOutputValue } from 'node:sqlite';
 
 /**
@@ -34,6 +34,7 @@ export type Migration = string | ((db: DatabaseSync) => void);
  * because the caller never gets the handle to close.
  */
 export function openDatabase(path: string, migrations: readonly Migration[]): DatabaseSync {
+  if (readOnlyOpens > 0) return openReadOnly(path, migrations);
   // Create the file owner-only before SQLite does; SQLite gives -wal and -shm the same mode.
   closeSync(openSync(path, 'a', 0o600));
   const db = new DatabaseSync(path, { timeout: BUSY_TIMEOUT_MS, readBigInts: true, enableForeignKeyConstraints: true });
@@ -51,6 +52,60 @@ export function openDatabase(path: string, migrations: readonly Migration[]): Da
       }
       if (version < migrations.length) db.exec(`PRAGMA user_version = ${migrations.length}`);
     });
+  } catch (error) {
+    try { db.close(); } catch { /* the original error is the one to report */ }
+    throw error;
+  }
+  return db;
+}
+
+/** How many readOnly() calls are running: a store constructed inside one opens its database read-only. */
+let readOnlyOpens = 0;
+
+/**
+ * Runs `open` (a store's constructor, which calls openDatabase) with every database it opens opened for
+ * reading only, for the commands that only read (explain, show, ledger-verify, outbox-status, …):
+ *
+ * - a database that does not exist is not created: an empty in-memory database with the current schema
+ *   stands in for it, so the command reads no records and nothing appears on disk;
+ * - an existing database is opened with SQLite's read-only flag (a write through it fails) and must have the
+ *   current schema: an older one is refused, not migrated, and a newer one is refused as openDatabase refuses
+ *   it; either is left unchanged. A command that records migrates it.
+ *
+ * Store constructors are synchronous, so the flag holds exactly for the duration of `open`.
+ */
+export function readOnly<T>(open: () => T): T {
+  readOnlyOpens += 1;
+  try {
+    return open();
+  } finally {
+    readOnlyOpens -= 1;
+  }
+}
+
+function openReadOnly(path: string, migrations: readonly Migration[]): DatabaseSync {
+  if (!existsSync(path)) {
+    const db = new DatabaseSync(':memory:', { readBigInts: true, enableForeignKeyConstraints: true });
+    try {
+      immediate(db, () => {
+        for (const step of migrations) {
+          if (typeof step === 'string') db.exec(step); else step(db);
+        }
+        db.exec(`PRAGMA user_version = ${migrations.length}`);
+      });
+    } catch (error) {
+      try { db.close(); } catch { /* the original error is the one to report */ }
+      throw error;
+    }
+    return db;
+  }
+  const db = new DatabaseSync(path, { readOnly: true, timeout: BUSY_TIMEOUT_MS, readBigInts: true, enableForeignKeyConstraints: true });
+  try {
+    const version = refuseNewer(db, migrations.length);
+    if (version < migrations.length) {
+      throw new Error(`database schema version ${version} is older than this code's (${migrations.length}); a command that only reads does not `
+        + 'migrate it, and it is left unchanged: run a command that records (reconcile, for one) to migrate it first');
+    }
   } catch (error) {
     try { db.close(); } catch { /* the original error is the one to report */ }
     throw error;

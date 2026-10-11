@@ -28,6 +28,21 @@ const HELP = 'https://github.com/ZilverZtream/macwarden#scan';
 /** GitHub code scanning accepts at most 25,000 results per run; the rest are summarised. */
 export const SARIF_MAX_RESULTS = 25_000;
 
+/**
+ * Files never opened because their names look like wallet secrets (SAFE-02) are listed by path in
+ * SARIF notifications and GitHub warnings, at most this many; the rest are counted. A CI gate
+ * passes over them (--fail-on counts findings only), so its log must show what was not checked.
+ */
+export const NEVER_OPEN_LISTED = 1_000;
+const NEVER_OPEN_TEXT = 'not opened: its name matches a protected pattern (SAFE-02), so a credential in it is not checked';
+
+const neverOpened = (result: Pick<ScanResult, 'skipped'>) => result.skipped.filter(item => item.reason === 'never-open');
+
+/** Text output lines naming each never-opened file (paths are redacted by the scan, then escaped by `clean`). */
+export function* neverOpenedLines(result: Pick<ScanResult, 'skipped'>, clean: (text: string) => string): Generator<string> {
+  for (const item of neverOpened(result)) yield `never-opened  ${clean(item.path)}  (name matches a protected pattern; not scanned)\n`;
+}
+
 const GRADES = ['ADMIN', 'SPEND', 'UNASSESSED', 'OPERATE', 'RECEIVE', 'READ'] as const;
 const GRADED = new Set<string>(['macaroon-file', 'macaroon-hex', 'macaroon-base64', 'lndconnect', 'rune']);
 // Detection precision per kind (SARIF rule property): runes are found only in rune context and must parse
@@ -205,8 +220,13 @@ export function* sarifPieces(result: ScanResult, root: string, version: string, 
   }
   const { summary } = result;
   const omitted = result.findings.length - emitted;
-  const notifications = omitted > 0 ? [{ level: 'warning', message: { text: `${omitted} further findings are not in this SARIF log: `
+  const notifications: Record<string, unknown>[] = omitted > 0 ? [{ level: 'warning', message: { text: `${omitted} further findings are not in this SARIF log: `
     + `GitHub code scanning accepts at most ${SARIF_MAX_RESULTS} results per run. Use --format json for the complete list.` } }] : [];
+  const unopened = neverOpened(result);
+  for (const item of unopened.slice(0, NEVER_OPEN_LISTED)) notifications.push({ level: 'warning', message: { text: NEVER_OPEN_TEXT },
+    locations: [{ physicalLocation: { artifactLocation: artifactLocation(item.path, root) } }] });
+  if (unopened.length > NEVER_OPEN_LISTED) notifications.push({ level: 'warning', message: { text:
+    `${unopened.length - NEVER_OPEN_LISTED} further files were not opened (SAFE-02). Use --format json for the complete list.` } });
   const invocation = { executionSuccessful: true, ...(notifications.length ? { toolExecutionNotifications: notifications } : {}),
     properties: { ...(omitted > 0 ? { omittedResults: omitted } : {}), summary: { findings: summary.findings, distinct: summary.distinct,
     filesScanned: summary.filesScanned, filesSkipped: summary.filesSkipped, ignored: summary.ignored,
@@ -249,5 +269,13 @@ export function* githubLines(result: ScanResult, root: string, clean: (text: str
       + (finding.alsoAt ? ` (${alsoText(finding)} ${finding.alsoAt.count} other path(s))` : '');
     yield `::${command} ${properties.join(',')}::${escapeData(clean(message))}\n`;
   }
+  const unopened = neverOpened(result);
+  for (const item of unopened.slice(0, NEVER_OPEN_LISTED)) {
+    const where = locationOf(item.path, root);
+    const file = 'relative' in where ? where.relative : where.absolute;
+    yield `::warning file=${escapeProperty(redact(file))},title=${escapeProperty('macwarden never-open')}::${escapeData(clean(NEVER_OPEN_TEXT))}\n`;
+  }
+  if (unopened.length > NEVER_OPEN_LISTED)
+    yield `::warning title=${escapeProperty('macwarden never-open')}::${unopened.length - NEVER_OPEN_LISTED} further files were not opened (SAFE-02)\n`;
   yield summary;
 }

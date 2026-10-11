@@ -2,8 +2,7 @@ import * as fs from 'node:fs/promises';
 import { Cancelled } from '../cancellation.js';
 import { unsafeNodeDiagnostics } from '../environment.js';
 import type { Readable } from 'node:stream';
-import { decodeL402, decodeMacaroon, decodeNwc, decodeRune, isL402Container, isL402Macaroon, isNwcContainer, isRuneContainer,
-  DecodeError, parseTimeBefore, type Caveat, type L402Facts, type MacaroonFacts } from '../decode/index.js';
+import { decodeL402, decodeMacaroon, decodeNwc, decodeRune, isL402Macaroon, DecodeError, parseTimeBefore, type Caveat, type L402Facts, type MacaroonFacts } from '../decode/index.js';
 import { assessL402 } from '../l402.js';
 import { unixSeconds } from '../grade/rune.js';
 import { runeReport } from '../rune-report.js';
@@ -56,8 +55,12 @@ export function l402InspectResult(facts: L402Facts, now: Date): L402InspectResul
   return { kind: 'l402', fingerprint: facts.fingerprint, ...assessL402(facts, now) };
 }
 
-function macaroonResult(secret: Secret, now: Date): InspectResult | L402InspectResult {
-  if (isL402Container(secret) || isL402Macaroon(secret)) {
+/**
+ * An L402 form (text or token store file) or a macaroon (binary, hex, base64, lndconnect): a
+ * macaroon with an L402 identifier is an L402 token, every other macaroon an LND macaroon.
+ */
+function macaroonResult(secret: Secret, form: 'macaroon' | 'l402' | 'token-file', now: Date): InspectResult | L402InspectResult {
+  if (form !== 'macaroon' || isL402Macaroon(secret)) {
     const decoded = decodeL402(secret);
     if ('l402' in decoded) return l402InspectResult(decoded.l402, now);
     return inspectResult(decodeMacaroon(decoded.lnd), now);
@@ -66,8 +69,9 @@ function macaroonResult(secret: Secret, now: Date): InspectResult | L402InspectR
 }
 
 export async function run(args: string[], deps: Deps): Promise<OutputResult> {
-  // ENV check (1.2.1): a heap snapshot or profile taken through NODE_OPTIONS would hold every credential decoded here.
-  if (deps.env && unsafeNodeDiagnostics(deps.env)) return fail(2, null, 'unsafe Node diagnostic settings');
+  // ENV check (1.2.1): a heap snapshot or profile taken through NODE_OPTIONS would hold every
+  // credential decoded here. Without injected settings the process's own are checked (audit 1.4.0).
+  if (unsafeNodeDiagnostics(deps.env ?? { ...process.env })) return fail(2, null, 'unsafe Node diagnostic settings');
   let unsafeArg = false;
   let endOfFlags = false;
   const inputs: string[] = [];
@@ -82,9 +86,11 @@ export async function run(args: string[], deps: Deps): Promise<OutputResult> {
 
   const warnings: string[] = [];
   try {
-    const { secret, literal } = await readCredential(inputs[0], deps, { unsafeArg, nwc: true, l402: true, rune: true });
+    const { secret, literal, form } = await readCredential(inputs[0], deps, { unsafeArg, nwc: true, l402: true, rune: true });
     if (literal) warnings.push('unsafe-arg');
-    if (isNwcContainer(secret)) {
+    // Dispatch on the form readCredential recognised (audit 1.4.0): bytes decoded from hex or
+    // base64 are a macaroon or nothing, never a rune, NWC URI or L402 text found inside them.
+    if (form === 'nwc') {
       const nwc = decodeNwc(secret);
       const result: NwcInspectResult = {
         kind: 'nwc',
@@ -99,10 +105,7 @@ export async function run(args: string[], deps: Deps): Promise<OutputResult> {
       };
       return { command: 'inspect', ok: true, warnings, result, error: null };
     }
-    // The containers readCredential produces are disjoint (docs/spec.md, inspect input
-    // precedence): rune text never holds the ':' or blank of NWC and L402 text, and a binary
-    // macaroon or token store file is never rune text.
-    if (isRuneContainer(secret)) {
+    if (form === 'rune') {
       // Recognition, assessment and verification are separate: nothing here says a node accepts it.
       const facts = decodeRune(secret);
       const assessed = runeReport(facts, unixSeconds(deps.clock()));
@@ -110,7 +113,7 @@ export async function run(args: string[], deps: Deps): Promise<OutputResult> {
         reasons: assessed.reasons, unassessed: assessed.unassessed, rune: assessed.report };
       return { command: 'inspect', ok: true, warnings, result, error: null };
     }
-    const result = macaroonResult(secret, deps.clock());
+    const result = macaroonResult(secret, form, deps.clock());
     return { command: 'inspect', ok: true, warnings, result, error: null };
   } catch (error) {
     // An interrupt while waiting on stdin or a file is not a failure of this command: the CLI
@@ -124,5 +127,5 @@ export async function run(args: string[], deps: Deps): Promise<OutputResult> {
 }
 
 export async function inspect(args: string[]): Promise<OutputResult> {
-  return run(args, { stdin: process.stdin, fs, clock: () => new Date() });
+  return run(args, { stdin: process.stdin, fs, clock: () => new Date(), env: { ...process.env } });
 }

@@ -1,0 +1,1496 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "reconcile-buckets-partition",
+  "rule": "",
+  "message": "hand-written scenario (no violation recorded)",
+  "seed": null,
+  "case": null,
+  "config": {
+    "scale": "small",
+    "budget": false,
+    "limit": "10000"
+  },
+  "failingStep": -1,
+  "originalSteps": 487,
+  "events": [
+    {
+      "t": "create",
+      "p": "p0",
+      "order": 0,
+      "hold": false
+    },
+    {
+      "t": "answer",
+      "kind": "create",
+      "pick": 0,
+      "mode": "in-transit"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "rreconcile",
+      "p": "p0",
+      "order": null,
+      "cli": false
+    },
+    {
+      "t": "answer",
+      "kind": "lookup",
+      "pick": 0,
+      "mode": "ok"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "rreconcile",
+      "p": "p1",
+      "order": null,
+      "cli": false
+    }
+  ],
+  "states": {},
+  "note": "hand-written scenario (no violation recorded). An invoice whose create call gave up is recorded not created; 481 age events (180 s each) take it past the 24-hour recheck window, so receiver reconcile no longer covers it, and the oracle must not count it as a target either."
+}

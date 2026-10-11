@@ -13,13 +13,17 @@ import { fingerprint, scrub } from './format.ts';
  * items (its first and last halves), as does the reconciliation; the journal, the outbox and the
  * reservation's reservations and refusals keep at most LIMITS.list (first and last halves); a
  * submission shows at most LIMITS.attemptsPerSubmission HTLC attempts (first and last halves, with
- * one item counting the rest); any one string is cut at 1,024 characters (format.ts, capString).
+ * one item counting the rest); the subject's payments and the outcome's payments (payer) or invoices (receiver) keep at
+ * most LIMITS.list (first and last halves, counted once as `payments`); any one string is cut at 1,024 characters
+ * (format.ts, capString). `--refresh` looks up at most LIMITS.refresh payment hashes (the same first and last halves),
+ * within REFRESH_DEADLINE_MS in all (refresh.ts), and counts the others as `refresh`.
  * `truncated` counts what was left out, per list; it is absent when nothing was.
  */
 
-export const LIMITS = { timeline: 2000, list: 200, attemptsPerSubmission: 200 } as const;
+export const LIMITS = { timeline: 2000, list: 200, attemptsPerSubmission: 200, refresh: 200 } as const;
 
-export type TruncatedKey = 'timeline' | 'htlcAttempts' | 'journal' | 'outbox' | 'reservations' | 'refusals' | 'reconciliation';
+export type TruncatedKey = 'timeline' | 'htlcAttempts' | 'journal' | 'outbox' | 'reservations' | 'refusals' | 'reconciliation' | 'payments'
+  | 'refresh';
 export type Truncated = Partial<Record<TruncatedKey, number>>;
 
 export interface TimelineItem {
@@ -92,7 +96,13 @@ export function bound(explanation: Explanation): Explanation {
   const journal = cut('journal', explanation.journal, LIMITS.list);
   const outbox = cut('outbox', explanation.outbox, LIMITS.list);
   const reconciliation = cut('reconciliation', explanation.reconciliation, LIMITS.timeline);
-  return { subject: explanation.subject, timeline, outcome: explanation.outcome, reservation, journal, outbox, reconciliation,
+  // The subject's payments and the outcome's list of them are the same payments: cut alike, counted once.
+  const subject = { ...explanation.subject, payments: cut('payments', explanation.subject.payments, LIMITS.list) };
+  const outcome = { ...explanation.outcome };
+  for (const key of ['payments', 'invoices'] as const) {
+    if (Array.isArray(outcome[key])) outcome[key] = keepEnds(outcome[key] as unknown[], LIMITS.list).kept;
+  }
+  return { subject, timeline, outcome, reservation, journal, outbox, reconciliation,
     ...(Object.keys(truncated).length === 0 ? {} : { truncated }) };
 }
 
@@ -116,8 +126,8 @@ export class Timeline {
   }
 
   sorted(): TimelineItem[] {
-    return this.#items.map((item, index) => ({ item, index }))
-      .sort((a, b) => (a.item.at < b.item.at ? -1 : a.item.at > b.item.at ? 1 : a.index - b.index)).map(entry => entry.item);
+    // Array.prototype.sort is stable (ES2019): items with equal times keep the order they were added in.
+    return [...this.#items].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
   }
 }
 
@@ -141,12 +151,14 @@ export function journalLine(entry: JournalView): string {
   return `entry #${entry.entryId} ${entry.event}${entry.origin === 'migrated' ? ' (migrated)' : ''}${entry.payment === null ? '' : ` for ${entry.payment}`}: ${lines}`;
 }
 
-export function outboxView(rows: OutboxRow[], known: ReadonlySet<string>): OutboxView[] {
+/** `profile`: the directory under receipts or confirmations the profile's worker writes to (cli.ts, effectDir). */
+export function outboxView(rows: OutboxRow[], known: ReadonlySet<string>, profile?: string): OutboxView[] {
+  const under = profile === undefined ? '' : `${profile}/`;
   return rows.map(row => ({ outboxId: row.outboxId, kind: row.kind, idempotencyKey: scrub(row.idempotencyKey, known), state: row.state,
     attempts: row.attempts, createdAt: row.createdAt, acknowledgedAt: row.acknowledgedAt ?? null,
     lastError: row.lastError === undefined ? null : scrub(row.lastError, known),
-    effect: row.kind === 'fulfill-order' ? `receipt <lab>/receipts/${fileBase(row.subject)}.json`
-      : `confirmation <lab>/confirmations/${fileBase(row.subject)}.json` }));
+    effect: row.kind === 'fulfill-order' ? `receipt <lab>/receipts/${under}${fileBase(row.subject)}.json`
+      : `confirmation <lab>/confirmations/${under}${fileBase(row.subject)}.json` }));
 }
 
 /** The outbox rows on the timeline: enqueued with the state change, and acknowledged once performed. */

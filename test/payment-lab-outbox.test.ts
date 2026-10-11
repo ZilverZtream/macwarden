@@ -495,7 +495,7 @@ describe('payment lab outbox: upgrading a database without an outbox', () => {
     store.db.exec('DROP TABLE outbox; PRAGMA user_version = 3');
     store.close();
     const upgraded = receiverStore(file);
-    expect(upgraded.db.prepare('PRAGMA user_version').all()[0]?.user_version).toBe(5n);
+    expect(upgraded.db.prepare('PRAGMA user_version').all()[0]?.user_version).toBe(7n); // 4 is the outbox migration; 5 (lookup indexes), 6 (live-invoice index) and 7 (ledger upgrade) run after it
     expect(upgraded.outbox()).toEqual([expect.objectContaining({ idempotencyKey: `ORD-M:${hash}`, state: 'pending',
       payload: { orderId: 'ORD-M', paymentHash: hash, amountMsat: '1000', settleIndex: '3', ledgerEntryId: entryId } })]);
     const effects = target('migrate-receiver-receipts');
@@ -516,7 +516,7 @@ describe('payment lab outbox: upgrading a database without an outbox', () => {
     store.db.exec('DROP TABLE outbox; PRAGMA user_version = 6');
     store.close();
     const upgraded = payerStore(file);
-    expect(upgraded.db.prepare('PRAGMA user_version').all()[0]?.user_version).toBe(8n);
+    expect(upgraded.db.prepare('PRAGMA user_version').all()[0]?.user_version).toBe(10n);
     expect(upgraded.outbox().map(row => [row.idempotencyKey, row.state])).toEqual([[`OP-M:${preimageFor('mig-a').paymentHash}`, 'pending']]);
   });
 });
@@ -817,4 +817,84 @@ describe('payment lab outbox: names, keys, consistency, temporary files and the 
     expect(row?.state).toBe('done');
     expect(row?.acknowledgedAt).toBe(createdAt);
   });
+});
+
+describe('payment lab outbox: the 1.3.1 audit (F04: an expired lease and the receipt amount; F08: the claim order)', () => {
+  const jsonFiles = (effects: EffectTarget): string[] => (existsSync(effects.dir) ? readdirSync(effects.dir).filter(name => name.endsWith('.json')) : []);
+  const amountOf = (store: ReceiverStore): string => String(store.db.prepare(`SELECT json_extract(payload, '$.amountMsat') AS amount FROM outbox`).all()[0]?.amount);
+
+  /**
+   * The shape a 1.3.0 receiver left for an invoice whose record kept an underpaid first settlement: the record
+   * says 900, the migrated invoice-settled entry says 1000 (its line 1), and migration 4 enqueued the record's
+   * 900. `leased`: the row was then claimed by a worker that died, and its lease ran out long ago.
+   */
+  function legacyRow(file: string, state: 'pending' | 'leased' | 'leased-live'): { store: ReceiverStore; hash: string } {
+    const { store, hash } = settledOrder(file, 'ORD-L');
+    const lease = state === 'pending' ? '' : `, state = 'leased', lease_owner = 'dead-1.3.0-worker', attempts = 1, lease_expires_at = '${
+      state === 'leased' ? '2020-01-01T00:00:00.000Z' : '2999-01-01T00:00:00.000Z'}'`;
+    store.db.exec(`UPDATE invoices SET amt_paid_msat = 900 WHERE payment_hash = '${hash}';
+      UPDATE journal_entries SET origin = 'migrated';
+      UPDATE journal_migration SET migrated_through = 1;
+      UPDATE outbox SET payload = json_set(payload, '$.amountMsat', '900')${lease}`);
+    expect(amountOf(store)).toBe('900');
+    return { store, hash };
+  }
+
+  it('receiver migration 7 repairs the amount of a row a dead worker left leased (lease expired), like a pending one; a live lease is left alone', async () => {
+    const file = 'legacy-leased.db';
+    const { store, hash } = legacyRow(file, 'leased');
+    store.db.exec('PRAGMA user_version = 6'); // as a 1.3.0 database: migration 7 (the ledger upgrade with the receipt-amount repair) runs on open
+    store.close();
+    const upgraded = receiverStore(file);
+    expect(upgraded.invoice(hash)?.amtPaidMsat).toBe(1000n);
+    expect(upgraded.outbox()).toEqual([expect.objectContaining({ state: 'leased', payload: expect.objectContaining({ amountMsat: '1000' }) })]);
+    const effects = target('legacy-leased-receipts');
+    expect(lab.outbox.runPass(upgraded.db, effects, { emit: quiet })).toMatchObject({ performed: 1, failed: 0, remaining: 0 });
+    expect(lab.outbox.readEffect(lab.outbox.effectPath(effects, 'ORD-L'), KEY)).toMatchObject({ state: 'valid', fields: expect.objectContaining({ amountMsat: '1000' }) });
+    expectBalanced(await lab.verifyLedger(upgraded));
+
+    // A lease still running belongs to a worker that may be writing the receipt: the row is not touched.
+    const live = legacyRow('legacy-leased-live.db', 'leased-live');
+    live.store.db.exec('PRAGMA user_version = 6');
+    live.store.close();
+    expect(amountOf(receiverStore('legacy-leased-live.db'))).toBe('900');
+  });
+
+  it('a row whose amount is not its ledger entry\'s is not performed: it fails as ledger-entry-mismatch, stays pending, and no file is written', () => {
+    const { store } = legacyRow('amount-mismatch.db', 'pending'); // 900 in the row, 1000 on the entry's line 1, and no migration ran
+    const effects = target('amount-mismatch-receipts');
+    const events: Record<string, unknown>[] = [];
+    expect(lab.outbox.runPass(store.db, effects, { emit: event => events.push(event) })).toMatchObject({ performed: 0, failed: 1, remaining: 1 });
+    expect(events.filter(event => event.event === 'outbox-failed').map(event => event.reason)).toEqual(['ledger-entry-mismatch']);
+    const [row] = store.outbox();
+    expect(row).toMatchObject({ state: 'pending', attempts: 1 });
+    expect(row?.lastError).toMatch(/ledger-entry-mismatch: .*1000.*900|ledger-entry-mismatch: .*900.*1000/);
+    expect(jsonFiles(effects)).toEqual([]);
+  });
+
+  it('claims the earliest due row first, so 1,000 older rows that keep failing do not starve a later healthy one (passes 300 s apart)', () => {
+    const base = Date.parse('2026-10-11T00:00:00.000Z');
+    const at = (ms: number): string => new Date(ms).toISOString();
+    const store = receiverStore('starvation.db');
+    const insert = store.db.prepare(`INSERT INTO outbox (kind, idempotency_key, subject, payload, state, attempts, next_attempt_at, created_at)
+      VALUES ('fulfill-order', ?, ?, ?, 'pending', 0, ?, ?)`);
+    for (let index = 1; index <= 1000; index += 1) {
+      // Each names a ledger entry that does not exist: checkLedgerEntry fails it on every claim (a persistent per-row failure).
+      insert.run(`old${index}:${'ab'.repeat(32)}`, `old${index}`, JSON.stringify({ orderId: `old${index}`, paymentHash: 'ab'.repeat(32), amountMsat: '1000',
+        settleIndex: '1', ledgerEntryId: 10_000_000 + index }), at(base), at(base));
+    }
+    // The healthy row, enqueued after them: a real fulfilled order.
+    const healthy = openInvoice(store, 'ORD-H', 'starvation:ORD-H');
+    expect(store.applyInvoice(invoice(healthy, 'SETTLED', VALUE, 1n), 'subscription')).toBe('fulfilled');
+    store.db.exec(`UPDATE outbox SET next_attempt_at = '${at(base)}', created_at = '${at(base)}'`);
+    expect(store.outbox('ORD-H')[0]?.outboxId).toBe(1001);
+    const effects = target('starvation-receipts');
+    const pass = (clockMs: number) => lab.outbox.runPass(store.db, effects, { emit: quiet, clock: () => clockMs, owner: 'w' });
+    // Pass 1 claims its 1,000 rows (all failing; each is due again within seconds). Pass 2, 300 s later (the backoff cap, so every
+    // failing row is due again): the healthy row, due earliest, is claimed first and performed.
+    expect(pass(base + 1000)).toMatchObject({ performed: 0, failed: 1000, remaining: 1001 });
+    expect(pass(base + 301_000)).toMatchObject({ performed: 1, failed: 999, remaining: 1000 });
+    expect(store.outbox('ORD-H')[0]).toMatchObject({ state: 'done', attempts: 1 });
+    expect(jsonFiles(effects)).toEqual([`${lab.outbox.fileBase('ORD-H')}.json`]);
+  }, 120_000);
 });

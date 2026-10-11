@@ -32,13 +32,14 @@ function run(json: boolean, event?: 'exception' | 'rejection' | 'warning'): Run 
   const dir = mkdtempSync(join(testTmp, 'cp037-process-'));
   const trace = join(dir, 'read-entered.txt');
   try {
+    // The preload is a node argument, not NODE_OPTIONS: inspect refuses any NODE_OPTIONS (exit 2,
+    // audit 1.4.0), and `--import` is not a refused node flag.
     const child = spawnSync(process.execPath,
-      [join(repo, 'dist', 'bin.js'), 'inspect', input, ...(json ? ['--json'] : [])], {
+      [...(event ? [`--import=${preload}`] : []), join(repo, 'dist', 'bin.js'), 'inspect', input, ...(json ? ['--json'] : [])], {
         cwd: repo,
         encoding: 'utf8',
         timeout: 8_000,
         env: childEnvironment({...(event ? {
-            NODE_OPTIONS: `--import=${preload}`,
             MACWARDEN_CP037_INPUT: input,
             MACWARDEN_CP037_TRACE: trace,
             MACWARDEN_CP037_EVENT: event,

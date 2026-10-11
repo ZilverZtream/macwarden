@@ -12,7 +12,7 @@
     "limit": "10000"
   },
   "failingStep": -1,
-  "originalSteps": 15,
+  "originalSteps": 19,
   "events": [
     {
       "t": "listen",
@@ -45,7 +45,7 @@
     },
     {
       "t": "create",
-      "p": "p1",
+      "p": "p0",
       "order": 1,
       "hold": false
     },
@@ -54,6 +54,23 @@
       "kind": "create",
       "pick": 0,
       "mode": "ok"
+    },
+    {
+      "t": "create",
+      "p": "p0",
+      "order": 2,
+      "hold": false
+    },
+    {
+      "t": "answer",
+      "kind": "create",
+      "pick": 0,
+      "mode": "ok"
+    },
+    {
+      "t": "invoice",
+      "what": "pay",
+      "pick": 0
     },
     {
       "t": "invoice",
@@ -71,6 +88,10 @@
       "kind": "lookup",
       "pick": 0,
       "mode": "ok"
+    },
+    {
+      "t": "sub.deliver",
+      "pick": 0.9
     },
     {
       "t": "cursor-set",
@@ -91,5 +112,5 @@
     }
   ],
   "states": {},
-  "note": "The listener's deliveries move the cursor; a settlement learned by lookup does not; the cursor is set back and a restarted listener receives the second settlement again."
+  "note": "hand-written scenario (no violation recorded). The listener delivers o0#1 (settle index 1: the cursor moves to 1). o1#1 (2) and o2#1 (3) are paid; a reconciliation records o1#1 settled by lookup, and the subscription delivers o2#1 (3) before o1#1: the settle cursor stays at 1, since the subscription has not delivered 2 (a lookup does not count). The cursor is then set back, and a restarted listener receives the second settlement again."
 }

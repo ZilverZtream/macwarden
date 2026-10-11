@@ -8,15 +8,16 @@ import { type InputIO } from '../input/index.js';
 import { createLndAdapter, type LndAdapter } from '../lnd/index.js';
 import { Secret } from '../secret.js';
 import { openRegistry, replacementLinkProblems, type RegistryEntry } from '../registry/index.js';
-import { inventoryResult, type InventoryResult, type OutputResult } from '../output/index.js';
+import { inventoryResult, type InventoryResult, type OutputResult, type OutputWarning } from '../output/index.js';
 import { readUsage, usagePath, type UsageStore } from '../watch/usage.js';
-import { buildAccessReview, formatAccessReview, REPORT_FORMATS, type ReportFormat } from '../report/access-review.js';
+import { buildAccessReview, cleanReview, formatAccessReview, REPORT_FORMATS, type ReportFormat } from '../report/access-review.js';
 import { macwardenVersion } from '../version.js';
 import { namesRegistryFile, registryPath, REGISTRY_OUT_REFUSAL } from './bake/out-registry.js';
 import { reserveOut } from './bake/write-out.js';
 import { reserveFailure } from './bake/out-errors.js';
 import { interruptibleChecks, interruptibleReserve, OUT_CREATION_INTERRUPTED, rethrowCancelled } from './bake/out-interrupt.js';
 import { Cancelled } from '../cancellation.js';
+import { laterInstant, secondsInstant } from '../instant.js';
 
 type ReadLnd = LndAdapter;
 export type Deps = {
@@ -43,13 +44,15 @@ function durationMs(text: string): number {
 }
 
 // Earliest time-before caveat of a registry entry, as milliseconds since the epoch, or null.
-// LND enforces every first-party caveat, so the earliest expiry is the effective one.
+// LND enforces every first-party caveat, so the earliest expiry is the effective one. An
+// instant outside the years 0000 to 9999 cannot be written as RFC 3339 and counts as unparseable.
 function earliestExpiry(entry: RegistryEntry): number | null {
   let earliest: bigint | null = null;
   for (const caveat of entry.caveats) {
     if (caveat.type !== 'time-before') continue;
     const instant = parseTimeBefore(caveat.value);
-    if (instant !== undefined && (earliest === null || instant < earliest)) earliest = instant;
+    if (instant === undefined || secondsInstant(instant) === null) continue;
+    if (earliest === null || instant < earliest) earliest = instant;
   }
   return earliest === null ? null : Number(earliest / 1_000_000n);
 }
@@ -61,7 +64,7 @@ function entryView(entry: RegistryEntry) {
     replaces: entry.replaces, replacedBy: entry.replacedBy };
 }
 
-function fail(code: number, step: string | null, message: string, warnings: string[] = []): InventoryOutput {
+function fail(code: number, step: string | null, message: string, warnings: OutputWarning[] = []): InventoryOutput {
   return { schema: 1, command: 'inventory', ok: false, warnings,
     result: null, error: { code, step, message } };
 }
@@ -78,7 +81,7 @@ function ownPermission(permissions: string[], verify: boolean): string | null {
 }
 
 
-function lndFailure(error: unknown, stage: string, warnings: string[]): InventoryOutput {
+function lndFailure(error: unknown, stage: string, warnings: OutputWarning[]): InventoryOutput {
   const failure = failureDetails(error);
   return fail(failure.code, stage, failure.message, warnings);
 }
@@ -147,7 +150,7 @@ async function runSteps(args: string[], deps: Deps): Promise<InventoryOutput> {
   catch { return fail(4, 'N2', 'undecodable own macaroon'); }
   const missing = ownPermission(facts.permissions, args.includes('--verify'));
   if (missing) return fail(4, 'N2', `own macaroon missing permission: ${missing}`);
-  const warnings = facts.rootKeyId === 0n ? ['own-root-key-0'] : [];
+  const warnings: OutputWarning[] = facts.rootKeyId === 0n ? ['own-root-key-0'] : [];
 
   let entries: RegistryEntry[];
   let registryLocation: string;
@@ -163,6 +166,11 @@ async function runSteps(args: string[], deps: Deps): Promise<InventoryOutput> {
   let usage: UsageStore | null = null;
   try { usage = await readUsage(usagePath(registryLocation), deps.fs as typeof nodeFs); }
   catch { warnings.push('usage-unreadable'); }
+  // Evicted records or unattributed calls can belong to any credential: a row without usage,
+  // or with these counts, may have been used more than shown.
+  if (usage?.maybeIncomplete()) warnings.push({ code: 'usage-incomplete', message: 'the watch usage file may be missing calls '
+    + '(records were evicted, or watch was overloaded and did not attribute some calls): a credential without usage may still have '
+    + 'been used, and counts and last-used times may be low. For a complete observation, stop watch, move the usage file aside and run watch again' });
 
   const adapter = deps.lnd ?? deps.createAdapter?.({ restUrl: restEndpoint, tlsCert: cert, macaroon: own });
   if (!adapter) return fail(8, 'internal', 'unexpected failure', warnings);
@@ -218,7 +226,7 @@ async function runSteps(args: string[], deps: Deps): Promise<InventoryOutput> {
     const seen = usage?.forCredential(info.pubkey, { rootKeyId }) ?? [];
     const used = seen.length ? { calls: seen.reduce((sum, record) => sum + record.calls, 0),
       errors: seen.reduce((sum, record) => sum + record.errors, 0),
-      lastUsed: seen.reduce((last, record) => record.lastSeen > last ? record.lastSeen : last, ''),
+      lastUsed: seen.reduce((last, record) => laterInstant(last, record.lastSeen), ''),
       methods: [...new Set(seen.map(record => record.method))].sort() } : undefined;
     // Denied uses the canary guard recorded: someone holds this credential.
     const triggered = usage?.canaryUsesFor(info.pubkey, rootKeyId) ?? null;
@@ -255,6 +263,9 @@ async function runSteps(args: string[], deps: Deps): Promise<InventoryOutput> {
       try {
         const result = await lnd.checkMacaroon(mac, decoded.permissions);
         if (result?.valid === true) row.verify = 'accepted';
+        // LND's two answers must agree (1.2.1, as verify): "root key missing" while ListMacaroonIDs
+        // still lists the ID is no evidence that the root key is gone.
+        else if (result?.valid === false && result.reason === 'root-key-missing' && row.inLnd) row.verify = 'error';
         else if (result?.valid === false &&
           (result.reason === 'root-key-missing' || result.reason === 'signature-mismatch')) {
           row.verify = 'rejected';
@@ -277,10 +288,12 @@ async function runSteps(args: string[], deps: Deps): Promise<InventoryOutput> {
   const usageFor = (rootKeyId: string) => {
     const seen = usage?.forCredential(info.pubkey, { rootKeyId }) ?? [];
     return seen.length ? { calls: seen.reduce((sum, record) => sum + record.calls, 0),
-      lastUsed: seen.reduce((last, record) => record.lastSeen > last ? record.lastSeen : last, '') } : null;
+      lastUsed: seen.reduce((last, record) => laterInstant(last, record.lastSeen), '') } : null;
   };
   const canaryFor = (rootKeyId: string) => usage?.canaryUsesFor(info.pubkey, rootKeyId) ?? null;
   const review = buildAccessReview({ node: info, ids: [...inLnd], entries: ownEntries, usage: usageFor, canary: canaryFor,
+    usageState: usage === null ? { state: 'unavailable' } : usage.maybeIncomplete()
+      ? { state: 'incomplete', evictions: usage.evictions + usage.dropped, droppedAttributions: usage.droppedAttributions } : { state: 'complete' },
     ownRootKeyId: facts.rootKeyId.toString(), now: deps.clock(), version: macwardenVersion() });
   const text = formatAccessReview(review, reportFormat);
   let path: string | null = null;
@@ -299,7 +312,8 @@ async function runSteps(args: string[], deps: Deps): Promise<InventoryOutput> {
     path = resolve(reportOut);
   }
   if (output.ok && output.command === 'inventory') {
-    output.result.report = { format: reportFormat, path, review };
+    // The review as the report holds it: credential recognition and escaping applied.
+    output.result.report = { format: reportFormat, path, review: cleanReview(review) };
     if (path === null) output.display = { ...output.display, report: text };
   }
   return onlineWarnings(output);

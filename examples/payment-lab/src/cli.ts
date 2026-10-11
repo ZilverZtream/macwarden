@@ -1,4 +1,4 @@
-import { mkdirSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, realpathSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { DatabaseSync } from 'node:sqlite';
@@ -7,19 +7,21 @@ import { parseArgs } from 'node:util';
 import { diagnose } from './analysis/diagnose.ts';
 import { paymentsForHash } from './analysis/payments.ts';
 import {
-  NODE_NAMES, PAYER_PROFILES, RECEIVER_PROFILES, databasePath, invoiceApi, loadLab, payerApi, readApi,
+  EFFECT_DIR, NODE_NAMES, PAYER_PROFILES, RECEIVER_PROFILES, databasePath, effectDir, invoiceApi, loadLab, payerApi, readApi,
   type Lab, type NodeName, type PayerProfile, type ReceiverProfile,
 } from './config.ts';
 import { verifyLedger, type LedgerStore, type LndLedgerSource } from './ledger/verify.ts';
 import { explainCommand } from './explain/command.ts';
+import { safeText } from './explain/format.ts';
 import { describeError } from './lnd/errors.ts';
-import { labKey, type EffectTarget } from './outbox/effects.ts';
+import { labKey, readEffect, type EffectTarget } from './outbox/effects.ts';
 import { outboxStatus } from './outbox/outbox.ts';
 import { runOutbox, runPass } from './outbox/worker.ts';
 import { decodeInvoice, reconcile, recordIntent, submit, type Fault, type PayOutcome, type PayerDeps } from './payer/payer.ts';
 import { PayerStore, type OperationKind, type PaymentRecord } from './payer/store.ts';
 import { cancelHoldInvoice, createInvoice, listen, reconcileInvoices, settleHoldInvoice, type ReceiverDeps } from './receiver/receiver.ts';
 import { ReceiverStore } from './receiver/store.ts';
+import { readOnly } from './store/sqlite.ts';
 import { bolt11PaymentHash, damagedPaymentRequest } from './util/bolt11.ts';
 import { assertHash } from './util/encoding.ts';
 import { parseAmount } from './util/money.ts';
@@ -36,9 +38,12 @@ import { parseAmount } from './util/money.ts';
  * retry, reconcile); for several payments (payer reconcile) the first of 75, 3,
  * 1 that applies to any of them, else 0.
  *
- * Arguments are validated before anything is recorded: a usage error never
- * leaves a durable change behind. An option the command does not take (one
- * another command takes included) is a usage error, before anything is opened.
+ * Every argument is validated before anything is opened: a usage error never
+ * creates, migrates or changes a database. An option the command does not take
+ * (one another command takes included), or one given twice, is a usage error.
+ * The commands that only read (show, budget-show, ledger-verify, outbox-status,
+ * explain, analysis diagnose) open their database read-only (store/sqlite.ts,
+ * readOnly): they never create or migrate it.
  *
  * payer reconcile runs one outbox pass after its own, unless it was stopped
  * (SIGINT, SIGTERM or --timeout-s): it then reports outbox-pass-skipped.
@@ -92,12 +97,12 @@ function identifier(value: string, what: string): string {
 }
 
 function payerProfile(value: string): PayerProfile {
-  if (!(value in PAYER_PROFILES)) throw new UsageError(`--as must be one of ${Object.keys(PAYER_PROFILES).join(', ')}`);
+  if (!Object.hasOwn(PAYER_PROFILES, value)) throw new UsageError(`--as must be one of ${Object.keys(PAYER_PROFILES).join(', ')}`);
   return value as PayerProfile;
 }
 
 function receiverProfile(value: string): ReceiverProfile {
-  if (!(value in RECEIVER_PROFILES)) throw new UsageError(`--as must be one of ${Object.keys(RECEIVER_PROFILES).join(', ')}`);
+  if (!Object.hasOwn(RECEIVER_PROFILES, value)) throw new UsageError(`--as must be one of ${Object.keys(RECEIVER_PROFILES).join(', ')}`);
   return value as ReceiverProfile;
 }
 
@@ -148,17 +153,76 @@ const COMMAND_OPTIONS: Record<Component, Readonly<Record<string, readonly string
   },
 };
 
-/** A usage error for an unknown command, or for the first option given that the command does not take. */
+/**
+ * A usage error for an unknown command, or for the first option given that the command does not take or that
+ * was given before (parseArgs would keep the last silently).
+ */
 function checkOptions(component: Component, command: string, tokens: readonly { kind: string; name?: string }[]): void {
   const table = COMMAND_OPTIONS[component];
   const allowed = Object.hasOwn(table, command) ? table[command] : undefined;
   if (allowed === undefined) throw new UsageError(`unknown ${component} command ${command}`);
+  const seen = new Set<string>();
   for (const token of tokens) {
     if (token.kind !== 'option' || token.name === undefined) continue;
     if (!GLOBAL_OPTIONS[component].includes(token.name) && !allowed.includes(token.name)) {
       throw new UsageError(`unknown option --${token.name} for ${component} ${command}`);
     }
+    if (seen.has(token.name)) throw new UsageError(`--${token.name} is given more than once`);
+    seen.add(token.name);
   }
+}
+
+/** The commands that only read their records: their database is opened read-only (store/sqlite.ts, readOnly). */
+const READ_COMMANDS: Record<'payer' | 'receiver', readonly string[]> = {
+  payer: ['show', 'budget-show', 'ledger-verify', 'outbox-status', 'explain'],
+  receiver: ['show', 'ledger-verify', 'outbox-status', 'explain'],
+};
+
+/** How a command uses its records: 'read' never creates, migrates or changes the database. */
+export type Access = 'read' | 'write';
+
+function accessFor(component: 'payer' | 'receiver', command: string): Access {
+  return READ_COMMANDS[component].includes(command) ? 'read' : 'write';
+}
+
+/** At most this many TrackPaymentV2 streams are open at once in `payer reconcile`. */
+const RECONCILE_CONCURRENCY = 16;
+
+/**
+ * How long `payer reconcile` follows one payment's stream while other targets wait for a worker (reconcileInTurns),
+ * without a deadline: the length after which a TrackPaymentV2 stream counts as a working connection (payer.ts).
+ */
+const RECONCILE_TURN_MS = 15_000;
+
+/**
+ * Reconciles every target, at most RECONCILE_CONCURRENCY streams at once, so that each target is read however
+ * many others are in flight: a payment LND has already resolved is settled now, not after the streams of the first
+ * RECONCILE_CONCURRENCY targets, which stay open as long as LND holds those payments (until the deadline, or for
+ * good), have each kept a worker. While other targets wait, a target's stream is followed for one turn and the
+ * target then goes to the back of the queue; a turn is RECONCILE_TURN_MS, or the deadline shared out so that every
+ * target gets a turn before it. With no target waiting (the usual case: at most RECONCILE_CONCURRENCY unresolved
+ * payments) a stream is followed until its terminal state or the deadline, as before. Outcomes in the targets'
+ * order; a target's is that of its last turn.
+ */
+async function reconcileInTurns(deps: PayerDeps, targets: readonly string[], signal: AbortSignal, deadlineMs: number | undefined): Promise<PayOutcome[]> {
+  const rounds = Math.ceil(targets.length / RECONCILE_CONCURRENCY);
+  const turnMs = deadlineMs === undefined ? RECONCILE_TURN_MS : Math.max(1, Math.min(RECONCILE_TURN_MS, Math.floor(deadlineMs / rounds)));
+  const outcomes = new Map<string, PayOutcome>();
+  const queue = [...targets];
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const hash = queue.shift();
+      if (hash === undefined) return;
+      // A turn only while another target waits (and before the deadline: after it, reconcile answers from the record at once).
+      const turn = queue.length === 0 || signal.aborted ? signal : AbortSignal.any([signal, AbortSignal.timeout(turnMs)]);
+      const outcome = await reconcile(deps, hash, turn);
+      outcomes.set(hash, outcome);
+      // The turn ended with the payment still unresolved: its next turn comes after every waiting target's.
+      if (turn !== signal && turn.aborted && !signal.aborted && outcome.kind === 'unresolved') queue.push(hash);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(RECONCILE_CONCURRENCY, targets.length) }, worker));
+  return targets.map(hash => outcomes.get(hash) as PayOutcome);
 }
 
 function seconds(values: Record<string, unknown>, name: string, fallback: number): number {
@@ -177,20 +241,30 @@ function stopSignal(timeoutSeconds?: number): AbortSignal {
   return timeoutSeconds === undefined ? controller.signal : AbortSignal.any([controller.signal, AbortSignal.timeout(timeoutSeconds * 1000)]);
 }
 
-function openPayer(lab: Lab, profile: PayerProfile): PayerDeps {
+/** The store, opened read-only for 'read' (no data directory is made for it either). */
+function openStore<S>(lab: Lab, access: Access, open: () => S): S {
+  if (access === 'read') return readOnly(open);
   mkdirSync(databasePath(lab, ''), { recursive: true, mode: 0o700 });
-  return { api: payerApi(lab, profile), store: new PayerStore(databasePath(lab, PAYER_PROFILES[profile].database)), emit };
+  return open();
 }
 
-function openReceiver(lab: Lab, profile: ReceiverProfile): ReceiverDeps {
-  mkdirSync(databasePath(lab, ''), { recursive: true, mode: 0o700 });
-  return { api: invoiceApi(lab, profile), store: new ReceiverStore(databasePath(lab, RECEIVER_PROFILES[profile].database)), emit };
+function openPayer(lab: Lab, profile: PayerProfile, access: Access): PayerDeps {
+  const api = payerApi(lab, profile);
+  return { api, store: openStore(lab, access, () => new PayerStore(databasePath(lab, PAYER_PROFILES[profile].database))), emit };
 }
 
-/** How main opens a profile's records and node API; the regression tests pass in-memory stand-ins. */
+function openReceiver(lab: Lab, profile: ReceiverProfile, access: Access): ReceiverDeps {
+  const api = invoiceApi(lab, profile);
+  return { api, store: openStore(lab, access, () => new ReceiverStore(databasePath(lab, RECEIVER_PROFILES[profile].database))), emit };
+}
+
+/**
+ * How main opens a profile's records and node API; the regression tests pass in-memory stand-ins. `access` is
+ * 'read' for the commands that only read: the store must then be opened read-only (store/sqlite.ts, readOnly).
+ */
 export interface Services {
-  payer(labDir: string | undefined, profile: PayerProfile): PayerDeps;
-  receiver(labDir: string | undefined, profile: ReceiverProfile): ReceiverDeps;
+  payer(labDir: string | undefined, profile: PayerProfile, access?: Access): PayerDeps;
+  receiver(labDir: string | undefined, profile: ReceiverProfile, access?: Access): ReceiverDeps;
   /**
    * What ledger-verify compares with: ListPayments for a payer (its pay-only credential cannot
    * list payments, so the lab reads them with its node's read-only credential), ListInvoices for
@@ -198,16 +272,17 @@ export interface Services {
    */
   ledgerSource?(labDir: string | undefined, component: 'payer' | 'receiver', profile: string): LndLedgerSource | undefined;
   /**
-   * Where the outbox worker writes its effects and the HMAC key it signs them with: `<lab>/receipts`
-   * (receiver) or `<lab>/confirmations` (payer), and the lab's `outbox.key`. Undefined: no worker runs
+   * Where the outbox worker writes the profile's effects and the HMAC key it signs them with: `<lab>/receipts/<profile>`
+   * (receiver) or `<lab>/confirmations/<profile>` (payer; config.ts, effectDir), and the lab's `outbox.key`. `db` is the
+   * profile's store, to adopt the effects an earlier version wrote for it (adoptLegacyEffects). Undefined: no worker runs
    * (`payer reconcile` and `receiver listen` skip it; `outbox-run` is a configuration error).
    */
-  outbox?(labDir: string | undefined, component: 'payer' | 'receiver'): EffectTarget | undefined;
+  outbox?(labDir: string | undefined, component: 'payer' | 'receiver', profile: string, db: DatabaseSync): EffectTarget | undefined;
 }
 
 const LAB_SERVICES: Services = {
-  payer: (labDir, profile) => openPayer(loadLab(labDir), profile),
-  receiver: (labDir, profile) => openReceiver(loadLab(labDir), profile),
+  payer: (labDir, profile, access = 'write') => openPayer(loadLab(labDir), profile, access),
+  receiver: (labDir, profile, access = 'write') => openReceiver(loadLab(labDir), profile, access),
   ledgerSource: (labDir, component, profile) => {
     if (component !== 'payer') return undefined;
     const lab = loadLab(labDir);
@@ -215,22 +290,74 @@ const LAB_SERVICES: Services = {
     if (credential === undefined) throw new Error(`unknown credential for payer profile ${profile}`);
     return readApi(lab, credential.node);
   },
-  outbox: (labDir, component) => {
-    const lab = loadLab(labDir);
-    return { dir: join(lab.dir, component === 'receiver' ? 'receipts' : 'confirmations'), key: labKey(lab.dir) };
-  },
+  outbox: labOutboxTarget,
 };
 
-function outboxTarget(services: Services, labDir: string | undefined, component: 'payer' | 'receiver'): EffectTarget {
-  const target = services.outbox?.(labDir, component);
+/**
+ * The lab's outbox target for a profile (Services.outbox): `<lab>/receipts/<profile>` or `<lab>/confirmations/<profile>`,
+ * after adopting the profile's effects an earlier version wrote. Exported for the regression tests.
+ */
+export function labOutboxTarget(labDir: string | undefined, component: 'payer' | 'receiver', profile: string, db: DatabaseSync): EffectTarget {
+  const lab = loadLab(labDir);
+  const key = labKey(lab.dir);
+  const dir = effectDir(lab, component, profile);
+  adoptLegacyEffects(join(lab.dir, EFFECT_DIR[component]), dir, component, key, db);
+  return { dir, key };
+}
+
+/** The entries of a directory; none when it does not exist or is not a directory. */
+function listDir(dir: string): string[] {
+  try {
+    return readdirSync(dir);
+  } catch (error) {
+    if (['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) return [];
+    throw error;
+  }
+}
+
+/**
+ * Up to 1.3, every profile of a component wrote its effects straight into `<lab>/receipts` or `<lab>/confirmations`, so
+ * the same order or operation ID in two profiles named one file. Each such file this profile's records own (a valid HMAC,
+ * and an outbox row of this store with the file's idempotency key: the ID and the payment hash) is moved into the profile's
+ * directory, unless that already holds the name; the others are left for their own profile. The worker then finds them
+ * already present instead of writing them again.
+ */
+function adoptLegacyEffects(legacyDir: string, dir: string, component: 'payer' | 'receiver', key: Buffer, db: DatabaseSync): void {
+  const files = listDir(legacyDir).filter(name => name.endsWith('.json') && !name.startsWith('.'));
+  if (files.length === 0) return;
+  const owned = db.prepare('SELECT 1 AS n FROM outbox WHERE idempotency_key = ?');
+  for (const name of files) {
+    const from = join(legacyDir, name);
+    const read = readEffect(from, key);
+    if (read.state !== 'valid') continue;
+    const id = read.fields[component === 'receiver' ? 'orderId' : 'operationId'];
+    const hash = read.fields.paymentHash;
+    if (typeof id !== 'string' || typeof hash !== 'string' || owned.get(`${id}:${hash}`) === undefined) continue;
+    const to = join(dir, name);
+    if (existsSync(to)) continue;
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    try {
+      renameSync(from, to);
+      emit({ event: 'outbox-effect-adopted', from, to });
+    } catch (error) {
+      // Another worker of the profile moved it first.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+}
+
+function outboxTarget(services: Services, labDir: string | undefined, component: 'payer' | 'receiver', profile: string,
+  db: DatabaseSync): EffectTarget {
+  const target = services.outbox?.(labDir, component, profile, db);
   if (target === undefined) throw new Error(`no outbox target for the ${component}: this service has no lab directory`);
   return target;
 }
 
 /** One worker pass after another command's own work (payer reconcile, the listener); a failure is reported, not raised. */
-function outboxPassAfter(services: Services, labDir: string | undefined, component: 'payer' | 'receiver', db: DatabaseSync): void {
+function outboxPassAfter(services: Services, labDir: string | undefined, component: 'payer' | 'receiver', profile: string,
+  db: DatabaseSync): void {
   try {
-    const target = services.outbox?.(labDir, component);
+    const target = services.outbox?.(labDir, component, profile, db);
     if (target !== undefined) emit({ event: 'outbox-pass', ...runPass(db, target, { emit }) });
   } catch (error) {
     emit({ event: 'outbox-pass-failed', error: describeError(error) });
@@ -238,17 +365,18 @@ function outboxPassAfter(services: Services, labDir: string | undefined, compone
 }
 
 /** outbox-run: passes over the due rows, once or every --interval-s until stopped (exit codes in the header). */
-async function outboxRun(services: Services, values: Record<string, unknown>, component: 'payer' | 'receiver', db: DatabaseSync): Promise<number> {
+async function outboxRun(services: Services, values: Record<string, unknown>, intervalSeconds: number, component: 'payer' | 'receiver',
+  profile: string, db: DatabaseSync): Promise<number> {
   const once = values.once === true;
-  const intervalMs = seconds(values, 'interval-s', 5) * 1000;
-  const target = outboxTarget(services, values.lab as string | undefined, component);
-  const result = await runOutbox(db, target, { emit, once, intervalMs, signal: once ? new AbortController().signal : stopSignal() });
+  const target = outboxTarget(services, values.lab as string | undefined, component, profile, db);
+  const result = await runOutbox(db, target, { emit, once, intervalMs: intervalSeconds * 1000,
+    signal: once ? new AbortController().signal : stopSignal() });
   return once && result.remaining > 0 ? EXIT.unresolved : EXIT.ok;
 }
 
 /** outbox-status: counts per state and the oldest pending age, as an event or one JSON object with --json. */
-function outboxStatusCommand(values: Record<string, unknown>, db: DatabaseSync): number {
-  const status = outboxStatus(db, Date.now(), seconds(values, 'deadline-s', 300));
+function outboxStatusCommand(values: Record<string, unknown>, deadlineSeconds: number, db: DatabaseSync): number {
+  const status = outboxStatus(db, Date.now(), deadlineSeconds);
   if (values.json === true) process.stdout.write(`${JSON.stringify(status)}\n`);
   else emit({ event: 'outbox-status', ...status });
   return status.overdueCount > 0 ? EXIT.unresolved : EXIT.ok;
@@ -261,7 +389,7 @@ function more(listed: number, count: number): string | undefined {
 
 /**
  * ledger-verify: the report as events (or one JSON object with --json) and the exit code (see the header).
- * Both list at most the first LIST_LIMIT unbalanced and malformed entries, with their totals; the
+ * Both list at most the first LIST_LIMIT unbalanced and malformed entries and per-payment differences from LND, with their totals; the
  * text summary adds "… N more" for each list that leaves entries out.
  */
 async function ledgerVerify(store: LedgerStore, source: LndLedgerSource | undefined, json: boolean): Promise<number> {
@@ -275,6 +403,9 @@ async function ledgerVerify(store: LedgerStore, source: LndLedgerSource | undefi
       unbalancedEntriesMore: more(result.unbalancedEntries.length, result.unbalancedEntryCount),
       invalidEntries: result.invalidEntries, invalidEntryCount: result.invalidEntryCount,
       invalidEntriesMore: more(result.invalidEntries.length, result.invalidEntryCount),
+      // Per-payment differences from LND, listed even when they cancel out in the account totals (the first LIST_LIMIT).
+      lndDifferences: result.lndDifferences, lndDifferenceCount: result.lndDifferenceCount,
+      lndDifferencesMore: more(result.lndDifferences.length, result.lndDifferenceCount),
       lnd: result.lnd, lndDetail: result.lndDetail, firstDifference: result.firstDifference });
   }
   if (!result.balanced) return EXIT.failed;
@@ -323,13 +454,35 @@ function explainSubject(values: Record<string, unknown>, idOption: 'operation' |
   return { id: identifier(required(values, idOption), `--${idOption}`) };
 }
 
+/** A payment record as `payer show` prints it: the preimage, the proof of payment, is never printed; only whether one is recorded. */
+function paymentView(payment: PaymentRecord): Record<string, unknown> {
+  const { preimage, ...rest } = payment;
+  return { ...rest, preimageRecorded: preimage !== undefined };
+}
+
+/**
+ * A payment from ListPayments as `analysis payments` prints it: never its preimage (at most whether LND has one) nor its
+ * payment request. Whatever shape analysis/payments.ts returns, those two fields are left out here.
+ */
+function paymentEvidence(payment: object): Record<string, unknown> {
+  const view: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(payment)) {
+    if (key !== 'preimage' && key !== 'paymentRequest') view[key] = value;
+  }
+  if ('preimage' in payment && !('preimagePresent' in view)) {
+    const { preimage } = payment as { preimage?: unknown };
+    view.preimagePresent = typeof preimage === 'string' && preimage !== '';
+  }
+  return view;
+}
+
 function showPayment(deps: PayerDeps, operationId: string): void {
   const operation = deps.store.operation(operationId);
   const payment = deps.store.paymentForOperation(operationId);
   emit({
     event: 'payment-record',
     operation: operation ?? null,
-    payment: payment ?? null,
+    payment: payment === undefined ? null : paymentView(payment),
     attempts: payment === undefined ? [] : deps.store.attempts(payment.paymentHash),
     ledger: deps.store.ledger(operationId),
     journal: deps.store.journal(operationId),
@@ -339,31 +492,33 @@ function showPayment(deps: PayerDeps, operationId: string): void {
   });
 }
 
-async function payer(command: string, args: string[], services: Services): Promise<number> {
-  const { values, tokens } = parseArgs({ args, options: {
-    as: { type: 'string' }, operation: { type: 'string' }, kind: { type: 'string' }, invoice: { type: 'string' },
-    'fee-limit-msat': { type: 'string' }, 'max-parts': { type: 'string' }, 'timeout-s': { type: 'string' }, budget: { type: 'string' },
-    'limit-msat': { type: 'string' }, 'payment-hash': { type: 'string' }, fault: { type: 'string' }, 'wait-for-go': { type: 'boolean' },
-    lab: { type: 'string' }, json: { type: 'boolean' }, once: { type: 'boolean' }, 'interval-s': { type: 'string' },
-    'deadline-s': { type: 'string' }, refresh: { type: 'boolean' },
-  }, strict: true, tokens: true });
-  checkOptions('payer', command, tokens);
-  const profile = payerProfile(required(values, 'as'));
-  const deps = services.payer(values.lab, profile);
-  try {
-    switch (command) {
-      case 'pay': {
-        const operationId = identifier(required(values, 'operation'), '--operation');
-        const kind = required(values, 'kind');
-        if (!['order-payment', 'refund', 'payout'].includes(kind)) throw new UsageError('--kind must be order-payment, refund or payout');
-        const feeLimitMsat = amountArg(required(values, 'fee-limit-msat'), '--fee-limit-msat');
-        const maxParts = values['max-parts'] === undefined ? 16 : Number(amountArg(values['max-parts'], '--max-parts'));
-        if (maxParts < 1 || maxParts > 128) throw new UsageError('--max-parts must be 1 to 128');
-        const fault = (values.fault ?? 'none') as Fault;
-        if (fault !== 'none' && fault !== 'drop-stream-after-in-flight') throw new UsageError('--fault must be drop-stream-after-in-flight');
-        const budgetId = values.budget === undefined ? undefined : identifier(values.budget, '--budget');
-        const timeoutSeconds = seconds(values, 'timeout-s', 60);
-        const paymentRequest = required(values, 'invoice');
+/** A command with its arguments checked, to run once its records and node API are opened. */
+type Run<D> = (deps: D) => Promise<number> | number;
+
+/** Checks the payer command's arguments (a usage error before anything is opened) and returns what runs it. */
+function payerCommand(command: string, values: PayerValues, services: Services, profile: PayerProfile): Run<PayerDeps> {
+  switch (command) {
+    case 'pay': {
+      const operationId = identifier(required(values, 'operation'), '--operation');
+      const kind = required(values, 'kind');
+      if (!['order-payment', 'refund', 'payout'].includes(kind)) throw new UsageError('--kind must be order-payment, refund or payout');
+      const feeLimitMsat = amountArg(required(values, 'fee-limit-msat'), '--fee-limit-msat');
+      const maxParts = values['max-parts'] === undefined ? 16 : Number(amountArg(values['max-parts'], '--max-parts'));
+      if (maxParts < 1 || maxParts > 128) throw new UsageError('--max-parts must be 1 to 128');
+      if (values.fault !== undefined && values.fault !== 'drop-stream-after-in-flight') {
+        throw new UsageError('--fault must be drop-stream-after-in-flight');
+      }
+      const fault: Fault = values.fault === undefined ? 'none' : 'drop-stream-after-in-flight';
+      const budgetId = values.budget === undefined ? undefined : identifier(values.budget, '--budget');
+      const timeoutSeconds = seconds(values, 'timeout-s', 60);
+      const paymentRequest = required(values, 'invoice');
+      return async deps => {
+        // The operation's recorded kind is authoritative (its replacement invoices are paid as that kind): another one is a usage
+        // error, before anything is decoded, recorded or sent.
+        const recordedKind = deps.store.operation(operationId)?.kind;
+        if (recordedKind !== undefined && recordedKind !== kind) {
+          throw new UsageError(`--kind ${kind} differs from operation ${operationId}'s recorded kind ${recordedKind}`);
+        }
         const replayed = await answerFromRecord(deps, operationId, paymentRequest);
         if (replayed !== undefined) return replayed;
         const decoded = await decodeInvoice(deps, paymentRequest);
@@ -379,10 +534,12 @@ async function payer(command: string, args: string[], services: Services): Promi
         }
         const signal = stopSignal();
         return exitFor(await submit(deps, intent.payment.paymentHash, { timeoutSeconds, fault, signal }));
-      }
-      case 'retry': {
-        const operationId = identifier(required(values, 'operation'), '--operation');
-        const timeoutSeconds = seconds(values, 'timeout-s', 60);
+      };
+    }
+    case 'retry': {
+      const operationId = identifier(required(values, 'operation'), '--operation');
+      const timeoutSeconds = seconds(values, 'timeout-s', 60);
+      return async deps => {
         const prepared = deps.store.prepareRetry(operationId);
         if (prepared.outcome !== 'recorded') {
           emit({ event: 'retry-refused', operationId, reason: prepared.outcome === 'refused' ? prepared.reason : 'unexpected' });
@@ -390,49 +547,85 @@ async function payer(command: string, args: string[], services: Services): Promi
         }
         emit({ event: 'retry-prepared', operationId, paymentHash: prepared.payment.paymentHash });
         return exitFor(await submit(deps, prepared.payment.paymentHash, { timeoutSeconds, fault: 'none', signal: stopSignal() }));
-      }
-      case 'reconcile': {
-        const timeoutSeconds = values['timeout-s'] === undefined ? undefined : seconds(values, 'timeout-s', 60);
-        const targets = values['payment-hash'] === undefined
-          ? deps.store.unresolvedPayments().map(item => item.paymentHash)
-          : [hashArg(values['payment-hash'], '--payment-hash')];
+      };
+    }
+    case 'reconcile': {
+      const timeoutSeconds = values['timeout-s'] === undefined ? undefined : seconds(values, 'timeout-s', 60);
+      const only = values['payment-hash'] === undefined ? undefined : hashArg(values['payment-hash'], '--payment-hash');
+      return async deps => {
+        const targets = only === undefined ? deps.store.unresolvedPayments().map(item => item.paymentHash) : [only];
         const signal = stopSignal(timeoutSeconds);
         emit({ event: 'reconcile-started', payments: targets.length });
-        const outcomes = await Promise.all(targets.map(hash => reconcile(deps, hash, signal)));
+        // At most RECONCILE_CONCURRENCY TrackPaymentV2 streams at once, however many payments are unresolved, each read in turn.
+        const outcomes = await reconcileInTurns(deps, targets, signal, timeoutSeconds === undefined ? undefined : timeoutSeconds * 1000);
         // Then the effects of operations completed so far (this pass's and earlier ones'); they do not change the exit code.
         // Not once stopped (SIGINT, SIGTERM, --timeout-s), as the listener does not: stopping means stop.
         if (signal.aborted) emit({ event: 'outbox-pass-skipped', reason: 'reconcile was stopped' });
-        else outboxPassAfter(services, values.lab, 'payer', deps.store.db);
+        else outboxPassAfter(services, values.lab, 'payer', profile, deps.store.db);
         return exitForAll(outcomes);
-      }
-      case 'show':
-        showPayment(deps, identifier(required(values, 'operation'), '--operation'));
-        return EXIT.ok;
-      case 'budget-set': {
-        const budgetId = identifier(required(values, 'budget'), '--budget');
-        deps.store.setBudget(budgetId, amountArg(required(values, 'limit-msat'), '--limit-msat'));
+      };
+    }
+    case 'show': {
+      const operationId = identifier(required(values, 'operation'), '--operation');
+      return deps => { showPayment(deps, operationId); return EXIT.ok; };
+    }
+    case 'budget-set': {
+      const budgetId = identifier(required(values, 'budget'), '--budget');
+      const limitMsat = amountArg(required(values, 'limit-msat'), '--limit-msat');
+      return deps => {
+        deps.store.setBudget(budgetId, limitMsat);
         emit({ event: 'budget', ...deps.store.budgetStatus(budgetId) });
         return EXIT.ok;
-      }
-      case 'budget-show': {
-        const budgetId = identifier(required(values, 'budget'), '--budget');
+      };
+    }
+    case 'budget-show': {
+      const budgetId = identifier(required(values, 'budget'), '--budget');
+      return deps => {
         emit({ event: 'budget', status: deps.store.budgetStatus(budgetId) ?? null, refusals: deps.store.refusals(budgetId) });
         return EXIT.ok;
-      }
-      case 'ledger-verify':
-        return await ledgerVerify(deps.store, services.ledgerSource?.(values.lab, 'payer', profile) ?? {}, values.json === true);
-      case 'outbox-run':
-        return await outboxRun(services, values, 'payer', deps.store.db);
-      case 'outbox-status':
-        return outboxStatusCommand(values, deps.store.db);
-      case 'explain': {
-        const subject = explainSubject(values, 'operation');
-        return await explainCommand({ component: 'payer', store: deps.store, api: deps.api,
-          subject: { operationId: subject.id, paymentHash: subject.paymentHash } }, { json: values.json === true, refresh: values.refresh === true });
-      }
-      default:
-        throw new UsageError(`unknown payer command ${command}`);
+      };
     }
+    case 'ledger-verify':
+      return async deps => await ledgerVerify(deps.store, services.ledgerSource?.(values.lab, 'payer', profile) ?? {}, values.json === true);
+    case 'outbox-run': {
+      const intervalSeconds = seconds(values, 'interval-s', 5);
+      return async deps => await outboxRun(services, values, intervalSeconds, 'payer', profile, deps.store.db);
+    }
+    case 'outbox-status': {
+      const deadlineSeconds = seconds(values, 'deadline-s', 300);
+      return deps => outboxStatusCommand(values, deadlineSeconds, deps.store.db);
+    }
+    case 'explain': {
+      const subject = explainSubject(values, 'operation');
+      return async deps => await explainCommand({ component: 'payer', store: deps.store, api: deps.api,
+        subject: { operationId: subject.id, paymentHash: subject.paymentHash }, profile }, { json: values.json === true, refresh: values.refresh === true });
+    }
+    default:
+      throw new UsageError(`unknown payer command ${command}`);
+  }
+}
+
+type PayerValues = ReturnType<typeof parsePayerArgs>['values'];
+
+function parsePayerArgs(args: string[]) {
+  return parseArgs({ args, options: {
+    as: { type: 'string' }, operation: { type: 'string' }, kind: { type: 'string' }, invoice: { type: 'string' },
+    'fee-limit-msat': { type: 'string' }, 'max-parts': { type: 'string' }, 'timeout-s': { type: 'string' }, budget: { type: 'string' },
+    'limit-msat': { type: 'string' }, 'payment-hash': { type: 'string' }, fault: { type: 'string' }, 'wait-for-go': { type: 'boolean' },
+    lab: { type: 'string' }, json: { type: 'boolean' }, once: { type: 'boolean' }, 'interval-s': { type: 'string' },
+    'deadline-s': { type: 'string' }, refresh: { type: 'boolean' },
+  }, strict: true, tokens: true });
+}
+
+/** Every argument is checked first; only then is the profile's store opened (read-only for a command that only reads). */
+async function payer(command: string, args: string[], services: Services): Promise<number> {
+  const { values, tokens } = parsePayerArgs(args);
+  checkOptions('payer', command, tokens);
+  const profile = payerProfile(required(values, 'as'));
+  const run = payerCommand(command, values, services, profile);
+  const deps = services.payer(values.lab, profile, accessFor('payer', command));
+  try {
+    return await run(deps);
   } finally {
     deps.store.close();
   }
@@ -514,61 +707,67 @@ async function reconcileOrReport(deps: PayerDeps, paymentHash: string, state: st
   return reconcile(deps, paymentHash, AbortSignal.timeout(30_000));
 }
 
-async function receiver(command: string, args: string[], services: Services): Promise<number> {
-  const { values, tokens } = parseArgs({ args, options: {
-    as: { type: 'string' }, order: { type: 'string' }, 'amount-msat': { type: 'string' }, hold: { type: 'boolean' },
-    memo: { type: 'string' }, 'expiry-s': { type: 'string' }, 'settle-index': { type: 'string' }, 'add-index': { type: 'string' },
-    'reconcile-interval-s': { type: 'string' }, lab: { type: 'string' }, json: { type: 'boolean' }, once: { type: 'boolean' },
-    'interval-s': { type: 'string' }, 'deadline-s': { type: 'string' }, 'payment-hash': { type: 'string' }, refresh: { type: 'boolean' },
-  }, strict: true, tokens: true });
-  checkOptions('receiver', command, tokens);
-  const profile = receiverProfile(required(values, 'as'));
-  const deps = services.receiver(values.lab, profile);
-  try {
-    switch (command) {
-      case 'create-invoice': {
-        const orderId = identifier(required(values, 'order'), '--order');
-        const amountMsat = amountArg(required(values, 'amount-msat'), '--amount-msat');
-        if (amountMsat === 0n) throw new UsageError('--amount-msat must be positive');
-        const outcome = await createInvoice(deps, { orderId, amountMsat, hold: values.hold === true, memo: values.memo ?? orderId,
-          expirySeconds: seconds(values, 'expiry-s', 3600) });
+/** Checks the receiver command's arguments (a usage error before anything is opened) and returns what runs it. */
+function receiverCommand(command: string, values: ReceiverValues, services: Services, profile: ReceiverProfile): Run<ReceiverDeps> {
+  switch (command) {
+    case 'create-invoice': {
+      const orderId = identifier(required(values, 'order'), '--order');
+      const amountMsat = amountArg(required(values, 'amount-msat'), '--amount-msat');
+      if (amountMsat === 0n) throw new UsageError('--amount-msat must be positive');
+      const expirySeconds = seconds(values, 'expiry-s', 3600);
+      return async deps => {
+        const outcome = await createInvoice(deps, { orderId, amountMsat, hold: values.hold === true, memo: values.memo ?? orderId, expirySeconds });
         emit({ event: 'outcome', ...outcome });
         return outcome.kind === 'created' ? EXIT.ok : outcome.kind === 'unresolved' ? EXIT.unresolved : EXIT.refused;
-      }
-      case 'settle': {
-        const outcome = await settleHoldInvoice(deps, identifier(required(values, 'order'), '--order'));
+      };
+    }
+    case 'settle': {
+      const orderId = identifier(required(values, 'order'), '--order');
+      return async deps => {
+        const outcome = await settleHoldInvoice(deps, orderId);
         emit({ event: 'outcome', ...outcome });
         return outcome.kind === 'settled' ? EXIT.ok : outcome.kind === 'unresolved' ? EXIT.unresolved : EXIT.refused;
-      }
-      case 'cancel': {
-        const outcome = await cancelHoldInvoice(deps, identifier(required(values, 'order'), '--order'));
+      };
+    }
+    case 'cancel': {
+      const orderId = identifier(required(values, 'order'), '--order');
+      return async deps => {
+        const outcome = await cancelHoldInvoice(deps, orderId);
         emit({ event: 'outcome', ...outcome });
         return outcome.kind === 'canceled' ? EXIT.ok : outcome.kind === 'unresolved' ? EXIT.unresolved : EXIT.refused;
-      }
-      case 'reconcile': {
-        const result = await reconcileInvoices(deps, values.order === undefined ? undefined : identifier(values.order, '--order'),
-          stopSignal());
+      };
+    }
+    case 'reconcile': {
+      const orderId = values.order === undefined ? undefined : identifier(values.order, '--order');
+      return async deps => {
+        const result = await reconcileInvoices(deps, orderId, stopSignal());
         emit({ event: 'outcome', ...result });
         return result.unknown > 0 ? EXIT.unresolved : EXIT.ok;
-      }
-      case 'listen': {
-        const interval = seconds(values, 'reconcile-interval-s', 10);
+      };
+    }
+    case 'listen': {
+      const interval = seconds(values, 'reconcile-interval-s', 10);
+      return async deps => {
         // The outbox worker runs after every reconciliation pass (and so once at start).
         await listen(deps, { reconcileIntervalMs: interval * 1000, signal: stopSignal(),
-          afterReconcile: () => { outboxPassAfter(services, values.lab, 'receiver', deps.store.db); } });
+          afterReconcile: () => { outboxPassAfter(services, values.lab, 'receiver', profile, deps.store.db); } });
         emit({ event: 'stopped' });
         return EXIT.ok;
-      }
-      case 'cursor-set': {
-        const settleIndex = amountArg(required(values, 'settle-index'), '--settle-index');
-        const addIndex = values['add-index'] === undefined ? 0n : amountArg(values['add-index'], '--add-index');
+      };
+    }
+    case 'cursor-set': {
+      const settleIndex = amountArg(required(values, 'settle-index'), '--settle-index');
+      const addIndex = values['add-index'] === undefined ? 0n : amountArg(values['add-index'], '--add-index');
+      return deps => {
         const before = deps.store.cursor();
         deps.store.setCursor(settleIndex, addIndex);
         emit({ event: 'cursor-set', before, after: deps.store.cursor() });
         return EXIT.ok;
-      }
-      case 'show': {
-        const orderId = identifier(required(values, 'order'), '--order');
+      };
+    }
+    case 'show': {
+      const orderId = identifier(required(values, 'order'), '--order');
+      return deps => {
         // The preimage is the proof of payment; it is never printed.
         const invoices = deps.store.invoicesForOrder(orderId).map(item => ({ paymentHash: item.paymentHash, kind: item.kind,
           state: item.state, amountMsat: item.amountMsat, amtPaidMsat: item.amtPaidMsat, settleIndex: item.settleIndex,
@@ -578,50 +777,83 @@ async function receiver(command: string, args: string[], services: Services): Pr
           fulfillments: deps.store.fulfillmentCount(orderId), outbox: deps.store.outbox(orderId), ledger: deps.store.ledger(orderId), journal: deps.store.journal(orderId),
           cursor: deps.store.cursor() });
         return EXIT.ok;
-      }
-      case 'ledger-verify':
-        return await ledgerVerify(deps.store, services.ledgerSource?.(values.lab, 'receiver', profile) ?? deps.api, values.json === true);
-      case 'outbox-run':
-        return await outboxRun(services, values, 'receiver', deps.store.db);
-      case 'outbox-status':
-        return outboxStatusCommand(values, deps.store.db);
-      case 'explain': {
-        const subject = explainSubject(values, 'order');
-        return await explainCommand({ component: 'receiver', store: deps.store, api: deps.api,
-          subject: { orderId: subject.id, paymentHash: subject.paymentHash } }, { json: values.json === true, refresh: values.refresh === true });
-      }
-      default:
-        throw new UsageError(`unknown receiver command ${command}`);
+      };
     }
+    case 'ledger-verify':
+      return async deps => await ledgerVerify(deps.store, services.ledgerSource?.(values.lab, 'receiver', profile) ?? deps.api, values.json === true);
+    case 'outbox-run': {
+      const intervalSeconds = seconds(values, 'interval-s', 5);
+      return async deps => await outboxRun(services, values, intervalSeconds, 'receiver', profile, deps.store.db);
+    }
+    case 'outbox-status': {
+      const deadlineSeconds = seconds(values, 'deadline-s', 300);
+      return deps => outboxStatusCommand(values, deadlineSeconds, deps.store.db);
+    }
+    case 'explain': {
+      const subject = explainSubject(values, 'order');
+      return async deps => await explainCommand({ component: 'receiver', store: deps.store, api: deps.api,
+        subject: { orderId: subject.id, paymentHash: subject.paymentHash }, profile }, { json: values.json === true, refresh: values.refresh === true });
+    }
+    default:
+      throw new UsageError(`unknown receiver command ${command}`);
+  }
+}
+
+type ReceiverValues = ReturnType<typeof parseReceiverArgs>['values'];
+
+function parseReceiverArgs(args: string[]) {
+  return parseArgs({ args, options: {
+    as: { type: 'string' }, order: { type: 'string' }, 'amount-msat': { type: 'string' }, hold: { type: 'boolean' },
+    memo: { type: 'string' }, 'expiry-s': { type: 'string' }, 'settle-index': { type: 'string' }, 'add-index': { type: 'string' },
+    'reconcile-interval-s': { type: 'string' }, lab: { type: 'string' }, json: { type: 'boolean' }, once: { type: 'boolean' },
+    'interval-s': { type: 'string' }, 'deadline-s': { type: 'string' }, 'payment-hash': { type: 'string' }, refresh: { type: 'boolean' },
+  }, strict: true, tokens: true });
+}
+
+/** Every argument is checked first; only then is the profile's store opened (read-only for a command that only reads). */
+async function receiver(command: string, args: string[], services: Services): Promise<number> {
+  const { values, tokens } = parseReceiverArgs(args);
+  checkOptions('receiver', command, tokens);
+  const profile = receiverProfile(required(values, 'as'));
+  const run = receiverCommand(command, values, services, profile);
+  const deps = services.receiver(values.lab, profile, accessFor('receiver', command));
+  try {
+    return await run(deps);
   } finally {
     deps.store.close();
   }
 }
 
+/** Every argument is checked before the lab is loaded; diagnose opens the payer's records read-only. */
 async function analysis(command: string, args: string[]): Promise<number> {
   const { values, tokens } = parseArgs({ args, options: {
     node: { type: 'string' }, 'payment-hash': { type: 'string' }, payer: { type: 'string' }, operation: { type: 'string' },
     lab: { type: 'string' },
   }, strict: true, tokens: true });
   checkOptions('analysis', command, tokens);
-  const lab = loadLab(values.lab);
-  const read = readApi(lab, nodeName(required(values, 'node')));
+  const node = nodeName(required(values, 'node'));
   switch (command) {
     case 'payments': {
-      const result = await paymentsForHash(read, hashArg(required(values, 'payment-hash'), '--payment-hash'));
+      const paymentHash = hashArg(required(values, 'payment-hash'), '--payment-hash');
+      const result = await paymentsForHash(readApi(loadLab(values.lab), node), paymentHash);
+      // Never a preimage or a payment request (paymentEvidence).
       emit({ event: 'payments-for-hash', count: result.payments.length, scanned: result.scanned, complete: result.complete,
-        payments: result.payments });
+        payments: result.payments.map(paymentEvidence) });
       return EXIT.ok;
     }
     case 'diagnose': {
       const profile = payerProfile(required(values, 'payer'));
-      const store = new PayerStore(databasePath(lab, PAYER_PROFILES[profile].database));
+      const operationId = identifier(required(values, 'operation'), '--operation');
+      const lab = loadLab(values.lab);
+      const read = readApi(lab, node);
+      const store = readOnly(() => new PayerStore(databasePath(lab, PAYER_PROFILES[profile].database)));
       try {
-        const operationId = identifier(required(values, 'operation'), '--operation');
         const record = store.paymentForOperation(operationId);
         if (record === undefined) throw new UsageError(`operation ${operationId} has no payment`);
         const lnd = await paymentsForHash(read, record.paymentHash);
-        const result = await diagnose(read, { amountMsat: record.amountMsat, destination: record.destination, payment: lnd.payments[0] });
+        // The scan too: a payment not found in an incomplete scan is reported as such, not as absent.
+        const result = await diagnose(read, { amountMsat: record.amountMsat, destination: record.destination, payment: lnd.payments[0],
+          paymentScan: lnd });
         emit({ event: 'diagnosis', operationId, paymentHash: record.paymentHash, ...result });
         return EXIT.ok;
       } finally {
@@ -670,7 +902,8 @@ export async function main(argv: string[], services: Services = LAB_SERVICES): P
     throw new UsageError(`unknown component ${component}`);
   } catch (error) {
     if (error instanceof UsageError || (error instanceof TypeError && 'code' in error && String(error.code).startsWith('ERR_PARSE_ARGS'))) {
-      process.stderr.write(`${error.message}\n${USAGE}\n`);
+      // The message can quote a command or option name as typed: escaped, so no control character reaches the terminal.
+      process.stderr.write(`${safeText(error.message)}\n${USAGE}\n`);
       return EXIT.usage;
     }
     emit({ event: 'error', error: describeError(error) });

@@ -35,7 +35,7 @@ Never send real credentials. Do not include a real macaroon, `lndconnect://` URI
 
 macwarden is built around a set of safety rules, SAFE-01 to SAFE-11, which are enforced in code and covered by tests. In summary:
 
-- It never prints, logs or stores credential bytes; a credential appears only as a short SHA-256 fingerprint. The only file that holds a credential is one you asked it to write with `--out`, created owner-only and verified before the first byte is written.
+- It never prints, logs or stores credential bytes; a credential appears only as a short SHA-256 fingerprint. The only files that hold a credential are those you asked it to write with `--out` (or `respond --out-dir`), created owner-only and verified before the first byte is written.
 - It never calls `changepassword`, never deletes root key ID 0, and never reads or writes `macaroons.db`, wallet passwords, seeds or TLS keys.
 - Rotation is two steps: the replacement is created and verified first, and the old credential is revoked only after you confirm the switch.
 - `inspect` and `scan` are offline and read-only. The only network peer is your own LND node, with TLS verification on. There is no telemetry.

@@ -1,0 +1,171 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "stale-submission-changes-nothing",
+  "rule": "An update or call outcome (other than SUCCEEDED) for a superseded submission changes neither the payment, its operation nor its reservation.",
+  "message": "markRejected for superseded submission 1 of op0/i1 (record at submission 2, closed 0) moved it submitting -> failed, held reservations 1 -> 0",
+  "seed": 1,
+  "case": 5,
+  "config": {
+    "scale": "small",
+    "budget": true,
+    "limit": "2200"
+  },
+  "failingStep": 6,
+  "originalSteps": 52,
+  "events": [
+    {
+      "t": "intent",
+      "p": "p0",
+      "op": 0,
+      "inv": 1
+    },
+    {
+      "t": "submit",
+      "p": "p0",
+      "op": 0,
+      "inv": 1
+    },
+    {
+      "t": "reconcile",
+      "p": "p1",
+      "op": 0,
+      "inv": 1
+    },
+    {
+      "t": "track.deliver",
+      "pick": 0.5
+    },
+    {
+      "t": "send.end",
+      "pick": 0.5,
+      "mode": "definite"
+    },
+    {
+      "t": "submit",
+      "p": "p1",
+      "op": 0,
+      "inv": 1
+    },
+    {
+      "t": "track.deliver",
+      "pick": 0.5
+    }
+  ],
+  "states": {
+    "call": {
+      "proc": "p0",
+      "method": "markRejected",
+      "args": [
+        "op0/i1",
+        "rate limit exceeded",
+        1
+      ]
+    },
+    "before": {
+      "payments": {
+        "op0/i1": {
+          "op": "op0",
+          "state": "submitting",
+          "subs": 2,
+          "amount": "1000",
+          "feeLimit": "100"
+        }
+      },
+      "operations": {
+        "op0": "open"
+      },
+      "opBudgets": {
+        "op0": "B"
+      },
+      "reservations": [
+        {
+          "id": "1",
+          "budget": "B",
+          "hash": "op0/i1",
+          "principal": "1000",
+          "allowance": "100",
+          "state": "held"
+        }
+      ],
+      "ledger": [],
+      "events": {
+        "op0/i1": [
+          "intent-recorded",
+          "submit",
+          "not-initiated"
+        ]
+      },
+      "budgets": {
+        "B": "2200"
+      },
+      "entries": [
+        {
+          "id": "1",
+          "event": "budget-held",
+          "hash": "op0/i1",
+          "op": "op0",
+          "amount": "1100"
+        }
+      ],
+      "outbox": []
+    },
+    "after": {
+      "payments": {
+        "op0/i1": {
+          "op": "op0",
+          "state": "failed",
+          "subs": 2,
+          "amount": "1000",
+          "feeLimit": "100"
+        }
+      },
+      "operations": {
+        "op0": "failed"
+      },
+      "opBudgets": {
+        "op0": "B"
+      },
+      "reservations": [
+        {
+          "id": "1",
+          "budget": "B",
+          "hash": "op0/i1",
+          "principal": "1000",
+          "allowance": "100",
+          "state": "released"
+        }
+      ],
+      "ledger": [],
+      "events": {
+        "op0/i1": [
+          "intent-recorded",
+          "submit",
+          "not-initiated",
+          "failed"
+        ]
+      },
+      "budgets": {
+        "B": "2200"
+      },
+      "entries": [
+        {
+          "id": "1",
+          "event": "budget-held",
+          "hash": "op0/i1",
+          "op": "op0",
+          "amount": "1100"
+        },
+        {
+          "id": "2",
+          "event": "budget-released",
+          "hash": "op0/i1",
+          "op": "op0",
+          "amount": "1100"
+        }
+      ],
+      "outbox": []
+    }
+  },
+  "mutant": "stale-submission-changes-nothing--m4c.cjs"
+}

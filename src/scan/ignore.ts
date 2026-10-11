@@ -1,11 +1,15 @@
-export type IgnoreEntry = { fingerprint: string; matches: (path: string) => boolean };
+/** `glob`: the glob as written, null for a fingerprint-only entry; `tokens`: its matcher's length. */
+export type IgnoreEntry = { fingerprint: string; glob: string | null; tokens: number; matches: (path: string) => boolean };
 export class IgnoreFileError extends Error {
   constructor() { super('invalid ignore file'); }
 }
 
+/** At most this many entries (lines) in one ignore file. */
+const IGNORE_ENTRIES_LIMIT = 1024;
+
 type GlobToken = { kind: 'literal'; char: string } | { kind: 'star' | 'globstar' | 'directories' | 'question' };
 
-function globMatcher(glob: string): (path: string) => boolean {
+function globMatcher(glob: string): { tokens: number; matches: (path: string) => boolean } {
   if (glob.length > 1024) throw new IgnoreFileError();
   const tokens: GlobToken[] = [];
   for (let i = 0; i < glob.length; i++) {
@@ -23,7 +27,7 @@ function globMatcher(glob: string): (path: string) => boolean {
     else tokens.push({ kind: 'literal', char });
   }
   if (tokens.length > 256) throw new IgnoreFileError();
-  return path => {
+  return { tokens: tokens.length, matches: path => {
     // Two buffers, swapped per token, instead of an allocation per token.
     let reachable = new Uint8Array(path.length + 1);
     let next = new Uint8Array(path.length + 1);
@@ -56,12 +60,15 @@ function globMatcher(glob: string): (path: string) => boolean {
       [reachable, next] = [next, reachable];
     }
     return reachable[path.length] !== 0;
-  };
+  } };
 }
 
 export function parseIgnoreFile(content: string): IgnoreEntry[] {
   if (content.length > 5_242_880) throw new IgnoreFileError();
   const entries: IgnoreEntry[] = [];
+  // The same fingerprint and glob written twice is one entry; every line counts toward the limit.
+  const seen = new Set<string>();
+  let lines = 0;
   for (const source of content.split(/\r\n|\n|\r/)) {
     const line = source.split('#', 1)[0].trim();
     if (!line) continue;
@@ -69,6 +76,7 @@ export function parseIgnoreFile(content: string): IgnoreEntry[] {
     if (!match) throw new IgnoreFileError();
     const glob = match[2];
     let matches: (path: string) => boolean;
+    let tokens = 0;
     if (glob === undefined) matches = () => true;
     else if (glob.startsWith('/')) {
       // As in .gitignore, a leading '/' anchors the glob at the ignore file's directory. Globs
@@ -76,10 +84,48 @@ export function parseIgnoreFile(content: string): IgnoreEntry[] {
       // reported path (--ignore-file) is matched against the glob as written.
       const anchored = globMatcher(glob.slice(1));
       const absolute = globMatcher(glob);
-      matches = path => path.startsWith('/') ? absolute(path) : anchored(path);
-    } else matches = globMatcher(glob);
-    if (entries.length >= 1024) throw new IgnoreFileError();
-    entries.push({ fingerprint: match[1].toLowerCase(), matches });
+      tokens = absolute.tokens;
+      matches = path => path.startsWith('/') ? absolute.matches(path) : anchored.matches(path);
+    } else ({ tokens, matches } = globMatcher(glob));
+    if (++lines > IGNORE_ENTRIES_LIMIT) throw new IgnoreFileError();
+    const fingerprint = match[1].toLowerCase();
+    const key = `${fingerprint}\0${glob ?? ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    entries.push({ fingerprint, glob: glob ?? null, tokens, matches });
   }
   return entries;
+}
+
+/**
+ * Bound on glob matching work for one scan, in matcher steps (a glob's tokens + 1 times the
+ * path's length + 1, per match): about a second of matching. An ignore file in a scanned tree
+ * is written by whoever controls the tree, and without a bound many long failing globs against
+ * many finding paths cost minutes. Once the budget is spent no further glob is evaluated and
+ * the finding is kept (fail closed: a credential is never hidden because matching stopped).
+ */
+export const IGNORE_MATCH_WORK_LIMIT = 1_000_000_000;
+
+/**
+ * Whether a finding with this fingerprint at this path is ignored, charging `budget` (shared by
+ * every path argument of a scan) for each glob matched. Fingerprint-only entries cost nothing.
+ */
+export function ignoreDecider(entries: IgnoreEntry[], budget: { remaining: number }): (fingerprint: string, path: string) => boolean {
+  const byFingerprint = new Map<string, IgnoreEntry[]>();
+  const everywhere = new Set<string>();
+  for (const entry of entries) {
+    if (entry.glob === null) everywhere.add(entry.fingerprint);
+    const list = byFingerprint.get(entry.fingerprint);
+    if (list) list.push(entry); else byFingerprint.set(entry.fingerprint, [entry]);
+  }
+  return (fingerprint, path) => {
+    if (everywhere.has(fingerprint)) return true;
+    for (const entry of byFingerprint.get(fingerprint) ?? []) {
+      const cost = (entry.tokens + 1) * (path.length + 1);
+      if (budget.remaining < cost) { budget.remaining = 0; return false; }
+      budget.remaining -= cost;
+      if (entry.matches(path)) return true;
+    }
+    return false;
+  };
 }

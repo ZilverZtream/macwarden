@@ -1,27 +1,41 @@
 import { createHash } from 'node:crypto';
-import { readFileSync, readdirSync, lstatSync, existsSync } from 'node:fs';
+import { readFileSync, readdirSync, lstatSync, statSync, existsSync } from 'node:fs';
 import { resolve, relative, dirname, basename, join, sep, isAbsolute } from 'node:path';
+import { availableParallelism, freemem } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { Worker } from 'node:worker_threads';
+
+// Character classes of groupedBase64Runs by UTF-16 code unit, built once from the
+// very regular expressions it used per character (identical answers, no per-character
+// regex call). Bit 1: base64 digit; 2: '_'; 4: '-'; 8: an 'other' shape separator.
+const CHARACTER_CLASS = (() => {
+  const table = new Uint8Array(65536);
+  for (let code = 0; code < 65536; code++) {
+    const character = String.fromCharCode(code);
+    table[code] = (/^[A-Za-z0-9+/]$/.test(character) ? 1 : 0) | (character === '_' ? 2 : 0) |
+      (character === '-' ? 4 : 0) | (!/^[A-Za-z0-9+/_=\s\\-]$/.test(character) ? 8 : 0);
+  }
+  return table;
+})();
 
 // Same leftmost-greedy matches as /W+(?:SW+)+={0,2}/g for the three grouped base64
 // shapes, in linear time (the regular expressions backtrack quadratically over long
 // unseparated runs). Mirrors src/grouped-runs.ts; test/grouped-runs.test.ts checks both.
 export function groupedBase64Runs(text, shape) {
-  const digit = character => /^[A-Za-z0-9+/]$/.test(character);
-  const word = shape === 'dash' ? character => digit(character) || character === '_'
-    : shape === 'underscore' ? digit : character => digit(character) || character === '_' || character === '-';
-  const separator = shape === 'dash' ? character => character === '-'
-    : shape === 'underscore' ? character => character === '_' : character => !/^[A-Za-z0-9+/_=\s\\-]$/.test(character);
+  const wordMask = shape === 'dash' ? 1 | 2 : shape === 'underscore' ? 1 : 1 | 2 | 4;
+  const separatorMask = shape === 'dash' ? 4 : shape === 'underscore' ? 2 : 8;
+  const word = at => (CHARACTER_CLASS[text.charCodeAt(at)] & wordMask) !== 0;
+  const separator = at => (CHARACTER_CLASS[text.charCodeAt(at)] & separatorMask) !== 0;
   const runs = [];
   let at = 0;
   while (at < text.length) {
-    if (!word(text[at])) { at++; continue; }
+    if (!word(at)) { at++; continue; }
     const start = at;
-    while (at < text.length && word(text[at])) at++;
+    while (at < text.length && word(at)) at++;
     let end = at, groups = 1;
-    while (end + 1 < text.length && separator(text[end]) && word(text[end + 1])) {
+    while (end + 1 < text.length && separator(end) && word(end + 1)) {
       end++;
-      while (end < text.length && word(text[end])) end++;
+      while (end < text.length && word(end)) end++;
       groups++;
     }
     if (groups === 1) continue;
@@ -226,6 +240,8 @@ function preparedSource(source) {
     base64.replace(/\+/g, '-').replace(/\//g, '_'), base64url])];
   return {
     source, hex, latin1, base64, base64url, base64Forms,
+    // Text encodings as bytes, for a second layer: base64 or hex of this text.
+    textForms: [...new Set([hex, hex.toUpperCase(), ...base64Forms])].map(form => Buffer.from(form)),
     utf16le, utf16be: Buffer.from(utf16le).swap16(),
     percentBytes: hex.replace(/../g, byte => `%${byte}`),
     escapedBytes: hex.replace(/../g, byte => `\\x${byte}`),
@@ -238,7 +254,21 @@ function preparedData(data) {
   const recovered = [data.toString('utf8'), utf16.toString('utf16le'),
     Buffer.from(utf16).swap16().toString('utf16le')].map(recoveredText);
   const text = recovered.join('\n');
-  const compact = text.replace(/\s/g, '');
+  // Zero-width characters split a value as invisibly as whitespace does.
+  const compact = text.replace(/[\s\u200b-\u200d\u2060\ufeff]/g, '');
+  // Two more views of split values, each one linear pass: adjacent string literals
+  // joined ("ab" + "cd", ["ab", "cd"]), and the last token of every line joined
+  // (wrapped output behind a per-line log prefix such as a timestamp).
+  const joined = text.replace(/(["'`])(?=([\s\u200b-\u200d\u2060\ufeff]*))\2[,+]?(?=([\s\u200b-\u200d\u2060\ufeff]*))\3\1/g, '')
+    .replace(/[\s\u200b-\u200d\u2060\ufeff]/g, '');
+  const lastToken = line => {
+    let end = line.length;
+    while (end > 0 && /\s/.test(line[end - 1])) end--;
+    let start = end;
+    while (start > 0 && !/\s/.test(line[start - 1])) start--;
+    return line.slice(start, end);
+  };
+  const tails = text.split('\n').map(lastToken).join('');
   const percent = text.replace(/%([0-9a-f]{2})/gi, (_, digits) => String.fromCharCode(parseInt(digits, 16)));
   let separated, decimal;
   // Native byte searches retain exact UTF-8 representations of the recovered
@@ -248,10 +278,11 @@ function preparedData(data) {
     lower: Buffer.from(text.toLowerCase()), compact: Buffer.from(compact),
     compactLower: Buffer.from(compact.toLowerCase()),
     percent: Buffer.from(percent), percentLower: Buffer.from(percent.toLowerCase()),
+    splitViews: [Buffer.from(joined), Buffer.from(tails)],
     hexStreams: () => separated ??= hexStreams(text),
     decimalStream: () => decimal ??= decimalStream(text),
     base64Runs: [
-      ...(text.match(/[A-Za-z0-9+/_-]{16,}={0,2}/g) ?? []),
+      ...[text, joined, tails].flatMap(view => view.match(/[A-Za-z0-9+/_-]{16,}={0,2}/g) ?? []),
       ...groupedBase64Runs(text, 'dash').map(run => run.replaceAll('-', '')),
       ...groupedBase64Runs(text, 'underscore').map(run => run.replaceAll('_', '')),
       ...groupedBase64Runs(text, 'other').filter(run => {
@@ -281,66 +312,162 @@ function alternateEncoding(data, source, state = preparedSource(source), input =
   if (data.includes(state.utf16le) || data.includes(state.utf16be)) return 'utf-16 bytes';
   // Decode each maximal base64 run once, preserving offset recognition.
   if (base64Runs.some(run => run.includes(source))) return 'offset base64';
+  if (input.splitViews.some(view => state.textForms.some(form => view.includes(form)))) return 'split literals';
+  // A second layer: base64 of the hex or base64 text, or hex of the base64 text.
+  if (base64Runs.some(run => state.textForms.some(form => run.includes(form)))) return 'base64 of a text encoding';
+  if (text.length >= source.length * 2 && state.textForms.some(form => streamIncludes(input.hexStreams(), form)))
+    return 'hex of a text encoding';
   return null;
 }
 
-function preparedMatcherGroup(states) {
-  const matcher = values => {
-    const literals = [...new Set(values.map(bytes => bytes.toString('latin1')))];
-    const pattern = new RegExp(literals.map(value => value.replace(/[|\\{}()[\]^$+*?.]/g, '\\$&')).join('|'));
-    return bytes => pattern.test(bytes.toString('latin1'));
+// Exact multi-literal byte search, linear in the haystack (the former literal
+// alternation regexes cost O(bytes x literals) per view). A literal occurrence spans
+// `stride` consecutive window offsets of the literal (each an 8-byte window inside
+// it) only if one of them starts at a haystack offset that is a multiple of the
+// stride. Those windows of each literal are indexed in a hash table; the haystack is
+// probed every `stride` bytes and every candidate is verified byte for byte at its
+// implied start, so the answer is exactly "some literal occurs". Literals shorter
+// than a window use native indexOf.
+const WINDOW = 8;
+// One probe every 8 bytes. A wider stride for some literals would need a second
+// pass, and the UTF-8 forms of binary credentials (mostly U+FFFD) need a narrow one.
+const STRIDE = 8;
+const word = (bytes, at) => bytes[at] | bytes[at + 1] << 8 | bytes[at + 2] << 16 | bytes[at + 3] << 24;
+
+// The stride (8, or length - 7 for a shorter literal, so the windows fit) and the
+// first of that many consecutive windows whose least varied window has the most
+// distinct byte values, preferring the tail. Every one of them is probed for, and a
+// window with few distinct values (a zero run, the U+FFFD runs of the UTF-8 form of
+// a binary credential, a prefix all macaroons share) is common in artifacts.
+function literalWindows(value) {
+  const distinct = [];
+  // Distinct byte values of each window, by sliding byte counts.
+  const counts = new Uint8Array(256);
+  let values = 0;
+  for (let at = 0; at < value.length; at++) {
+    if (counts[value[at]]++ === 0) values++;
+    if (at >= WINDOW && --counts[value[at - WINDOW]] === 0) values--;
+    if (at >= WINDOW - 1) distinct.push(values);
+  }
+  const run = stride => {
+    let best = 0, bestScore = -1;
+    for (let first = 0; first + stride <= distinct.length; first++) {
+      let score = WINDOW;
+      for (let at = first; at < first + stride; at++) score = Math.min(score, distinct[at]);
+      if (score >= bestScore) { best = first; bestScore = score; }
+    }
+    return { first: best };
   };
-  const raw = matcher(states.map(state => state.source));
-  const encoded = matcher(states.flatMap(state => [
-    ...state.variants.map(variant => variant.bytes), state.utf16le, state.utf16be,
-    Buffer.from(state.percentBytes), Buffer.from(state.escapedBytes),
-  ]));
-  return input => {
-    // These literal alternatives contain every full registered credential.
-    // This filter may admit a match across parser boundaries; the detailed
-    // checks below still enforce all boundaries and choose the encoding.
-    if (raw(input.data) || encoded(input.data)) return true;
-    if ([...input.recovered, input.lower, input.compact, input.compactLower,
-      input.percent, input.percentLower].some(encoded)) return true;
-    if (input.hexStreams().some(stream => raw(stream.bytes)) ||
-        input.decimalStream().some(stream => raw(stream.bytes))) return true;
-    return input.base64Runs.some(raw);
+  const stride = Math.min(STRIDE, distinct.length);
+  return { stride, first: run(stride).first };
+}
+
+function windowIndex(entries, stride) {
+  const count = entries.length * stride;
+  let bits = 10;
+  while ((1 << bits) < count * 2) bits++;
+  const shift = 32 - bits;
+  const slot = (low, high) => (Math.imul(low, 0x9e3779b1) ^ Math.imul(high ^ high >>> 15, 0x85ebca77)) >>> shift;
+  const heads = new Int32Array(1 << bits).fill(-1);
+  const keyLow = new Int32Array(count), keyHigh = new Int32Array(count), next = new Int32Array(count);
+  const literal = new Int32Array(count), offset = new Int32Array(count);
+  const literals = entries.map(({ value }) => value);
+  let entry = 0;
+  entries.forEach(({ value, first }, index) => {
+    for (let at = first; at < first + stride; at++, entry++) {
+      keyLow[entry] = word(value, at); keyHigh[entry] = word(value, at + 4);
+      literal[entry] = index; offset[entry] = at;
+      const head = slot(keyLow[entry], keyHigh[entry]);
+      next[entry] = heads[head]; heads[head] = entry;
+    }
+  });
+  return bytes => {
+    const length = bytes.length;
+    for (let at = 0; at + WINDOW <= length; at += stride) {
+      const low = word(bytes, at), high = word(bytes, at + 4);
+      for (let candidate = heads[slot(low, high)]; candidate !== -1; candidate = next[candidate]) {
+        if (keyLow[candidate] !== low || keyHigh[candidate] !== high) continue;
+        const value = literals[literal[candidate]];
+        const start = at - offset[candidate];
+        if (start < 0 || start + value.length > length) continue;
+        let index = 0;
+        while (index < value.length && bytes[start + index] === value[index]) index++;
+        if (index === value.length) return true;
+      }
+    }
+    return false;
   };
 }
 
-const matcherGroups = new Map();
-let matcherBytes = 0;
-function preparedMatcher(states) {
-  // A newly registered credential changes one small group rather than forcing
-  // the engine to compile an ever-growing literal alternation from scratch.
-  const groups = Array.from({ length: 32 }, () => []);
-  for (const state of states) {
-    let hash = 2166136261;
-    for (const byte of state.source) hash = Math.imul(hash ^ byte, 16777619);
-    groups[hash >>> 0 & 31].push(state);
+function literalMatcher(values) {
+  const unique = new Map();
+  for (const value of values) if (value.length) unique.set(value.toString('latin1'), value);
+  const short = [];
+  const classes = new Map();
+  for (const value of unique.values()) {
+    if (value.length < WINDOW) { short.push(value); continue; }
+    const { stride, first } = literalWindows(value);
+    if (!classes.has(stride)) classes.set(stride, []);
+    classes.get(stride).push({ value, first });
   }
-  const matchers = groups.filter(group => group.length).map(group => {
-    const key = group.map(state => state.hex).join(':');
-    const found = matcherGroups.get(key);
-    if (found) return found.match;
-    const match = preparedMatcherGroup(group);
-    const size = group.reduce((size, state) => size + state.source.length * 256 + 4096, key.length * 2);
-    const limit = 64 * 1_048_576;
-    if (size <= limit) {
-      while (matcherGroups.size >= 256 || matcherBytes + size > limit) {
-        const oldest = matcherGroups.keys().next().value;
-        matcherBytes -= matcherGroups.get(oldest).size;
-        matcherGroups.delete(oldest);
-      }
-      matcherGroups.set(key, { match, size });
-      matcherBytes += size;
-    }
-    return match;
-  });
-  return input => matchers.some(match => match(input));
+  const searches = [...classes].map(([stride, entries]) => windowIndex(entries, stride));
+  return bytes => short.some(value => bytes.includes(value)) || searches.some(search => search(bytes));
+}
+
+// The same literal sets and views as before: raw credentials in byte views
+// (artifact bytes, decoded hex, decimal and base64 streams), every literal
+// encoding in every text view. A hit may cross a parser boundary; the detailed
+// checks in findLeaks still enforce all boundaries and choose the encoding.
+// Filters by exact source population (complete bytes in order, as the snapshot
+// cache keys them), so a population over the snapshot cache bound, and the redactor
+// of the same population, do not rebuild the index on every call.
+const filters = new Map();
+function cachedFilter(states) {
+  const key = states.map(state => state.hex).join(':');
+  const found = filters.get(key);
+  if (found) return found;
+  const filter = preparedFilter(states);
+  while (filters.size >= 4) filters.delete(filters.keys().next().value);
+  filters.set(key, filter);
+  return filter;
+}
+
+function preparedFilter(states) {
+  const rawLiterals = states.map(state => state.source);
+  const encodedLiterals = states.flatMap(state => [
+    ...state.variants.map(variant => variant.bytes), state.utf16le, state.utf16be,
+    Buffer.from(state.percentBytes), Buffer.from(state.escapedBytes),
+  ]);
+  const raw = literalMatcher(rawLiterals);
+  const encoded = literalMatcher(encodedLiterals);
+  const both = literalMatcher([...rawLiterals, ...encodedLiterals]);
+  const possibleLeak = input => {
+    if (both(input.data)) return true;
+    if ([...input.recovered, input.lower, input.compact, input.compactLower,
+      input.percent, input.percentLower, ...input.splitViews].some(encoded)) return true;
+    if (input.hexStreams().some(stream => both(stream.bytes)) ||
+        input.decimalStream().some(stream => raw(stream.bytes))) return true;
+    return input.base64Runs.some(both);
+  };
+  return { possibleLeak, encoded };
 }
 
 function safePath(path, sources, state = preparedRedactor(sources)) {
+  if (path === 'command output') return path;
+  // A string none of whose views holds any registered literal is returned as is:
+  // every redaction value is one of those literals (hex ones case-insensitively,
+  // hence the lowercased view), and every alternateEncoding branch searches one
+  // of those views for one of them, so the full pass would change nothing.
+  state.filter ??= cachedFilter(state.sources);
+  const name = basename(path);
+  if (!state.filter.possibleLeak(preparedData(Buffer.from(path))) &&
+      !(name !== path && state.filter.possibleLeak(preparedData(Buffer.from(name)))) &&
+      !state.filter.encoded(Buffer.from(path.toLowerCase()))) return path;
+  return fullSafePath(path, state);
+}
+
+// Every redaction and every alternate encoding of every source, unconditionally.
+function fullSafePath(path, state) {
   if (path === 'command output') return path;
   let safe = path;
   for (const { value, regex } of state.encoded) {
@@ -399,7 +526,8 @@ function preparedSnapshot(sources) {
   const found = sourceSnapshots.get(key);
   if (found) return found;
   const states = sources.map(preparedCredential);
-  const state = { states, possibleLeak: sources.length ? preparedMatcher(states) : null,
+  const filter = sources.length ? cachedFilter(states) : null;
+  const state = { states, possibleLeak: filter?.possibleLeak ?? null, encodedLeak: filter?.encoded ?? null,
     redactor: preparedRedactor(sources),
     // Include buffers, string encodings, regex alternatives and per-source
     // overhead conservatively. Oversized snapshots receive uncached checks.
@@ -424,20 +552,70 @@ function preparedSnapshot(sources) {
  * @property {string} [root] Project root for registered source globs.
  */
 
+// Fewer distinct byte values than this in 32 bytes is not a random signature
+// (a uniform random one falls below 16 with negligible probability).
+const SIGNATURE_MIN_DISTINCT_BYTES = 16;
+
+// Another test worker's bake or rotate holds a freshly staged runtime sentinel open exclusively
+// while it sets its permissions (Windows reports EBUSY, EPERM or EACCES). Such a file is retried
+// with backoff for up to this long, then the check fails; it is never skipped.
+const BUSY_RETRY_MS = 5_000;
+const BUSY_CODES = new Set(['EBUSY', 'EPERM', 'EACCES']);
+const pause = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+// Sentinel bytes by file identity (resolved path, size, mtime in ns, inode), so an unchanged
+// runtime file is not re-read by every check; a changed or new file always is. The bytes are
+// cached only when the identity is the same before and after the read. Bounded by entries and bytes.
+const SOURCE_CACHE_ENTRIES = 8192;
+const SOURCE_CACHE_BYTES = 64 * 1_048_576;
+const sourceCache = new Map();
+let sourceCacheBytes = 0;
+function identity(path) {
+  const stat = statSync(path, { bigint: true });
+  return `${resolve(path)}\0${stat.size}\0${stat.mtimeNs}\0${stat.ino}`;
+}
+function cachedRead(path) {
+  const before = identity(path);
+  const found = sourceCache.get(before);
+  if (found) return found;
+  const bytes = readFileSync(path);
+  if (identity(path) === before && bytes.length <= SOURCE_CACHE_BYTES) {
+    while (sourceCache.size >= SOURCE_CACHE_ENTRIES || sourceCacheBytes + bytes.length > SOURCE_CACHE_BYTES) {
+      const oldest = sourceCache.keys().next().value;
+      sourceCacheBytes -= sourceCache.get(oldest).length;
+      sourceCache.delete(oldest);
+    }
+    sourceCache.set(before, bytes);
+    sourceCacheBytes += bytes.length;
+  }
+  return bytes;
+}
+function readRuntimeSource(path) {
+  const deadline = Date.now() + BUSY_RETRY_MS;
+  for (let delay = 25; ; delay = Math.min(delay * 2, 1_000)) {
+    try { return cachedRead(path); }
+    catch (error) {
+      if (!BUSY_CODES.has(error?.code) || Date.now() >= deadline) throw error;
+      pause(Math.min(delay, Math.max(1, deadline - Date.now())));
+    }
+  }
+}
+
 /** @param {SentinelOptions} options */
 function sentinelSources({ sentinels, sentinelDir, root }) {
   const projectRoot = root ? resolve(root) : resolve(dirname(sentinels), '..');
-  let globs = [];
-  if (existsSync(sentinels)) {
-    globs = JSON.parse(readFileSync(sentinels, 'utf8'));
-    if (!Array.isArray(globs) || !globs.every(item => typeof item === 'string')) throw new Error('invalid sentinels list');
-  }
+  // The registered list fails closed: a missing or invalid list, a glob outside the
+  // project or a glob that matches no file is an error, never an empty population.
+  const globs = JSON.parse(readFileSync(sentinels, 'utf8'));
+  if (!Array.isArray(globs) || !globs.every(item => typeof item === 'string')) throw new Error('invalid sentinels list');
   const sourcePaths = globs.flatMap(glob => {
     const prefix = glob.split(/[?*]/, 1)[0];
     const base = resolve(projectRoot, prefix.endsWith('/') ? prefix : dirname(prefix));
-    if (base !== projectRoot && !base.startsWith(projectRoot + sep)) return [];
+    if (base !== projectRoot && !base.startsWith(projectRoot + sep)) throw new Error('sentinel glob outside the project');
     const pattern = globPattern(glob);
-    return filesUnder(base).filter(path => pattern.test(relative(projectRoot, path).split(sep).join('/')));
+    const matched = filesUnder(base).filter(path => pattern.test(relative(projectRoot, path).split(sep).join('/')));
+    if (!matched.length) throw new Error('sentinel glob matches no file');
+    return matched;
   });
   // Runtime sentinels are written and removed by tests in other workers while this check runs.
   // filesUnder already skips one removed while the directory is listed; one removed between the
@@ -451,12 +629,24 @@ function sentinelSources({ sentinels, sentinelDir, root }) {
   const distinct = new Map();
   for (const path of sourcePaths) {
     let bytes;
-    try { bytes = readFileSync(path); }
+    try { bytes = runtime.has(path) ? readRuntimeSource(path) : readFileSync(path); }
     catch (error) {
       if (error?.code === 'ENOENT' && runtime.has(path)) continue;
       throw error;
     }
     if (bytes.length) distinct.set(bytes.toString('hex'), bytes);
+    // A v2 macaroon sentinel also registers what is equivalent to it: everything after
+    // the constant version byte, and its 32-byte signature (the field after the caveats'
+    // end marker: 00 06 20), which with the identifier is the credential.
+    if (bytes[0] === 0x02 && bytes.length > 35) {
+      const rest = bytes.subarray(1);
+      distinct.set(rest.toString('hex'), rest);
+      const field = bytes.lastIndexOf(Buffer.from([0x00, 0x06, 0x20]));
+      const signature = field >= 0 && field + 35 <= bytes.length ? bytes.subarray(field + 3, field + 35) : null;
+      // A real HMAC-SHA256 signature has about 30 distinct byte values; a synthetic
+      // placeholder (all zero bytes) would match ordinary data, so it is not registered.
+      if (signature && new Set(signature).size >= SIGNATURE_MIN_DISTINCT_BYTES) distinct.set(signature.toString('hex'), signature);
+    }
     // An NWC URI sentinel also registers its 32-byte connection secret, so the
     // secret is found in every encoding even when it leaks without the URI.
     for (const match of bytes.toString('latin1').matchAll(/(?:nostr\+walletconnect|nostrwalletconnect):[^\s"'<>]*?[?&]secret=([0-9a-f]{64})(?![0-9a-f])/gi)) {
@@ -498,20 +688,17 @@ export function sentinelRedactor(options) {
  * }} LeakOptions
  */
 
-/**
- * Inspect command output and candidate files against every distinct sentinel.
- * @param {LeakOptions} options Candidate paths default to an empty array;
- * testTmp supplies declared outputs; candidate artifact links fail closed.
- */
-export function findLeaks({ sentinels, sentinelDir, paths = [], commandOutput = '', testTmp, root, evidenceDir }) {
+// Everything findLeaks decides before reading an artifact: the sentinel snapshot,
+// link rejection, the candidate list and the declared-output exclusions.
+function leakPlan({ sentinels, sentinelDir, paths = [], commandOutput = '', testTmp, root, evidenceDir }) {
   const projectRoot = root ? resolve(root) : resolve(dirname(sentinels), '..');
   const sources = sentinelSources({ sentinels, sentinelDir, root });
   if (!sources.length) throw new Error('no nonempty sentinel registered');
-  const { states, possibleLeak, redactor } = preparedSnapshot(sources);
-  const hit = (location, encoding) => ({ path: safePath(location, sources, redactor), encoding });
 
   // Reject links before reading any artifact, including the output manifest.
   // Source enumeration keeps its separate, existing traversal policy.
+  // A named candidate path must exist: a mistyped or removed path is an error, not a pass.
+  for (const scanPath of paths) lstatSync(scanPath);
   const candidates = paths.flatMap(scanPath => filesUnder(scanPath, true).map(path => ({
     path, name: lstatSync(scanPath).isDirectory() ? relative(scanPath, path) : basename(path),
   })));
@@ -536,34 +723,167 @@ export function findLeaks({ sentinels, sentinelDir, paths = [], commandOutput = 
     return inEvidence || (!declared.has(absolute) && !declaredHashes.has(pathHash(absolute)) &&
       !local.startsWith('test/vectors/') && !local.startsWith('test/scan-fixtures/'));
   });
-  const haystacks = [['command output', Buffer.from(commandOutput), ''],
-    ...included.map(({ path, name }) => [path, readFileSync(path), name])];
-  for (const [location, data, name] of haystacks) {
-    // Artifact decoding is independent of the credential population. Prepare
-    // it once, while still comparing every exact registered credential.
-    const input = preparedData(data);
-    const nameData = name ? Buffer.from(name) : null;
-    const nameInput = nameData ? preparedData(nameData) : null;
-    if (!possibleLeak(input) && (!nameInput || !possibleLeak(nameInput))) continue;
-    const lowerName = name.toLowerCase();
-    for (const state of states) {
-      const { source } = state;
-      for (const { encoding, value, lower, bytes } of state.variants) {
-        if (name &&
-            (encoding.startsWith('hex-') ? lowerName.includes(lower) : name.includes(value))) {
-          return hit(location, encoding);
-        }
-        if (data.includes(bytes)) return hit(location, encoding);
+  return { sources, commandOutput, included };
+}
+
+// The encoding of the first registered credential found in one artifact (or its
+// name), or null. Credentials are tried in snapshot order, as they always were.
+function scanArtifact(snapshot, data, name) {
+  const { states, possibleLeak, encodedLeak } = snapshot;
+  // Artifact decoding is independent of the credential population. Prepare
+  // it once, while still comparing every exact registered credential.
+  const input = preparedData(data);
+  const nameData = name ? Buffer.from(name) : null;
+  const nameInput = nameData ? preparedData(nameData) : null;
+  // The lowercased name covers the case-insensitive hex comparison of names below.
+  if (!possibleLeak(input) && (!nameInput || (!possibleLeak(nameInput) &&
+      !encodedLeak(Buffer.from(name.toLowerCase()))))) return null;
+  const lowerName = name.toLowerCase();
+  for (const state of states) {
+    const { source } = state;
+    for (const { encoding, value, lower, bytes } of state.variants) {
+      if (name &&
+          (encoding.startsWith('hex-') ? lowerName.includes(lower) : name.includes(value))) {
+        return encoding;
       }
-      const alternateName = nameData && alternateEncoding(nameData, source, state, nameInput);
-      if (alternateName) return hit(location, alternateName);
-      if (data.includes(source)) return hit(location, 'raw-bytes');
-      const alternate = alternateEncoding(data, source, state, input);
-      if (alternate) return hit(location, alternate);
+      if (data.includes(bytes)) return encoding;
     }
+    const alternateName = nameData && alternateEncoding(nameData, source, state, nameInput);
+    if (alternateName) return alternateName;
+    if (data.includes(source)) return 'raw-bytes';
+    const alternate = alternateEncoding(data, source, state, input);
+    if (alternate) return alternate;
   }
   return null;
 }
+
+/**
+ * Inspect command output and candidate files against every distinct sentinel.
+ * @param {LeakOptions} options Candidate paths default to an empty array;
+ * testTmp supplies declared outputs; candidate artifact links fail closed.
+ */
+export function findLeaks(options) {
+  const { sources, commandOutput, included } = leakPlan(options);
+  const snapshot = preparedSnapshot(sources);
+  // Every artifact is read before any is scanned: an unreadable one fails the check
+  // even when another holds a credential.
+  const haystacks = [['command output', Buffer.from(commandOutput), ''],
+    ...included.map(({ path, name }) => [path, readFileSync(path), name])];
+  for (const [location, data, name] of haystacks) {
+    const encoding = scanArtifact(snapshot, data, name);
+    if (encoding) return { path: safePath(location, sources, snapshot.redactor), encoding };
+  }
+  return null;
+}
+
+// Each worker builds its own matchers for every owner's sentinels: about 0.55 GB at the end of a
+// full validation (20 workers held 11.3 GB on 2026-10-11, and the host ran short of memory).
+const WORKER_BYTES = 640 * 1024 * 1024;
+
+/**
+ * Worker count for leakScans: every processor but two, at most 20, and no more than half of the
+ * free memory holds at WORKER_BYTES each; at least 1.
+ */
+export function leakScanWorkers(processors = availableParallelism(), free = freemem()) {
+  return Math.max(1, Math.min(processors - 2, 20, Math.floor(free / 2 / WORKER_BYTES)));
+}
+
+/**
+ * findLeaks for several independent option sets at once, on one pool of worker threads.
+ * Each result is what findLeaks would return or throw for that set: the hit in its first
+ * artifact (command output, then candidates in traversal order), unless an artifact is
+ * unreadable, whose error then wins as in findLeaks (the first such by that order). Any
+ * worker failure fails every set (fail closed).
+ * @param {LeakOptions[]} optionSets
+ * @returns {Promise<Array<{ hit: { path: string, encoding: string } | null } | { error: Error }>>}
+ */
+export async function leakScans(optionSets, workers = leakScanWorkers()) {
+  const plans = optionSets.map(options => {
+    try { return leakPlan(options); }
+    catch (error) { return { error }; }
+  });
+  const owners = [];
+  const tasks = [];
+  plans.forEach((plan, owner) => {
+    if (plan.error) return;
+    owners.push({ owner, sources: plan.sources, commandOutput: plan.commandOutput });
+    tasks.push({ owner, index: 0, path: null, name: '', size: Buffer.byteLength(plan.commandOutput) });
+    plan.included.forEach(({ path, name }, offset) => {
+      let size = 0;
+      try { size = lstatSync(path).size; } catch { /* the worker's read reports it */ }
+      tasks.push({ owner, index: offset + 1, path, name, size });
+    });
+  });
+  // Largest first, so one big file does not start last and hold up the pool.
+  tasks.sort((a, b) => b.size - a.size);
+  const outcomes = plans.map(() => ({ hit: null, error: null }));
+  if (tasks.length) {
+    // shared[0] is the task cursor; shared[1 + owner] the lowest artifact index with
+    // a hit so far: later artifacts of that owner are still read (an unreadable one
+    // still fails) but no longer scanned.
+    const shared = new Int32Array(new SharedArrayBuffer(4 * (1 + plans.length)));
+    shared.fill(0x7fffffff, 1);
+    const workerData = { owners, tasks: tasks.map(({ owner, index, path, name }) => ({ owner, index, path, name })), shared };
+    const count = Math.max(1, Math.min(workers, tasks.length));
+    const runs = Array.from({ length: count }, () => new Promise((resolveRun, rejectRun) => {
+      const worker = new Worker(new URL('./leak-scan-worker.mjs', import.meta.url), { workerData });
+      let done = false;
+      worker.on('message', message => {
+        const outcome = outcomes[message.owner];
+        if (message.type === 'hit' && (!outcome.hit || message.index < outcome.hit.index)) outcome.hit = message;
+        else if (message.type === 'error' && (!outcome.error || message.index < outcome.error.index)) outcome.error = message;
+        else if (message.type === 'done') done = true;
+      });
+      worker.on('error', rejectRun);
+      worker.on('exit', code => done && code === 0 ? resolveRun() : rejectRun(new Error(`leak scan worker exited (${code})`)));
+    }));
+    const failed = (await Promise.allSettled(runs)).find(run => run.status === 'rejected');
+    if (failed) {
+      const error = failed.reason instanceof Error ? failed.reason : new Error(String(failed.reason));
+      return plans.map(plan => ({ error: plan.error ?? error }));
+    }
+  }
+  return plans.map((plan, owner) => {
+    if (plan.error) return { error: plan.error };
+    const { hit, error } = outcomes[owner];
+    if (error) return { error: Object.assign(new Error(error.message), { code: error.code }) };
+    if (!hit) return { hit: null };
+    const location = hit.index === 0 ? 'command output' : plan.included[hit.index - 1].path;
+    const { redactor } = preparedSnapshot(plan.sources);
+    return { hit: { path: safePath(location, plan.sources, redactor), encoding: hit.encoding } };
+  });
+}
+
+/** The task loop of one leakScans worker thread (scripts/leak-scan-worker.mjs). */
+export function leakScanWorker({ owners, tasks, shared }, post) {
+  const snapshots = new Map(owners.map(({ owner, sources, commandOutput }) =>
+    [owner, { snapshot: preparedSnapshot(sources.map(source => Buffer.from(source))), commandOutput }]));
+  for (let next; (next = Atomics.add(shared, 0, 1)) < tasks.length;) {
+    const { owner, index, path, name } = tasks[next];
+    const { snapshot, commandOutput } = snapshots.get(owner);
+    let data;
+    try { data = path === null ? Buffer.from(commandOutput) : readFileSync(path); }
+    catch (error) {
+      post({ type: 'error', owner, index, message: error instanceof Error ? error.message : String(error), code: error?.code });
+      continue;
+    }
+    if (index > Atomics.load(shared, 1 + owner)) continue;
+    const encoding = scanArtifact(snapshot, data, name);
+    if (!encoding) continue;
+    for (let best = Atomics.load(shared, 1 + owner); index < best;) {
+      const seen = Atomics.compareExchange(shared, 1 + owner, best, index);
+      if (seen === best) break;
+      best = seen;
+    }
+    post({ type: 'hit', owner, index, encoding });
+  }
+  post({ type: 'done' });
+}
+
+// For test/harness/leak-prefilter-differential.test.ts, which checks the prefilter
+// and the redactor fast path against their reference definitions.
+export const internals = Object.freeze({ variants, preparedCredential, preparedData, preparedFilter,
+  preparedRedactor, safePath, fullSafePath });
 
 function main(args) {
   if (args[0] !== '--sentinels' || !args[1]) return 2;

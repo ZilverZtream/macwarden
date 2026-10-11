@@ -40,7 +40,26 @@ const OUTCOME_TEXT: Record<string, string> = {
   'unknown-invoice': 'no invoice with this hash in the records',
 };
 
-/** The rule a delivery's outcome follows; `canceledBefore`: an earlier delivery of the invoice was CANCELED. */
+/**
+ * A settlement-amount-conflict row the receiver ledger migration wrote (source `migration: …`, src/ledger/migrate.ts): the
+ * record's amount differed from the settlement that fulfilled the order, and the migration set the record to that amount,
+ * so there the later, fulfilling amount stands, not the first.
+ */
+const MIGRATED_CONFLICT_TEXT = 'the record\'s amount differed from the settlement that fulfilled the order: the migration set the record to '
+  + 'the fulfilling amount, which stands';
+
+/** What a delivery's outcome meant; a settlement-amount-conflict depends on who logged it (see MIGRATED_CONFLICT_TEXT). */
+function outcomeText(outcome: string, source: string): string | undefined {
+  return outcome === 'settlement-amount-conflict' && source.startsWith('migration:') ? MIGRATED_CONFLICT_TEXT : OUTCOME_TEXT[outcome];
+}
+
+/**
+ * The rule a delivery's outcome follows, from what the records knew at that delivery: `canceledBefore`, an earlier delivery
+ * of the invoice was CANCELED (an invoice becomes canceled only through a delivery, which is always logged). Never from the
+ * invoice's final state: a cancellation after the delivery does not change what the delivery meant. A state-updated
+ * delivery of an invoice that ends not-created is a late one: a not-created record moves only its late state, and a
+ * creating record a delivery moves becomes open, never not-created.
+ */
 function deliveryRule(outcome: string, lndState: string, invoice: InvoiceRow, canceledBefore: boolean): RuleId | undefined {
   if (lndState === 'SETTLED' && canceledBefore && (outcome === 'fulfilled' || outcome === 'state-updated' || outcome === 'second-payment')) {
     return 'settledOutranks';
@@ -56,8 +75,7 @@ function deliveryRule(outcome: string, lndState: string, invoice: InvoiceRow, ca
     case 'underpaid':
       return 'ledger';
     case 'unchanged':
-      return (lndState === 'OPEN' || lndState === 'ACCEPTED') && (canceledBefore || invoice.state === 'canceled' || invoice.lateLndState === 'CANCELED')
-        ? 'canceledFinal' : undefined;
+      return (lndState === 'OPEN' || lndState === 'ACCEPTED') && canceledBefore ? 'canceledFinal' : undefined;
     case 'state-updated':
       return invoice.state === 'not-created' ? 'lateInvoice' : undefined;
     default:
@@ -71,7 +89,7 @@ export function resolveReceiverSubject(store: ReceiverStore, subject: { orderId?
   return subject.orderId !== undefined && store.order(subject.orderId) !== undefined ? subject.orderId : undefined;
 }
 
-export function explainReceiver(store: ReceiverStore, orderId: string): Explanation {
+export function explainReceiver(store: ReceiverStore, orderId: string, profile?: string): Explanation {
   const row = store.db.prepare('SELECT amount_msat, state, created_at, fulfilled_at FROM orders WHERE order_id = ?').get(orderId);
   if (row === undefined) throw new Error(`no order ${orderId}`);
   const order = { orderId, amountMsat: int(row, 'amount_msat').toString(), state: text(row, 'state'), createdAt: text(row, 'created_at'),
@@ -90,7 +108,8 @@ export function explainReceiver(store: ReceiverStore, orderId: string): Explanat
     for (const delivery of store.deliveries(invoice.paymentHash)) {
       const rule = deliveryRule(delivery.outcome, delivery.lndState, invoice, canceledBefore);
       const meaning = rule === 'settledOutranks' ? 'SETTLED after CANCELED: the invoice was paid, and the record says so'
-        : rule === 'canceledFinal' ? 'a replayed update after CANCELED: canceled is final, nothing changed' : OUTCOME_TEXT[delivery.outcome];
+        : rule === 'canceledFinal' ? 'a replayed update after CANCELED: canceled is final, nothing changed'
+          : outcomeText(delivery.outcome, delivery.source);
       timeline.add(delivery.receivedAt, 'delivery', `${fp} via ${delivery.source}: LND ${delivery.lndState} (settle index ${delivery.settleIndex}) `
         + `-> ${delivery.outcome}${meaning === undefined ? '' : `; ${meaning}`}`, rule ?? (delivery.source === 'lookup' ? 'lookups' : undefined));
       if (delivery.lndState === 'CANCELED') canceledBefore = true;
@@ -118,7 +137,7 @@ export function explainReceiver(store: ReceiverStore, orderId: string): Explanat
     const rule: RuleId = entry.event === 'invoice-settled' ? 'idempotency' : entry.event === 'double-payment' ? 'lateInvoice' : 'ledger';
     timeline.add(entry.postedAt, 'journal', journalLine(entry), rule);
   }
-  const outbox = outboxView(store.outbox(orderId), known);
+  const outbox = outboxView(store.outbox(orderId), known, profile);
   outboxItems(timeline, outbox);
 
   const settled = list.filter(item => item.state === 'settled' || item.lateLndState === 'SETTLED');
@@ -126,7 +145,8 @@ export function explainReceiver(store: ReceiverStore, orderId: string): Explanat
   const summary = order.state === 'fulfilled'
     ? `order fulfilled by ${fulfilled.map(item => fingerprint(item.paymentHash)).join(', ')}; ${settled.length} settled invoice(s)`
       + `${superseded.size > 0 ? `, ${superseded.size} superseded invoice(s) to cancel` : ''}`
-    : order.state === 'canceled' ? 'order canceled: its invoice was canceled before it was paid'
+    : order.state === 'canceled' ? (settled.length > 0 ? `order canceled; ${settled.length} settled invoice(s) did not fulfill it`
+      : 'order canceled: its invoice was canceled before it was paid')
       : `order awaiting payment${live.length > 0 ? `: ${live.map(item => `${fingerprint(item.paymentHash)} ${item.state}`).join(', ')}` : ''}`
         + `${settled.length > 0 ? `; ${settled.length} settled invoice(s) did not fulfill it` : ''}`;
   // The outcome closes the timeline: its time is the latest recorded one.

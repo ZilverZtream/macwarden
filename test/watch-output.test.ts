@@ -170,13 +170,14 @@ it('WATCH/output-queue close during a write drops its unwritten remainder and se
   blocked.push('three\n');               // queued behind it
   blocked.close();
   expect(blocked.dropped()).toBe(1);     // the queued line
-  const started = Date.now();
   const settled = blocked.settle(5_000);
   const drained = blocked.drain(5_000);
   blockFirst(1);                         // one byte of the batch, then nothing more may be written
-  expect(await settled).toBe(true);
-  expect(await drained).toBe(true);
-  expect(Date.now() - started).toBeLessThan(1_000);
+  // "At once" is counted in event-loop turns, not wall-clock time: both resolve within a few
+  // turns of the write completing, long before their 5 s timeouts could fire.
+  const turns = async (count: number) => { for (let turn = 0; turn < count; turn++) await new Promise(resolve => setImmediate(resolve)); return 'still waiting'; };
+  expect(await Promise.race([settled, turns(20)])).toBe(true);
+  expect(await Promise.race([drained, turns(20)])).toBe(true);
   expect(calls).toBe(2);
   expect(blocked.dropped()).toBe(3);     // 'ne\n' and 'two\n' were never completely written
 });

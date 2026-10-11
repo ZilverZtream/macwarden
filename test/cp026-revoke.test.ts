@@ -10,9 +10,12 @@ import { Readable } from 'node:stream';
 import { join, resolve } from 'node:path';
 import { expect, it, vi } from 'vitest';
 import { render } from './helpers/render-adversarial.js';
+import { onRegistryOpen } from './helpers/integration-registry-read.js';
 import { findLeaks } from "./helpers/leak-check.js";
 import { directory, entry, maxId, otherPubkey, ownId, permissionsResponse, pubkey,
   register, snapshot, vector, wireFixture } from './helpers/cp026-revoke-support.mjs';
+// Each test runs the command and the leak check over the scratch tree (findLeaks); under a loaded full
+// suite that took 17-21 s against the 15 s default, so these tests get 90 s (as RECONCILE/bounds did in 1.2.1).
 
 type Envelope = { schema: number; command: string; ok: boolean;
   warnings: Array<string | { code: string }>; result: Record<string, unknown> | null;
@@ -165,11 +168,11 @@ it.each(['0', '007', '-1', '+5', '0x10', '18446744073709551616', 'bad label',
     flag(f, '--tls-cert', join(repo, 'test/nonexistent-cp026.cert'));
     refused(await invoke(f, ['--target-file', join(repo, 'test/nonexistent-cp026.macaroon')], target), 2, 'V1');
     expect(f.calls).toEqual([]); expect(f.io).toEqual([]);
-  }));
+  }), 90_000);
 it('CP-026/V1 canonical uint64 maximum passes parsing and keeps its decimal identity', async () => scratch(async f => {
   plan(await invoke(f, ['--dry-run'], maxId), f);
   expect(f.calls).toEqual(['GetInfo', 'ListPermissions', 'ListMacaroonIDs', 'CheckMacaroonPermissions']);
-}));
+}), 90_000);
 it.each([['NODE_DEBUG', 'http'], ['NODE_DEBUG', 'https'], ['NODE_DEBUG', 'tls'],
   ['NODE_DEBUG', 'net'], ['NODE_DEBUG', 'fs,NET'], ['NODE_OPTIONS', '--report-on-fatalerror'],
   ['NODE_OPTIONS', '--report-directory=test']])('CP-026/V2 %s %s wins before target-file and OWN',
@@ -177,10 +180,10 @@ it.each([['NODE_DEBUG', 'http'], ['NODE_DEBUG', 'https'], ['NODE_DEBUG', 'tls'],
     f.deps.env[key] = value;
     refused(await invoke(f, ['--target-file', join(repo, 'test/nonexistent-cp026.macaroon')]), 2, 'V2');
     expect(f.calls).toEqual([]); expect(f.io).toEqual([]);
-  }));
+  }), 90_000);
 it('CP-026/V2 harmless NODE_DEBUG passes the environment guard', async () => scratch(async f => {
   f.deps.env.NODE_DEBUG = 'fs'; plan(await invoke(f, ['--dry-run']), f);
-}));
+}), 90_000);
 it.each(['unreadable', 'undecodable', 'root zero', 'numeric mismatch']) (
   'CP-026/V3 %s explicit target is refused before OWN and networking', async kind => scratch(async f => {
     const path = kind === 'unreadable' ? f.target.outPath : kind === 'undecodable'
@@ -194,7 +197,7 @@ it.each(['unreadable', 'undecodable', 'root zero', 'numeric mismatch']) (
     refused(await invoke(f, ['--target-file', path], maxId),
       kind === 'root zero' || kind === 'numeric mismatch' ? 2 : 3, 'V3');
     expect(f.calls).toEqual([]);
-  }));
+  }), 90_000);
 it.each(['TLS unreadable', 'own unreadable', 'own undecodable', 'missing info:read',
   'missing macaroon:read', 'missing macaroon:write', 'numeric own ID']) (
   'CP-026/V4 %s is refused before registry resolution and LND', async kind => scratch(async f => {
@@ -208,13 +211,13 @@ it.each(['TLS unreadable', 'own unreadable', 'own undecodable', 'missing info:re
       kind === 'numeric own ID' ? 2 : 4, 'V4');
     expect(f.calls).toEqual([]);
     expect(f.io).not.toContain(`read:${f.registry}`);
-  }));
+  }), 90_000);
 it('CP-026/V4 exact method URI permissions satisfy OWN without granting a different method', async () => scratch(async f => {
   const methods = ['GetInfo', 'ListPermissions', 'ListMacaroonIDs', 'CheckMacaroonPermissions', 'DeleteMacaroonID'];
   flag(f, '--macaroon', register(wireFixture('default-admin', ownId,
     methods.map(method => `uri:/lnrpc.Lightning/${method}`))));
   plan(await invoke(f, ['--dry-run']), f);
-}));
+}), 90_000);
 it.each(['GetInfo', 'ListPermissions', 'ListMacaroonIDs', 'CheckMacaroonPermissions', 'DeleteMacaroonID']) (
   'CP-026/V4 URI OWN missing exact %s permission fails offline', async missing => scratch(async f => {
     const methods = ['GetInfo', 'ListPermissions', 'ListMacaroonIDs', 'CheckMacaroonPermissions', 'DeleteMacaroonID'];
@@ -222,17 +225,17 @@ it.each(['GetInfo', 'ListPermissions', 'ListMacaroonIDs', 'CheckMacaroonPermissi
       methods.filter(method => method !== missing).map(method => `uri:/lnrpc.Lightning/${method}`))));
     refused(await invoke(f, ['--dry-run']), 4, 'V4');
     expect(f.calls).toEqual([]);
-  }));
+  }), 90_000);
 it('CP-026/V4 failed OWN wins over a numeric own-ID refusal', async () => scratch(async f => {
   flag(f, '--tls-cert', join(repo, 'test/nonexistent-cp026.cert'));
   refused(await invoke(f, [], ownId), 4, 'V4');
   expect(f.calls).toEqual([]);
-}));
+}), 90_000);
 it('CP-026/V4 own root-zero warning permits planning a nonzero target', async () => scratch(async f => {
   flag(f, '--macaroon', resolve('test/vectors/default-admin.macaroon'));
   const result = await invoke(f, ['--dry-run']); plan(result, f);
   expect(result.warnings.map(value => typeof value === 'string' ? value : value.code)).toContain('own-root-key-0');
-}));
+}), 90_000);
 it.each(['transport', 'TLS', '401', '403', '500']) (
   'CP-026/V5 GetInfo %s failure wins before invalid registry and is classified safely', async kind => scratch(async f => {
     f.lnd.getInfo.mockImplementationOnce(async () => { f.calls.push('GetInfo'); throw fault(kind); });
@@ -242,7 +245,7 @@ it.each(['transport', 'TLS', '401', '403', '500']) (
     expect(f.calls.slice(1).every(call => call === 'ListMacaroonIDs')).toBe(true);
     expect(f.calls.filter(call => call === 'ListMacaroonIDs').length).toBeLessThanOrEqual(1);
     expect(f.io).not.toContain(`read:${f.registry}`);
-  }));
+  }), 90_000);
 it.each(['added method', 'removed method', 'changed permission', 'unchanged']) (
   'CP-026/V5 %s snapshot is compared once while the stored vector grade stays fixed', async kind => scratch(async f => {
     const methods = structuredClone(snapshot.methods);
@@ -254,18 +257,17 @@ it.each(['added method', 'removed method', 'changed permission', 'unchanged']) (
     expect(result.warnings.map(value => typeof value === 'string' ? value : value.code).includes('snapshot-drift'))
       .toBe(kind !== 'unchanged');
     expect(f.lnd.listPermissions).toHaveBeenCalledTimes(1);
-  }));
+  }), 90_000);
 it.each(['malformed JSON', 'invalid schema', 'unreadable registry']) (
   'CP-026/V6 %s stops after node identification without mutation', async kind => scratch(async f => {
     if (kind === 'malformed JSON') writeFileSync(f.registry, '{invalid');
     if (kind === 'invalid schema') writeFileSync(f.registry, '{"schema":99,"entries":[]}');
-    if (kind === 'unreadable registry') f.deps.fs.readFile = vi.fn(async (...args: Parameters<typeof fs.readFile>) => {
-      if (args[0] === f.registry) throw Object.assign(new Error('injected registry read failure'), { code: 'EACCES' });
-      return fs.readFile(...args);
-    }) as typeof fs.readFile;
+    if (kind === 'unreadable registry') f.deps.fs.open = onRegistryOpen(f.deps.fs, f.registry, () => {
+      throw Object.assign(new Error('injected registry read failure'), { code: 'EACCES' });
+    });
     refused(await invoke(f), 3, 'V6');
     expect(f.calls).toEqual(['GetInfo', 'ListPermissions']);
-  }));
+  }), 90_000);
 it.each(['absent label', 'revoked label', 'other-node label', 'ambiguous label', 'other-node numeric',
   'unknown numeric', 'resolved own ID', 'explicit label target mismatch', 'wrong default ID']) (
   'CP-026/V6 %s is refused with node-scoped resolution before listing IDs', async kind => scratch(async f => {
@@ -297,43 +299,43 @@ it.each(['absent label', 'revoked label', 'other-node label', 'ambiguous label',
       expect(result.error!.message).toMatch(/other operators/i);
       expect(result.error!.message).toMatch(/same.*store|shar.*store/i);
     }
-  }));
+  }), 90_000);
 it.each(['label', 'numeric'])('CP-026/V6 %s selects only this node among identical cross-node entries',
   async kind => scratch(async f => {
     save(f, [{ ...f.target, nodePubkey: otherPubkey, grade: 'ADMIN', outPath: null }, f.target]);
     plan(await invoke(f, ['--dry-run'], kind === 'label' ? 'Alice' : maxId), f);
-  }));
+  }), 90_000);
 it('CP-026/V6 revoked duplicate does not make an active label ambiguous', async () => scratch(async f => {
   save(f, [entry('root-max', '9007199254740993', { status: 'revoked',
     revokedAt: '2026-10-04T00:00:00Z', revokeEvidence: 'by-id-only' }), f.target]);
   plan(await invoke(f, ['--dry-run']), f);
-}));
+}), 90_000);
 it('CP-026/V6 label matching is exact and case-sensitive', async () => scratch(async f => {
   refused(await invoke(f, [], 'alice'), 2, 'V6');
   expect(f.calls).toEqual(['GetInfo', 'ListPermissions']);
-}));
+}), 90_000);
 it('CP-026/V6 numeric resolution can plan an entry marked revoked when its ID is still present', async () => scratch(async f => {
   save(f, [{ ...f.target, status: 'revoked', revokedAt: '2026-10-04T00:00:00Z', revokeEvidence: 'by-id-only' }]);
   plan(await invoke(f, ['--dry-run'], maxId), f);
-}));
+}), 90_000);
 it('CP-026/V6 unregistered ID is allowed explicitly with null label and grade', async () => scratch(async f => {
   save(f, []);
   const result = await invoke(f, ['--unregistered', '--dry-run'], maxId);
   expect(result.error).toBeNull();
   expect(result.result).toEqual({ dryRun: true, rootKeyId: maxId, label: null, grade: null, proof: 'by-id-only' });
   expect(f.calls).toEqual(['GetInfo', 'ListPermissions', 'ListMacaroonIDs']);
-}));
+}), 90_000);
 it.each(['transport', 'TLS', '401', '403', '500']) (
   'CP-026/V7-present ListMacaroonIDs %s stops before baseline and confirmation', async kind => scratch(async f => {
     f.lnd.listMacaroonIds.mockImplementationOnce(async () => { f.calls.push('ListMacaroonIDs'); throw fault(kind); });
     refused(await invoke(f), kind === '500' ? 5 : 4, 'V7');
     expect(f.calls).toEqual(['GetInfo', 'ListPermissions', 'ListMacaroonIDs']);
     expect(f.prompt).not.toHaveBeenCalled();
-  }));
+  }), 90_000);
 it('CP-026/V7-present present ID proceeds to baseline and planning without a delete', async () => scratch(async f => {
   plan(await invoke(f, ['--dry-run']), f);
   expect(f.calls).toEqual(['GetInfo', 'ListPermissions', 'ListMacaroonIDs', 'CheckMacaroonPermissions']);
-}));
+}), 90_000);
 it.each(['missing default', 'fingerprint mismatch', 'expired', 'not accepted', 'root missing',
   'empty permissions'])('CP-026/V8 %s selects by-id-only without mistaking the target for OWN',
   async kind => scratch(async f => {
@@ -353,24 +355,24 @@ it.each(['missing default', 'fingerprint mismatch', 'expired', 'not accepted', '
     save(f, [f.target]);
     plan(await invoke(f, ['--dry-run']), f, 'by-id-only');
     expect(f.lnd.checkMacaroon.mock.calls.length).toBe(kind === 'not accepted' || kind === 'root missing' ? 1 : 0);
-  }));
+  }), 90_000);
 it.each(['root-max', 'grade-uri-read-pair', 'preset-invoice-only', 'preset-pay-only']) (
   'CP-026/V8 usable %s uses its stored permissions and grade in accepted baseline and plan', async name => scratch(async f => {
     f.target = entry(name, maxId); save(f, [f.target]);
     plan(await invoke(f, ['--dry-run', '--target-file', f.target.outPath]), f);
     expect(f.lnd.checkMacaroon).toHaveBeenCalledTimes(1);
     expect(f.lnd.checkMacaroon.mock.calls[0][1]).toEqual(vector(name).printed.permissions);
-  }));
+  }), 90_000);
 it('CP-026/V8 explicit same-ID target remains usable when its fingerprint differs from the default entry', async () => scratch(async f => {
   const explicit = register(wireFixture('root-max', maxId));
   plan(await invoke(f, ['--dry-run', '--target-file', explicit]), f);
   expect(f.lnd.checkMacaroon).toHaveBeenCalledTimes(1);
-}));
+}), 90_000);
 it('CP-026/V8 an unusable default never falls back to testing macwarden own credential', async () => scratch(async f => {
   f.target.outPath = null; save(f, [f.target]);
   plan(await invoke(f, ['--dry-run']), f, 'by-id-only');
   expect(f.lnd.checkMacaroon).not.toHaveBeenCalled();
-}));
+}), 90_000);
 it.each(['--dry-run', '--dry-run --yes', '--dry-run --json']) (
   'CP-026/V9 %s produces a complete nonmutating plan and never prompts', async flags => scratch(async f => {
     const result = await invoke(f, flags.split(' ')); plan(result, f);
@@ -379,7 +381,7 @@ it.each(['--dry-run', '--dry-run --yes', '--dry-run --json']) (
     expect(JSON.parse(json)).toMatchObject({ schema: 1, command: 'revoke', ok: true,
       result: { dryRun: true, rootKeyId: maxId, label: 'Alice', grade: 'READ', proof: 'rejected' }, error: null });
     expect(json.trim().split('\n')).toHaveLength(1);
-  }));
+  }), 90_000);
 it.each(['wrong text', 'case differs', 'empty', 'EOF', 'non-TTY']) (
   'CP-026/V9 %s declines without a lock or mutation after an informed plan', async kind => scratch(async f => {
     const answer = kind === 'EOF' ? null : kind === 'empty' ? '' : kind === 'case differs' ? 'alice' : 'wrong';
@@ -396,7 +398,7 @@ it.each(['wrong text', 'case differs', 'empty', 'EOF', 'non-TTY']) (
       for (const value of ['Alice', maxId, 'READ']) expect(visible).toContain(value);
       expect(visible).toMatch(/reject/i);
     }
-  }));
+  }), 90_000);
 it('CP-026/V9 unregistered confirmation asks for the exact ID and refuses the label', async () => scratch(async f => {
   save(f, []);
   f.prompt.mockImplementation(async (question: string) => {
@@ -406,7 +408,7 @@ it('CP-026/V9 unregistered confirmation asks for the exact ID and refuses the la
   refused(await invoke(f, ['--unregistered'], maxId), 6, 'V9');
   expect(f.prompt).toHaveBeenCalledTimes(1);
   expect(f.output.join('')).toContain(maxId);
-}));
+}), 90_000);
 it.each(['exact label', 'exact unregistered ID', '--yes on non-TTY']) (
   'CP-026/V9 %s confirms deletion with independent proof and a revoked record', async kind => scratch(async f => {
     const flags: string[] = [];
@@ -432,7 +434,7 @@ it.each(['exact label', 'exact unregistered ID', '--yes on non-TTY']) (
     expect(f.lnd.listMacaroonIds).toHaveBeenCalledTimes(2);
     expect(f.lnd.checkMacaroon).toHaveBeenCalledTimes(kind === 'exact unregistered ID' ? 0 : 2);
     expect(f.output.join('') + render(result, 'text')).toContain(maxId);
-  }));
+  }), 90_000);
 it('CP-026/V9 a preexisting lock remains untouched during dry-run and declined input', async () => scratch(async f => {
   writeFileSync(`${f.registry}.lock`, JSON.stringify({ pid: process.pid, hostname: 'other-host', startedAt: '2026-10-04T00:00:00Z' }));
   plan(await invoke(f, ['--dry-run', '--break-lock']), f);
@@ -440,4 +442,4 @@ it('CP-026/V9 a preexisting lock remains untouched during dry-run and declined i
     expect(existsSync(`${f.registry}.lock`)).toBe(true); return 'wrong';
   });
   refused(await invoke(f, ['--break-lock']), 6, 'V9');
-}));
+}), 90_000);

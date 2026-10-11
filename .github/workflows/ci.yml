@@ -6,10 +6,11 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
-# A newer push to the same branch or pull request cancels the run it supersedes.
+# A newer push to a pull request or feature branch cancels the run it supersedes;
+# every run on main completes, so each main commit keeps its own result.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 jobs:
   test:
     runs-on: ${{ matrix.os }}
@@ -30,15 +31,26 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:
           node-version: ${{ matrix.node }}
+      # test/payment-lab-harness.test.ts replays against `git archive v1.2.0`; a depth-1
+      # checkout has no tags, so fetch that one tag alone.
+      - run: git fetch --no-tags --depth=1 origin tag v1.2.0
       - run: npm ci
       - run: npm run lint
       # npm test builds first (pretest), so the tests always run against a fresh dist.
-      - run: npm test
+      - run: npm test -- --reporter=default --reporter=json --outputFile.json=${{ runner.temp }}/vitest-product.json
       # The harness, documentation and configuration contracts are a separate Vitest project.
-      - run: npm run test:harness
+      - run: npm run test:harness -- --reporter=default --reporter=json --outputFile.json=${{ runner.temp }}/vitest-harness.json
+      # Vitest exits 0 with skipped tests; every test must have run and passed.
+      - run: node scripts/validation-support.mjs --no-pending "${{ runner.temp }}/vitest-product.json" "${{ runner.temp }}/vitest-harness.json"
+  # The LND oracle files run in four jobs, balanced by measured duration (scripts/oracle-shards.mjs);
+  # every file is in exactly one quarter, and each job has its own runner and fixture.
   oracle:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
         with:
@@ -49,7 +61,7 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run fixture:up
-      - run: npm run test:oracle
+      - run: npm run test:oracle -- $(node scripts/oracle-shards.mjs --files ${{ matrix.shard }}/4)
       - if: always()
         run: npm run fixture:down
   # The Core Lightning rune comparison runs in its own job, so an LND oracle failure cannot skip it.

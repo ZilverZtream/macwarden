@@ -125,16 +125,20 @@ function rowFrom(row: Row): OutboxRow {
 const iso = (ms: number): string => new Date(ms).toISOString();
 
 /**
- * Claims the first due row (lowest outbox ID that is pending and due, or leased with an expired
- * lease) for `owner` until now + leaseMs, in one BEGIN IMMEDIATE transaction: two workers on one
- * file serialise on SQLite's write lock, and the second never sees the first's row as claimable
- * while the lease runs. Each claim counts an attempt.
+ * Claims the due row that has been due longest (earliest next_attempt_at, then lowest outbox ID,
+ * among the rows pending and due, or leased with an expired lease) for `owner` until now +
+ * leaseMs, in one BEGIN IMMEDIATE transaction: two workers on one file serialise on SQLite's
+ * write lock, and the second never sees the first's row as claimable while the lease runs. Each
+ * claim counts an attempt. The order is by due time, not by ID: a row that failed is due again
+ * only after its backoff, so rows enqueued after it come first, and 1,000 or more older rows
+ * that keep failing (capped at 5 minutes between attempts) cannot take every claim of every pass
+ * from a healthy row behind them (the outbox_due index serves this order).
  */
 export function claim(db: DatabaseSync, owner: string, nowMs: number, leaseMs: number): OutboxRow | undefined {
   return immediate(db, () => {
     const now = iso(nowMs);
     const row = db.prepare(`SELECT outbox_id FROM outbox WHERE (state = 'pending' AND next_attempt_at <= ?)
-      OR (state = 'leased' AND lease_expires_at <= ?) ORDER BY outbox_id LIMIT 1`).get(now, now);
+      OR (state = 'leased' AND lease_expires_at <= ?) ORDER BY next_attempt_at, outbox_id LIMIT 1`).get(now, now);
     if (row === undefined) return undefined;
     const id = int(row, 'outbox_id');
     db.prepare(`UPDATE outbox SET state = 'leased', lease_owner = ?, lease_expires_at = ?, attempts = attempts + 1 WHERE outbox_id = ?`)

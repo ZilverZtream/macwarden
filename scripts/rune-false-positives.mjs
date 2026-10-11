@@ -252,9 +252,18 @@ export async function measureRecall({ perContext = 120, seed = 20261009, distRoo
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const args = process.argv.slice(2);
-  const option = (name, fallback) => { const at = args.indexOf(name); return at < 0 ? fallback : Number(args[at + 1]); };
-  const report = await measure({ perClass: option('--per-class', 2000), seed: option('--seed', 20261009) });
-  const recall = await measureRecall({ perContext: option('--per-context', 120), seed: option('--seed', 20261009) });
+  // A flag needs a whole number of at least its minimum: a typo or a missing value is an error,
+  // never NaN (zero cases, a null seed) or a batch of 0 (no progress).
+  const option = (name, fallback, minimum = 0) => {
+    const at = args.indexOf(name);
+    if (at < 0) return fallback;
+    const value = args[at + 1];
+    if (value === undefined || !/^[0-9]+$/.test(value) || Number(value) < minimum || !Number.isSafeInteger(Number(value)))
+      throw new Error(`${name} must be an integer of at least ${minimum}`);
+    return Number(value);
+  };
+  const report = await measure({ perClass: option('--per-class', 2000, 1), seed: option('--seed', 20261009) });
+  const recall = await measureRecall({ perContext: option('--per-context', 120, 1), seed: option('--seed', 20261009) });
   if (args.includes('--json')) process.stdout.write(`${JSON.stringify({ ...report, recall }, null, 2)}\n`);
   else {
     for (const [setting, row] of Object.entries(report.settings))

@@ -54,12 +54,22 @@ function listLines<T>(explanation: Explanation, key: TruncatedKey, max: number, 
   return out;
 }
 
+/** At most this many payment hashes are named in the header; with more, it counts them and names the first and the last. */
+const HEADER_HASHES = 3;
+
+function hashesPhrase(explanation: Explanation): string {
+  const listed = explanation.subject.payments;
+  const total = listed.length + (explanation.truncated?.payments ?? 0);
+  if (total === 0) return 'no payment hash';
+  if (total <= HEADER_HASHES) return `payment hash${total > 1 ? 'es' : ''} ${listed.join(', ')}`;
+  return `${total} payment hashes, the first ${listed[0] ?? ''}, the last ${listed.at(-1) ?? ''}`;
+}
+
 export function renderText(explanation: Explanation): string {
   const { subject } = explanation;
   const name = subject.component === 'payer' ? `operation ${subject.operationId ?? ''}` : `order ${subject.orderId ?? ''}`;
   const lines: string[] = [];
-  append(lines, wrap('', `${subject.component} explain: ${name} (${subject.payments.length === 0 ? 'no payment hash'
-    : `payment hash${subject.payments.length > 1 ? 'es' : ''} ${subject.payments.join(', ')}`})`, '  '));
+  append(lines, wrap('', `${subject.component} explain: ${name} (${hashesPhrase(explanation)})`, '  '));
   lines.push('');
   block(lines, 'outcome', wrap('  ', explanation.outcome.summary, '    '));
   block(lines, 'timeline', listLines(explanation, 'timeline', LIMITS.timeline, 'items', explanation.timeline, item => [

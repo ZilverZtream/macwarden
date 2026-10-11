@@ -1,0 +1,161 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "settled-outranks-canceled",
+  "rule": "LND reporting SETTLED for an invoice recorded canceled makes the record settled; at the end of a case (after a subscription catch-up from the cursor and reconciliation), no invoice LND holds SETTLED is recorded canceled.",
+  "message": "SETTLED for late invoice o2#1 recorded canceled in LND left it not-created/CANCELED",
+  "seed": 1,
+  "case": 8,
+  "config": {
+    "scale": "small",
+    "budget": false,
+    "limit": "10000"
+  },
+  "failingStep": 9,
+  "originalSteps": 34,
+  "events": [
+    {
+      "t": "create",
+      "p": "p0",
+      "order": 2,
+      "hold": false
+    },
+    {
+      "t": "answer",
+      "kind": "create",
+      "pick": 0.5,
+      "mode": "in-transit"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "answer",
+      "kind": "lookup",
+      "pick": 0.75,
+      "mode": "ok"
+    },
+    {
+      "t": "create.arrive",
+      "pick": 0.75
+    },
+    {
+      "t": "invoice",
+      "what": "misreport",
+      "pick": 0.8333
+    },
+    {
+      "t": "listen",
+      "p": "p0"
+    },
+    {
+      "t": "answer",
+      "kind": "lookup",
+      "pick": 0.25,
+      "mode": "ok"
+    },
+    {
+      "t": "invoice",
+      "what": "pay",
+      "pick": 0.8333,
+      "amount": "exact"
+    },
+    {
+      "t": "sub.deliver",
+      "pick": 0.5
+    }
+  ],
+  "states": {
+    "call": {
+      "proc": "p0",
+      "method": "applyInvoice",
+      "args": [
+        {
+          "paymentHash": "o2#1",
+          "state": "SETTLED",
+          "settleIndex": "1",
+          "amtPaidMsat": "7000",
+          "htlcs": 0
+        },
+        "subscription"
+      ]
+    },
+    "before": {
+      "invoices": {
+        "o2#1": {
+          "order": "o2",
+          "state": "not-created",
+          "late": "CANCELED",
+          "amount": "7000"
+        }
+      },
+      "orders": {
+        "o2": "awaiting-payment"
+      },
+      "fulfillments": [],
+      "ledger": [],
+      "cursor": {
+        "settle": "0",
+        "add": "0"
+      },
+      "entries": [],
+      "outbox": []
+    },
+    "after": {
+      "invoices": {
+        "o2#1": {
+          "order": "o2",
+          "state": "not-created",
+          "late": "CANCELED",
+          "amount": "7000"
+        }
+      },
+      "orders": {
+        "o2": "fulfilled"
+      },
+      "fulfillments": [
+        {
+          "hash": "o2#1",
+          "order": "o2"
+        }
+      ],
+      "ledger": [
+        {
+          "hash": "o2#1",
+          "order": "o2",
+          "amount": "7000"
+        }
+      ],
+      "cursor": {
+        "settle": "1",
+        "add": "1"
+      },
+      "entries": [
+        {
+          "id": "1",
+          "event": "invoice-settled",
+          "hash": "o2#1",
+          "op": "o2",
+          "amount": "7000"
+        }
+      ],
+      "outbox": [
+        {
+          "id": "1",
+          "kind": "fulfill-order",
+          "key": "o2:f15d412c758319bcb55c63fea0ce79f57ea3e805d3d851ab1174995b4e151ed7",
+          "subject": "o2",
+          "payload": {
+            "orderId": "o2",
+            "paymentHash": "o2#1",
+            "amountMsat": "7000",
+            "settleIndex": "1",
+            "ledgerEntryId": 1
+          },
+          "state": "pending"
+        }
+      ]
+    }
+  },
+  "mutant": "settled-outranks-canceled--m9b.cjs"
+}

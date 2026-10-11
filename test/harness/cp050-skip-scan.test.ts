@@ -1,6 +1,6 @@
 import { relative, resolve, sep } from 'node:path';
 import { expect, it, vi } from 'vitest';
-import { PRIVATE_TEST_SCRATCH, skippedSourceCount, testFiles } from '../../scripts/validation-support.mjs';
+import { PRIVATE_TEST_SCRATCH, SOURCE_SKIP_ALLOWANCE, skippedSourceCount, skippedSourceFindings, testFiles } from '../../scripts/validation-support.mjs';
 
 // A virtual test tree under a root that does not exist on disk; every other path goes to the
 // real file system, so the module and its imports load normally.
@@ -74,4 +74,57 @@ it('CP-050/B5 a skip in a real test file still counts, including under a nested 
   });
   expect(testFiles(root).sort()).toEqual(['test/nested/.tmp/inner.test.ts', 'test/real.test.ts', 'test/skipped.test.ts']);
   expect(skippedSourceCount(root)).toBe(2);
+});
+
+// Audit TESTS-03 / TOOLING-11: each of these disables, inverts or empties a test while the
+// earlier scan, which saw only .skip/.only/.todo on a direct chain, counted nothing.
+const smuggled: Record<string, string> = {
+  'aliased test function': "const t = it;\nt('aliased', () => { expect(1).toBe(2); });",
+  'aliased skip': "const t = it;\nt.skip('aliased skip', () => {});",
+  'computed skip': "it['sk' + 'ip']('computed skip', () => {});",
+  'computed literal skip': "it['skip']('literal computed skip', () => {});",
+  'skipIf': "it.skipIf(true)('skipIf true', () => {});",
+  'runIf': "describe.runIf(false)('runIf false', () => { it('inner', () => {}); });",
+  'fails': "it.fails('inverted', () => { expect(1).toBe(2); });",
+  'unknown chain property': "it.extend({})('custom', () => {});",
+  'context skip': "it('context skip', ({ skip }) => { skip(); expect(1).toBe(2); });",
+  'context skip member': "it('context skip', context => { context.skip(); expect(1).toBe(2); });",
+  'empty each table': "it.each([] as number[])('empty table %i', n => { expect(n).toBe(-1); });",
+  'empty for table': "test.for([] as number[])('empty for %i', n => { expect(n).toBe(-1); });",
+  'early return': "it('early return', () => { if (process.env.NOPE === undefined) return; expect(1).toBe(2); });",
+  'test passed as a value': "[it].forEach(f => f('indirect', () => {}));",
+  'namespace skip': "vt.it.skip('namespace', () => {});",
+};
+it.each(Object.entries(smuggled))('TESTS-03 the no-skips scan counts %s', (_, body) => {
+  const header = "import { describe, expect, it, test } from 'vitest';\nimport * as vt from 'vitest';\n";
+  const root = tree({ 'test/real.test.ts': passing, 'test/smuggle.test.ts': header + body + '\n' });
+  expect(skippedSourceCount(root)).toBeGreaterThan(0);
+});
+
+it('TESTS-03 ordinary chains, filled tables, final returns and unrelated names are not counted', () => {
+  const root = tree({ 'test/ordinary.test.ts': `import { describe, expect, it, test } from 'vitest';
+type Grader = { describe: (facts: string) => string[]; test: number };
+const options = { test: 1 };
+describe('group', () => {
+  it.each([1, 2])('case %i', n => { expect(n).toBeGreaterThan(0); });
+  test.for([[1, 2]])('pair %j', ([a, b]) => { expect(a).toBeLessThan(b); });
+  it.concurrent('concurrent', async () => { expect(options.test).toBe(1); });
+  it('final return', () => { const value = 1; expect(value).toBe(1); return; });
+  it('nested function returns early', () => { const f = (x: number) => { if (x) return 1; return 2; }; expect(f(0)).toBe(2); });
+});
+export type { Grader };
+` });
+  expect(skippedSourceFindings(root)).toEqual([]);
+});
+
+it('TESTS-03 no capability skip is allowed: the allowance is empty and every skipIf or early return counts in every file', () => {
+  const skipIf = "import { it } from 'vitest';\nit.skipIf(process.platform === 'darwin')('a', () => {});\n";
+  const early = "import { expect, it } from 'vitest';\nit('a', () => { if (process.platform === 'darwin') return; expect(1).toBe(1); });\n";
+  expect(SOURCE_SKIP_ALLOWANCE).toEqual({});
+  // The files that used to be allowed are ordinary files now (audit 1.4.0).
+  for (const file of ['test/out-registry-collision.test.ts', 'test/protected-path-symlink.test.ts', 'test/registry-lock-recovery.test.ts',
+    'test/cp023-acl.windows-fs.test.ts', 'test/redteam-files.test.ts', 'test/elsewhere.test.ts']) {
+    expect(skippedSourceCount(tree({ [file]: skipIf })), file).toBe(1);
+    expect(skippedSourceCount(tree({ [file]: early })), file).toBe(1);
+  }
 });

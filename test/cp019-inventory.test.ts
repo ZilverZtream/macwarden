@@ -5,6 +5,7 @@ import * as fs from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { expect, it, vi } from 'vitest';
 import { render } from './helpers/render-adversarial.js';
+import { onRegistryOpen } from './helpers/integration-registry-read.js';
 
 type Entry = {
   nodePubkey: string; label: string | null; rootKeyId: string; permissions: string[];
@@ -124,9 +125,8 @@ it.each(['invalid', 'unknown schema', 'unreadable'] as const)(
       schema: kind === 'unknown schema' ? 2 : 1, entries: [],
     }));
     const { calls, deps } = fixture();
-    if (kind === 'unreadable') deps.fs.readFile.mockImplementation(async (file, ...options) => {
-      if (String(file) === path) throw Object.assign(new Error('private path detail'), { code: 'EACCES' });
-      return fs.readFile(file, ...options);
+    if (kind === 'unreadable') deps.fs.open = onRegistryOpen(deps.fs, path, () => {
+      throw Object.assign(new Error('private path detail'), { code: 'EACCES' });
     });
     const before = readFileSync(path);
     const output = await invoke(path, deps);

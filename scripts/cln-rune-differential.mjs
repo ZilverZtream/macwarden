@@ -287,6 +287,9 @@ export async function runDifferential(rpc, api, { seed, runes, pairsPerRune = 2,
     }
     if (onProgress && (index + 1) % 250 === 0) onProgress(index + 1, report);
   }
+  // A campaign that compared nothing (every createrune refused, say) proves nothing: fail it.
+  if (runes > 0 && report.decodeCompared === 0) fail(-1, 'coverage', 'no created rune was compared with the node\'s decoding');
+  if (runes > 0 && pairsPerRune > 0 && report.pairs === 0) fail(-1, 'coverage', 'no checkrune pair was compared');
   return report;
 }
 

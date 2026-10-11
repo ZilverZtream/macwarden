@@ -30,9 +30,8 @@ function decodeBase64(value: string): Buffer {
   const url = /^[A-Za-z0-9_-]+={0,2}$/.test(value);
   if ((!standard && !url) || value.length % 4 === 1) return invalidForm();
   const padding = value.length - value.replace(/=+$/, '').length;
-  if ((padding > 0 && value.length % 4 !== 0) ||
-      (padding === 1 && value.at(-2) === '=') ||
-      (padding === 2 && value.at(-3) === '=')) return invalidForm();
+  // An inner '=' or more than two trailing ones already failed the alphabet tests above.
+  if (padding > 0 && value.length % 4 !== 0) return invalidForm();
   const decoded = Buffer.from(value, standard ? 'base64' : 'base64url');
   if (decoded.length === 0) return invalidForm();
   const canonical = decoded.toString(standard ? 'base64' : 'base64url');
@@ -66,6 +65,15 @@ function isTokenStoreFile(bytes: Buffer): boolean {
 type Forms = { nwc?: boolean; l402?: boolean; rune?: boolean };
 
 /**
+ * The form an input was recognised as (audit 1.4.0). Inspect dispatches on it, so bytes decoded
+ * from hex or base64 are only ever read as a macaroon, never sniffed again as a rune, an NWC URI
+ * or L402 text. 'macaroon' covers binary, hex, base64 and lndconnect input; 'token-file' is an
+ * Aperture token store file.
+ */
+export type CredentialForm = 'macaroon' | 'nwc' | 'l402' | 'token-file' | 'rune';
+type Parsed = { bytes: Buffer; form: CredentialForm };
+
+/**
  * Whether trimmed text is a Core Lightning rune for inspect (1.2.0): URL-safe base64 that Core
  * Lightning's rune parser accepts, unless the same text is a macaroon that decodes (an LND
  * macaroon, or a macaroon with an L402 identifier). A rune whose first decoded byte happens to
@@ -74,8 +82,15 @@ type Forms = { nwc?: boolean; l402?: boolean; rune?: boolean };
 function isRuneText(trimmed: string): boolean {
   if (trimmed.length < RUNE_SHORTEST_TEXT || trimmed.length > RUNE_TEXT_LIMIT || !RUNE_ALPHABET.test(trimmed)) return false;
   if (!decodeRuneText(trimmed).ok) return false;
+  // Core Lightning's rune syntax accepts most hex and base64url text, so an encoding of another
+  // form would pass as a rune (audit 1.4.0). A rune's text starts with the encoding of a 32-byte
+  // HMAC, which is never all hex digits and never decodes to text: hex text, and text whose
+  // bytes are an NWC URI, L402 text or rune text, is read as an encoded macaroon instead.
+  if (/^(?:0x)?[0-9a-f]+$/i.test(trimmed)) return false;
+  const inner = Buffer.from(trimmed, 'base64url').toString('latin1');
+  if (nwcScheme.test(inner) || isL402Text(inner) || RUNE_ALPHABET.test(inner)) return false;
   let macaroon: Buffer;
-  try { macaroon = parseText(trimmed); }
+  try { macaroon = parseText(trimmed).bytes; }
   catch { return true; }
   if (macaroon[0] !== 0x02) return true;
   if (isL402Macaroon(new Secret(macaroon))) return false;
@@ -89,32 +104,35 @@ function isRuneText(trimmed: string): boolean {
 // hex or base64 macaroon. NWC and L402 text contain ':' or a blank, which no rune can, so those
 // forms never compete with a rune; a rune and a hex or base64 macaroon are told apart by
 // isRuneText (a macaroon that decodes wins).
-function parseText(text: string, forms: Forms = {}): Buffer {
+function parseText(text: string, forms: Forms = {}): Parsed {
   const trimmed = text.trim();
   // An NWC URI is kept verbatim inside the Secret container; decode/index.ts parses it.
-  if (forms.nwc && nwcScheme.test(trimmed)) return /\s/.test(trimmed) ? invalidForm() : Buffer.from(trimmed, 'utf8');
-  // An L402 Authorization value, challenge or pair is kept verbatim too, as one line.
-  if (forms.l402 && isL402Text(trimmed)) return /[\r\n]/.test(trimmed) ? invalidForm() : Buffer.from(trimmed, 'latin1');
+  if (forms.nwc && nwcScheme.test(trimmed)) return /\s/.test(trimmed) ? invalidForm() : { bytes: Buffer.from(trimmed, 'utf8'), form: 'nwc' };
+  // An L402 Authorization value, challenge or pair is kept verbatim too, as one line. Every L402
+  // form is ASCII: a wider character would otherwise be narrowed to a byte, U+013A to ':'.
+  if (forms.l402 && isL402Text(trimmed)) {
+    return /[\r\n\u0080-\uffff]/.test(trimmed) ? invalidForm() : { bytes: Buffer.from(trimmed, 'latin1'), form: 'l402' };
+  }
   // A rune is kept verbatim inside the Secret container; decode/index.ts parses it.
-  if (forms.rune && isRuneText(trimmed)) return Buffer.from(trimmed, 'latin1');
-  if (/^lndconnect:\/\//i.test(trimmed)) return parseLndconnect(trimmed) ?? invalidForm();
+  if (forms.rune && isRuneText(trimmed)) return { bytes: Buffer.from(trimmed, 'latin1'), form: 'rune' };
+  if (/^lndconnect:\/\//i.test(trimmed)) return { bytes: parseLndconnect(trimmed) ?? invalidForm(), form: 'macaroon' };
   const value = text.replace(/\s/g, '');
   if (!value) return invalidForm();
 
   if (/^(?:0x)?[0-9a-f]+$/i.test(value)) {
     const digits = /^0x/i.test(value) ? value.slice(2) : value;
     if (digits.length % 2 !== 0) return invalidForm();
-    return Buffer.from(digits, 'hex');
+    return { bytes: Buffer.from(digits, 'hex'), form: 'macaroon' };
   }
 
-  return decodeBase64(value);
+  return { bytes: decodeBase64(value), form: 'macaroon' };
 }
 
-function parseBytes(bytes: Buffer, forms: Forms = {}): Buffer {
-  if (bytes[0] === 0x02) return bytes;
+function parseBytes(bytes: Buffer, forms: Forms = {}): Parsed {
+  if (bytes[0] === 0x02) return { bytes, form: 'macaroon' };
   // An Aperture L402 token store file is binary and starts with its macaroon length, a
   // big-endian uint32 below 2^24: decode/index.ts checks its framing.
-  if (forms.l402 && isTokenStoreFile(bytes)) return bytes;
+  if (forms.l402 && isTokenStoreFile(bytes)) return { bytes, form: 'token-file' };
   if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
     if ((bytes.length - 2) % 2 !== 0) return invalidForm();
     return parseText(bytes.subarray(2).toString('utf16le'), forms);
@@ -192,11 +210,12 @@ export async function readCredential(
   arg: string,
   io: InputIO,
   opts: { unsafeArg: boolean; nwc?: boolean; l402?: boolean; rune?: boolean },
-): Promise<{ secret: Secret; literal: boolean }> {
+): Promise<{ secret: Secret; literal: boolean; form: CredentialForm }> {
   const forms: Forms = { nwc: opts.nwc === true, l402: opts.l402 === true, rune: opts.rune === true };
   if (arg === '-') {
     if (io.stdin.isTTY) throw new UsageError('stdin is a TTY');
-    return { secret: new Secret(parseBytes(await stdinBytes(io.stdin), forms)), literal: false };
+    const { bytes, form } = parseBytes(await stdinBytes(io.stdin), forms);
+    return { secret: new Secret(bytes), literal: false, form };
   }
 
   let sourceStat: BigIntStats | undefined;
@@ -241,7 +260,8 @@ export async function readCredential(
       }
     }
     if (readFailed || !bytes) throw new InputError('input-read');
-    return { secret: new Secret(parseBytes(bytes, forms)), literal: false };
+    const parsed = parseBytes(bytes, forms);
+    return { secret: new Secret(parsed.bytes), literal: false, form: parsed.form };
   }
 
   // An encoded literal can contain a protected-looking path component. Only
@@ -250,7 +270,7 @@ export async function readCredential(
     || (forms.rune && isRuneText(arg.trim()));
   if (!supportedLiteral) {
     try {
-      supportedLiteral = parseText(arg)[0] === 0x02;
+      supportedLiteral = parseText(arg).bytes[0] === 0x02;
     } catch { /* An unparseable argument is not a supported credential literal. */ }
   }
   if (isProtectedPath(arg) && !supportedLiteral) throw new InputError('input-read');
@@ -258,5 +278,6 @@ export async function readCredential(
     if (supportedLiteral) throw new UsageError(literalRefusal);
     throw new InputError('input-read', 'no such file');
   }
-  return { secret: new Secret(parseText(arg, forms)), literal: true };
+  const parsed = parseText(arg, forms);
+  return { secret: new Secret(parsed.bytes), literal: true, form: parsed.form };
 }

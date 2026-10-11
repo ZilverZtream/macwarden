@@ -112,7 +112,10 @@ export interface Lab {
    */
   cliMain: ((argv: string[], services: { payer(): PayerDeps; receiver(): ReceiverDeps }) => Promise<number>) | undefined;
   /** `ledger verify` (src/ledger/verify.ts), when the source has the double-entry journal (1.3.0); undefined for older sources. */
-  verifyLedger: ((store: { db: unknown; book: 'payer' | 'receiver' }) => Promise<LedgerVerification>) | undefined;
+  verifyLedger: ((store: { db: unknown; book: 'payer' | 'receiver' }, api?: {
+    listPaymentsPage(indexOffset: bigint, maxPayments: number): Promise<{ payments: Payment[]; lastIndexOffset: bigint }>;
+    listInvoicesPage(indexOffset: bigint, maxInvoices: number): Promise<{ invoices: Invoice[]; lastIndexOffset: bigint }>;
+  }) => Promise<LedgerVerification>) | undefined;
   /** The outbox worker and the effect files (src/outbox/), when the source has them (1.3.0); undefined for older sources. */
   outbox: OutboxModules | undefined;
 }
