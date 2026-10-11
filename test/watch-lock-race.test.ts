@@ -83,6 +83,35 @@ it('WATCH/lock-race two watches starting at once against a stale lock never both
   }
 }, 60_000);
 
+// The window the race above hit under load (1 in about 3,500 rounds): between A's exclusive
+// create and A's check that the path is still the file it created, B (acting on its stale read)
+// moves the lock aside, finds it is not the stale record and links it back. A must wait for its
+// own file to return, not refuse the lock it just took (both watches then exited).
+it('WATCH/lock-race a watch whose fresh lock a stale takeover briefly moves aside keeps it', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mw-lock-race-'));
+  try {
+    const path = join(dir, 'aside.watch.lock');
+    const aside = `${path}.stale-other`;
+    let moved = false;
+    let restored: Promise<void> = Promise.resolve();
+    const files = { ...fs, async lstat(target: string, options?: { bigint?: boolean }) {
+      if (target === path && !moved) {
+        moved = true;
+        await fs.rename(path, aside);
+        restored = new Promise(resolve => setTimeout(resolve, 30)).then(async () => { await fs.link(aside, path); await fs.unlink(aside); });
+      }
+      return fs.lstat(target, options as never);
+    } } as unknown as typeof fs;
+    const release = await acquireLock(path, depsFor(first, files));
+    await restored;
+    expect(moved).toBe(true);
+    await release();
+    expect(readdirSync(dir)).toEqual([]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // The other order: B starts first but is still looking up its process domain when A takes the
 // lock, so B's exclusive create meets A's fresh lock and reads its record. A live owner keeps it.
 it('WATCH/lock-race a watch that reads the fresh lock of another watch refuses it', async () => {

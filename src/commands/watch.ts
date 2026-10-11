@@ -266,6 +266,9 @@ async function takeOverStaleLock(path: string, stale: string, pid: number, deps:
   throw Object.assign(new Error('watch lock held'), { code: 'EEXIST' });
 }
 
+/** How many 10 ms waits acquireLock gives a racing stale takeover to put its fresh lock back. */
+const LOCK_ASIDE_WAITS = 50;
+
 /** Locks this process holds now: a second request for one is refused, never taken over as stale. */
 const heldLocks = new Set<string>();
 
@@ -297,7 +300,14 @@ export async function acquireLock(path: string, deps: Deps): Promise<() => Promi
       // On Windows an exclusive create follows a dangling symbolic link and creates its target
       // (audit 1.2.1): the lock must be the regular file at the path itself, or the file it did
       // create is removed and the lock refused.
-      const onDisk = await deps.fs.lstat(path, { bigint: true }).catch(() => null);
+      let onDisk = await deps.fs.lstat(path, { bigint: true }).catch(() => null);
+      // Absent: another watch acting on a stale read moved the lock aside to take it over, found
+      // it is not the stale record and links it back (takeOverStaleLock), keeping the inode. Wait
+      // for it (at most LOCK_ASIDE_WAITS x 10 ms) instead of refusing the lock just taken.
+      for (let wait = 0; onDisk === null && wait < LOCK_ASIDE_WAITS; wait++) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+        onDisk = await deps.fs.lstat(path, { bigint: true }).catch(() => null);
+      }
       if (!onDisk || !onDisk.isFile() || onDisk.isSymbolicLink() || onDisk.dev !== identity.dev || onDisk.ino !== identity.ino) {
         const target = await deps.fs.realpath(path).catch(() => null);
         if (target && resolvePath(target) !== key) await deps.fs.unlink(target).catch(() => undefined);
