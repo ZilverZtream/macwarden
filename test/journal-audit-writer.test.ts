@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { JOURNAL_CLOCK_STEP_MS, journalCoverage, parseRecord, readJournal, type JournalRecord } from '../src/watch/payment-journal.js';
 import { bytes } from './helpers/payment-proto.js';
 import { NODE, identityOf, openJournal, paymentCall, settle, vector } from './helpers/payment-journal.js';
@@ -47,6 +47,23 @@ it('JOURNAL-AUDIT/clock a forward step that is then corrected neither pins later
   const coverage = journalCoverage(records, NODE, T0 + 1_000, T0 + 60 * MINUTE);
   expect(coverage.gaps.map(gap => [gap.from - T0, gap.to - T0, gap.reason])).toEqual([
     [10 * MINUTE, 15 * MINUTE, 'not-registered'], [20 * MINUTE, 60 * MINUTE, 'not-running']]);
+});
+
+it('JOURNAL-AUDIT/alive the keep-alive gate follows the monotonic clock: a backward system clock step does not delay the alive record', async () => {
+  const path = join(scratch(), 'alive-step.journal');
+  let wall = T0;
+  let mono = 0;
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+  try {
+    const journal = await openJournal(path, { clock: () => new Date(wall), monotonic: () => mono });
+    journal.registered(); await settle();
+    // The system clock steps back an hour (NTP correction) while six real minutes pass: on the system
+    // clock the last write looked an hour in the future and the alive record waited an hour and five minutes.
+    wall = T0 - 60 * MINUTE; mono = 6 * MINUTE;
+    vi.advanceTimersByTime(6 * MINUTE); await settle();
+    await journal.close();
+  } finally { vi.useRealTimers(); }
+  expect(lines(path).map(item => item.type)).toEqual(['run-start', 'registered', 'alive', 'unregistered', 'run-end']);
 });
 
 it('JOURNAL-AUDIT/clock the system clock is followed while it moves with the monotonic clock, and again once a step is corrected', async () => {

@@ -354,6 +354,90 @@ describe('payment lab payer audit: the claim reports its own submission, across 
   });
 });
 
+/** The harness's scripted LND (examples/payment-lab/test/harness/lnd.ts), as far as this test drives it by hand. */
+interface HarnessCall { id: number; kind: string; submission: number | undefined }
+interface HarnessLnd {
+  calls: HarnessCall[];
+  paymentLabels: Map<string, { label: string; preimage: string; amountMsat: bigint }>;
+  payerApi(proc: 'p0' | 'p1'): FakePayerApi;
+  arrive(call: HarnessCall): boolean;
+  endSend(call: HarnessCall, mode: string): boolean;
+  deliver(call: HarnessCall): void;
+  paymentEvent(hash: string, what: 'attempt' | 'attempt-fail' | 'fail' | 'succeed'): boolean;
+  predatesSubmission(snapshot: Payment, submission: number): boolean;
+}
+interface HarnessLndModule { FakeLnd: new (lab: unknown, hooks: Record<string, unknown>) => HarnessLnd }
+
+describe('payment lab payer audit: the harness\'s LND judges an earlier submission by what it holds, not by the stream\'s token', () => {
+  const HARNESS = '../../examples/payment-lab/test/harness/';
+  /** A scripted LND whose streams carry the submission `current()` says, as the harness tags them. */
+  async function scriptedLnd(current: () => number): Promise<HarnessLnd> {
+    const { FakeLnd } = await import(/* @vite-ignore */ `${HARNESS}lnd.ts`) as HarnessLndModule;
+    const { loadLab } = await import(/* @vite-ignore */ `${HARNESS}lab.ts`) as { loadLab(): Promise<unknown> };
+    const workflow = (): Record<string, unknown> => ({ id: 1, proc: 'p0', incarnation: 1, kind: 'submit', label: 'op0/i0', controller: undefined, done: false,
+      submission: current() });
+    return new FakeLnd(await loadLab(), { settleCalled: () => undefined, progress: () => undefined, currentWorkflow: workflow,
+      callCreated: (call: HarnessCall) => { call.submission = current(); }, alive: () => true });
+  }
+
+  it('an attempt a delayed submission-1 tracker shows after submission 2 was sent belongs to submission 2: its FAILED does not predate submission 2', async () => {
+    let submission = 1;
+    const lnd = await scriptedLnd(() => submission);
+    const { preimage, paymentHash } = preimageFor('harness-f01');
+    lnd.paymentLabels.set(paymentHash, { label: 'op0/i0', preimage, amountMsat: 1000n });
+    const api = lnd.payerApi('p0');
+    const request = { paymentRequest: 'lnbcrt-op0/i0', feeLimitMsat: 100n, timeoutSeconds: 30, maxParts: 1 };
+    // Submission 1's send never connects.
+    const send1 = api.sendPaymentV2(request, () => 'continue').catch(() => 'not connected');
+    expect(lnd.endSend(lnd.calls[0] as HarnessCall, 'connect')).toBe(true);
+    expect(await send1).toBe('not connected');
+    // Submission 2's send reaches LND: a new payment, with HTLC attempt 1.
+    submission = 2;
+    void api.sendPaymentV2(request, () => 'continue').catch(() => undefined);
+    expect(lnd.arrive(lnd.calls[1] as HarnessCall)).toBe(true);
+    expect(lnd.paymentEvent(paymentHash, 'attempt')).toBe(true);
+    // A TrackPaymentV2 request made for submission 1 reaches LND only now and is the first stream to show that attempt.
+    submission = 1;
+    const delayed = api.trackPaymentV2(paymentHash, () => 'stop');
+    lnd.deliver(lnd.calls[2] as HarnessCall);
+    await delayed;
+    // LND fails the payment; a tracker for submission 2 reads the FAILED.
+    expect(lnd.paymentEvent(paymentHash, 'fail')).toBe(true);
+    submission = 2;
+    let snapshot: Payment | undefined;
+    const current = api.trackPaymentV2(paymentHash, update => { snapshot = update; return 'stop'; });
+    lnd.deliver(lnd.calls[3] as HarnessCall);
+    await current;
+    expect(snapshot).toMatchObject({ status: 'FAILED', htlcs: [expect.objectContaining({ attemptId: '1', status: 'FAILED' })] });
+    expect(lnd.predatesSubmission(snapshot as Payment, 2)).toBe(false);
+  });
+
+  it('the earlier submission\'s FAILED, shown while only submission 1 was sent, still predates the retry', async () => {
+    let submission = 1;
+    const lnd = await scriptedLnd(() => submission);
+    const { preimage, paymentHash } = preimageFor('harness-retry');
+    lnd.paymentLabels.set(paymentHash, { label: 'op0/i0', preimage, amountMsat: 1000n });
+    const api = lnd.payerApi('p0');
+    const request = { paymentRequest: 'lnbcrt-op0/i0', feeLimitMsat: 100n, timeoutSeconds: 30, maxParts: 1 };
+    void api.sendPaymentV2(request, () => 'continue').catch(() => undefined);
+    expect(lnd.arrive(lnd.calls[0] as HarnessCall)).toBe(true);
+    expect(lnd.paymentEvent(paymentHash, 'attempt')).toBe(true);
+    expect(lnd.paymentEvent(paymentHash, 'fail')).toBe(true);
+    const tracked = api.trackPaymentV2(paymentHash, () => 'stop');
+    lnd.deliver(lnd.calls[1] as HarnessCall);
+    await tracked;
+    // The retry's send is made but has not reached LND; its tracker still reads submission 1's FAILED.
+    submission = 2;
+    void api.sendPaymentV2(request, () => 'continue').catch(() => undefined);
+    let snapshot: Payment | undefined;
+    const retry = api.trackPaymentV2(paymentHash, update => { snapshot = update; return 'stop'; });
+    lnd.deliver(lnd.calls[3] as HarnessCall);
+    await retry;
+    expect(snapshot?.status).toBe('FAILED');
+    expect(lnd.predatesSubmission(snapshot as Payment, 2)).toBe(true);
+  });
+});
+
 describe('payment lab payer audit: reconcile answers from the record as it is after the lookup', () => {
   /** A submitting payment; its reconcile's lookup ends with `end` after another process recorded LND's success. */
   async function successDuringLookup(file: string, withAttempt: boolean, end: (stop: AbortController) => Error): Promise<{ outcome: { kind: string }; store: PayerStore }> {

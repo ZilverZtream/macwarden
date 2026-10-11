@@ -529,7 +529,16 @@ export async function reconcileInvoices(deps: ReceiverDeps, onlyOrder?: string, 
       buckets.set(paymentHash, notCreated ? 'resolved' : 'unknown');
       continue;
     }
-    if (invoice.state === 'creating') deps.store.markCreated(paymentHash, found.paymentRequest, found.addIndex);
+    // A creating invoice LND holds was created. The record may have been decided not-created while this lookup was out (an
+    // older lookup's NotFound landing after the creation window, and a replacement issued since): markCreated finds that, and
+    // the invoice is then a late one, resolved from the record as it is now, not from the snapshot taken before the lookup,
+    // the way a pass that lists it not-created resolves it (canceled in LND in this pass, or adopted).
+    const state = invoice.state === 'creating' ? deps.store.markCreated(paymentHash, found.paymentRequest, found.addIndex) : invoice.state;
+    if (state === 'not-created') {
+      const result = await resolveLateInvoice(deps, deps.store.invoice(paymentHash) ?? invoice, found, 'lookup', pass);
+      buckets.set(paymentHash, result.kind === 'unresolved' ? 'unknown' : decided(deps, paymentHash, found.state) ? 'resolved' : 'open');
+      continue;
+    }
     const outcome = apply(deps, found, 'lookup');
     await supersedeOthers(deps, outcome, paymentHash, pass);
     if (deps.store.isSuperseded(paymentHash)) {

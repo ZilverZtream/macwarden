@@ -35,17 +35,23 @@ export function migrateReceiverOutbox(db: DatabaseSync): void {
 }
 
 /**
- * Receiver, after a 1.3.0 migration 4 (which took the record's amt_paid_msat): a pending
- * fulfill-order row whose amountMsat is not its ledger entry's line 1 takes the entry's. A row
- * leased or done is left alone (a worker may be writing it, or its receipt exists).
+ * Receiver, after a 1.3.0 migration 4 (which took the record's amt_paid_msat): a fulfill-order
+ * row not yet performed whose amountMsat is not its ledger entry's line 1 takes the entry's: a
+ * pending row, or one a worker left leased and whose lease has run out by `now` (the worker died
+ * holding it; the next claim takes it as it is, see claim). A row with a running lease or done is
+ * left alone (a worker may be writing it, or its receipt exists). The worker also refuses to
+ * publish a row whose amount is not its entry's (checkLedgerEntry), so a row this misses fails
+ * by name instead of writing the old amount.
  */
-export function repairReceiverOutboxAmounts(db: DatabaseSync): void {
+export function repairReceiverOutboxAmounts(db: DatabaseSync, now: string = nowIso()): void {
   db.exec(OUTBOX_SCHEMA);
-  db.exec(`UPDATE outbox SET payload = json_set(payload, '$.amountMsat', (SELECT CAST(l.amount_msat AS TEXT) FROM journal_lines l
+  db.prepare(`UPDATE outbox SET payload = json_set(payload, '$.amountMsat', (SELECT CAST(l.amount_msat AS TEXT) FROM journal_lines l
       WHERE l.entry_id = json_extract(outbox.payload, '$.ledgerEntryId') AND l.line_no = 1))
-    WHERE kind = 'fulfill-order' AND state = 'pending' AND EXISTS (SELECT 1 FROM journal_entries e JOIN journal_lines l ON l.entry_id = e.entry_id AND l.line_no = 1
+    WHERE kind = 'fulfill-order' AND (state = 'pending' OR (state = 'leased' AND lease_expires_at <= ?))
+      AND EXISTS (SELECT 1 FROM journal_entries e JOIN journal_lines l ON l.entry_id = e.entry_id AND l.line_no = 1
       WHERE e.entry_id = json_extract(outbox.payload, '$.ledgerEntryId') AND e.event = 'invoice-settled'
-        AND e.reference = json_extract(outbox.payload, '$.paymentHash') AND CAST(l.amount_msat AS TEXT) IS NOT json_extract(outbox.payload, '$.amountMsat'))`);
+        AND e.reference = json_extract(outbox.payload, '$.paymentHash') AND CAST(l.amount_msat AS TEXT) IS NOT json_extract(outbox.payload, '$.amountMsat'))`)
+    .run(now);
 }
 
 /**

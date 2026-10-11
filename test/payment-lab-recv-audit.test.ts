@@ -547,3 +547,68 @@ describe('payment lab analysis audit', () => {
     expect(complete.findings.join('\n')).not.toMatch(/stopped before their end/);
   });
 });
+
+describe('payment lab receiver audit (1.3.1, F07): a late lookup answer for an invoice that was creating when the pass began', () => {
+  /** The scripted API with AddInvoice stalling for its first call and every lookup answered by the test, in the order it chooses. */
+  class DeferredApi extends FakeInvoiceApi {
+    deferLookups = true;
+    adds = 0;
+    readonly pending: { paymentHash: string; resolve(invoice: Invoice): void; reject(error: Error): void }[] = [];
+
+    override addInvoice(request: { preimage: string; valueMsat: bigint }): Promise<{ paymentHash: string; paymentRequest: string; addIndex: bigint }> {
+      this.adds += 1;
+      if (this.adds > 1) return super.addInvoice(request);
+      this.calls.push('AddInvoice');
+      return new Promise(() => undefined); // A: the call stalls for good
+    }
+
+    override lookupInvoice(paymentHash: string): Promise<Invoice> {
+      if (!this.deferLookups) return super.lookupInvoice(paymentHash);
+      this.calls.push('LookupInvoice');
+      return new Promise((resolve, reject) => { this.pending.push({ paymentHash, resolve, reject }); });
+    }
+  }
+
+  const turns = async (): Promise<void> => { for (let turn = 0; turn < 20; turn += 1) await new Promise(resolve => setImmediate(resolve)); };
+
+  it('an OPEN answer reaching the pass after NotFound decided the invoice not-created and a replacement was issued cancels it in that pass', async () => {
+    const api = new DeferredApi();
+    const deps = receiver(receiverStore(), api);
+    // 1. Invoice A stays creating: its AddInvoice call stalls.
+    void lab.receiver.createInvoice(deps, { orderId: 'O-07', amountMsat: 4000n, hold: false, memo: 'O-07', expirySeconds: 3600 });
+    await turns();
+    const A = String(deps.store.db.prepare(`SELECT payment_hash FROM invoices WHERE order_id = 'O-07'`).all()[0]?.payment_hash);
+    expect(deps.store.invoice(A)?.state).toBe('creating');
+    // 2. An older reconciliation looks A up; its answer is delayed.
+    const earlier = lab.receiver.reconcileInvoices(deps);
+    await turns();
+    // The creation window passes.
+    deps.store.db.exec(`UPDATE invoices SET created_at = strftime('%Y-%m-%dT%H:%M:%fZ', created_at, '-180 seconds')`);
+    // 3. LND creates A after all; a later pass snapshots A as creating and starts a lookup whose OPEN answer is delayed too.
+    api.invoices.set(A, lndInvoice(A, 'OPEN'));
+    const later = lab.receiver.reconcileInvoices(deps);
+    await turns();
+    expect(api.pending.map(item => item.paymentHash)).toEqual([A, A]);
+    // 4. The older NotFound arrives: A is decided not-created.
+    api.pending[0]?.reject(new lab.LndError('unable to locate invoice', 5, 404));
+    expect(await earlier).toEqual({ resolved: 1, open: 0, unknown: 0 });
+    expect(deps.store.invoice(A)?.state).toBe('not-created');
+    // 5. Replacement B is created, OPEN in LND.
+    api.deferLookups = false;
+    const B = await created(deps, 'O-07');
+    expect(api.invoices.get(B)?.state).toBe('OPEN');
+    // 6. The later OPEN answer for A reaches the pass that began while A was creating. A is a late invoice (B is the order's live one):
+    //    the pass cancels it in LND now, not a later pass, and counts it resolved.
+    api.pending[1]?.resolve(lndInvoice(A, 'OPEN'));
+    expect(await later).toEqual({ resolved: 1, open: 0, unknown: 0 });
+    expect(api.calls.filter(call => call === 'CancelInvoice')).toHaveLength(1);
+    expect(api.invoices.get(A)?.state).toBe('CANCELED');
+    expect(api.invoices.get(B)?.state).toBe('OPEN');
+    expect(deps.store.invoice(A)).toMatchObject({ state: 'not-created', lateLndState: 'CANCELED' });
+    expect(deps.store.invoice(B)?.state).toBe('open');
+    expect(deps.store.order('O-07')?.state).toBe('awaiting-payment');
+    expect(deps.events.map(event => event.event)).toContain('late-invoice-canceled');
+    // The late OPEN was recorded once, as late-invoice.
+    expect(deps.store.deliveries(A).filter(item => item.lndState === 'OPEN').map(item => item.outcome)).toEqual(['late-invoice']);
+  });
+});

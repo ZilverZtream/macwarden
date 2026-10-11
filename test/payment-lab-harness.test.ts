@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createPrivateDirectory } from '../scripts/private-scratch.mjs';
-import { CORPUS, RUNNER, loadHarness, loadHarnessCase, type Harness } from './helpers/payment-lab-harness.js';
+import { CORPUS, RUNNER, loadHarness, loadHarnessCase, type Harness, type HarnessRun } from './helpers/payment-lab-harness.js';
 
 /**
  * The payment lab's model-based state-machine harness (examples/payment-lab/test/harness, design brief
@@ -195,5 +195,27 @@ describe('payment lab state-machine harness', () => {
     const over = spawnSync(process.execPath, [RUNNER, '--seed', '4294967296', '--cases', '0'], { encoding: 'utf8' });
     expect(over.status).toBe(2);
     expect(over.stderr).toContain('--seed must be an integer from 0 to 4294967295');
+  }, 60_000);
+
+  it('every event the generator draws is one the replay validator accepts: a pick that rounds to 1 is clamped below 1 (1.3.1 audit, H01)', async () => {
+    const { Run, loadLab } = await loadHarnessCase();
+    const lab = await loadLab();
+    const { xorshift, validateReplay, replayOf } = harness as unknown as { xorshift(seed: number): unknown; validateReplay(file: string, value: unknown): unknown;
+      replayOf(result: unknown, predicate: string, origin: { seed: number | null; case: number | null; originalSteps: number }): unknown };
+    const config = { scale: 'small' as const, budget: false, limit: '10000' };
+    const run = new Run(lab, config, scratch) as HarnessRun & { generate(rng: unknown): Record<string, unknown> };
+    try {
+      // Seed 180367's first draw for cursor-set.pick is 0.99996..., which Number(x.toFixed(4)) rounds to 1: the validator refused the recording.
+      const event = run.generate(xorshift(180367));
+      expect(event).toMatchObject({ t: 'cursor-set', pick: 0.9999 });
+      const replay = { schema: 1, kind: 'macwarden-payment-lab-harness-replay', predicate: 'ledger-balanced', config, failingStep: -1, originalSteps: 1,
+        events: [event], states: {} };
+      expect(() => validateReplay('generated.json', replay)).not.toThrow();
+    } finally {
+      await run.dispose();
+    }
+    // The recording itself checks what it records: a case result with an event the validator refuses is a harness error, not a replay file.
+    const result = { config, events: [{ t: 'cursor-set', p: 'p0', pick: 1 }], violations: [{ predicate: 'ledger-balanced', message: 'x', step: 0, states: {} }], counts: {} };
+    expect(() => replayOf(result, 'ledger-balanced', { seed: 1, case: 0, originalSteps: 1 })).toThrow(/step 0: cursor-set\.pick is 1/);
   }, 60_000);
 });

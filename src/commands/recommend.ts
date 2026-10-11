@@ -69,6 +69,10 @@ async function runSteps(args: string[], deps: Deps): Promise<RecommendOutput> {
   const byId = isRootKeyId(selector);
   if (targetFile === undefined && !byCredential && !byId && !/^[A-Za-z][A-Za-z0-9._-]{0,63}$/.test(selector))
     return fail(2, 'R1', 'selector must be a label, a root key ID or id:<16 hex>');
+  // As revoke: the target is a file. Stdin would be read through the process's own stream (not a
+  // dependency) and a literal credential would reach the command line.
+  if (targetFile === '-' || (targetFile !== undefined && credentialText(targetFile)))
+    return fail(2, 'R1', '--target-file must be a file path; stdin (-) and literal credentials are refused');
   const { host, cert: certPath, own: ownPath, problem: mixedSource } = connectionSettings(flag => flags.get(flag), deps.env);
   if (mixedSource) return fail(2, 'R1', mixedSource);
   if (!host) return fail(2, 'R1', 'missing --lnd-rest (or MACWARDEN_LND_REST)');
@@ -301,7 +305,9 @@ async function runSteps(args: string[], deps: Deps): Promise<RecommendOutput> {
     && !canary && !expired && !unreproducible.length && (!short || acceptShort)) {
     const activeLabels = new Set(ownEntries.filter(item => item.status === 'active' && item.label !== null)
       .map(item => item.label as string));
-    const label = entry?.label ? narrowLabel(entry.label, activeLabels) : 'narrowed';
+    // A credential without a registry label (--target-file, id:…) is suggested as "narrowed",
+    // numbered past the labels active on the node, as bake --label refuses an active one (B8).
+    const label = entry?.label ? narrowLabel(entry.label, activeLabels) : freeLabel('narrowed', activeLabels);
     const connection = `--lnd-rest ${quote(host)} --tls-cert ${quote(recoveryPath(certPath))} --macaroon ${quote(recoveryPath(ownPath))}` +
       (registryPath ? ` --registry ${quote(recoveryPath(registryPath))}` : '');
     // The method list is quoted like the paths: unquoted, PowerShell (a function or npm's .ps1 shim)
@@ -362,6 +368,14 @@ export function narrowLabel(label: string, taken: ReadonlySet<string> = new Set(
     const suffix = n === 1 ? '-narrow' : `-narrow${n}`;
     const candidate = `${label.slice(0, 64 - suffix.length)}${suffix}`;
     if (candidate !== label && !taken.has(candidate)) return candidate;
+  }
+}
+
+/** `label` when no label in `taken` equals it; otherwise the first numbered form ("narrowed2", "narrowed3", ...) that none equals. */
+function freeLabel(label: string, taken: ReadonlySet<string>): string {
+  for (let n = 1; ; n++) {
+    const candidate = n === 1 ? label : `${label}${n}`;
+    if (!taken.has(candidate)) return candidate;
   }
 }
 

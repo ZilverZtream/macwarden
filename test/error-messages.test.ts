@@ -34,6 +34,7 @@ const cases: [string, string[], RegExp][] = [
   ['revoke root key ID 0', ['revoke', '0', ...connection], /^error: V1: root key ID 0 cannot be revoked/m],
   ['revoke without a target', ['revoke', ...connection], /give one target: a label .* or a root key ID from 1 to 18446744073709551615/],
   ['revoke literal target file', ['revoke', 'App', ...connection, '--target-file', '-'], /--target-file must be a file path/],
+  ['recommend stdin target file', ['recommend', ...connection, '--target-file', '-'], /--target-file must be a file path; stdin \(-\) and literal credentials are refused/],
   ['rotate stage without --out', ['rotate', 'App', ...connection], /^error: S1: --out is required for the stage run/m],
   ['rotate finish with --out', ['rotate', 'App', '--finish', '--out', 'x', ...connection], /^error: F1: --out is not used with --finish/m],
   ['rotate stage with --yes', ['rotate', 'App', '--out', 'x', '--yes', ...connection], /--yes is only used with --finish/],

@@ -188,19 +188,41 @@ function accessFor(component: 'payer' | 'receiver', command: string): Access {
 /** At most this many TrackPaymentV2 streams are open at once in `payer reconcile`. */
 const RECONCILE_CONCURRENCY = 16;
 
-/** `work` for every item, at most `limit` at a time; the results in the items' order. */
-async function inPool<T, R>(items: readonly T[], limit: number, work: (item: T) => Promise<R>): Promise<R[]> {
-  const results: R[] = [];
-  let next = 0;
+/**
+ * How long `payer reconcile` follows one payment's stream while other targets wait for a worker (reconcileInTurns),
+ * without a deadline: the length after which a TrackPaymentV2 stream counts as a working connection (payer.ts).
+ */
+const RECONCILE_TURN_MS = 15_000;
+
+/**
+ * Reconciles every target, at most RECONCILE_CONCURRENCY streams at once, so that each target is read however
+ * many others are in flight: a payment LND has already resolved is settled now, not after the streams of the first
+ * RECONCILE_CONCURRENCY targets, which stay open as long as LND holds those payments (until the deadline, or for
+ * good), have each kept a worker. While other targets wait, a target's stream is followed for one turn and the
+ * target then goes to the back of the queue; a turn is RECONCILE_TURN_MS, or the deadline shared out so that every
+ * target gets a turn before it. With no target waiting (the usual case: at most RECONCILE_CONCURRENCY unresolved
+ * payments) a stream is followed until its terminal state or the deadline, as before. Outcomes in the targets'
+ * order; a target's is that of its last turn.
+ */
+async function reconcileInTurns(deps: PayerDeps, targets: readonly string[], signal: AbortSignal, deadlineMs: number | undefined): Promise<PayOutcome[]> {
+  const rounds = Math.ceil(targets.length / RECONCILE_CONCURRENCY);
+  const turnMs = deadlineMs === undefined ? RECONCILE_TURN_MS : Math.max(1, Math.min(RECONCILE_TURN_MS, Math.floor(deadlineMs / rounds)));
+  const outcomes = new Map<string, PayOutcome>();
+  const queue = [...targets];
   const worker = async (): Promise<void> => {
-    while (next < items.length) {
-      const index = next;
-      next += 1;
-      results[index] = await work(items[index] as T);
+    for (;;) {
+      const hash = queue.shift();
+      if (hash === undefined) return;
+      // A turn only while another target waits (and before the deadline: after it, reconcile answers from the record at once).
+      const turn = queue.length === 0 || signal.aborted ? signal : AbortSignal.any([signal, AbortSignal.timeout(turnMs)]);
+      const outcome = await reconcile(deps, hash, turn);
+      outcomes.set(hash, outcome);
+      // The turn ended with the payment still unresolved: its next turn comes after every waiting target's.
+      if (turn !== signal && turn.aborted && !signal.aborted && outcome.kind === 'unresolved') queue.push(hash);
     }
   };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return results;
+  await Promise.all(Array.from({ length: Math.min(RECONCILE_CONCURRENCY, targets.length) }, worker));
+  return targets.map(hash => outcomes.get(hash) as PayOutcome);
 }
 
 function seconds(values: Record<string, unknown>, name: string, fallback: number): number {
@@ -534,8 +556,8 @@ function payerCommand(command: string, values: PayerValues, services: Services, 
         const targets = only === undefined ? deps.store.unresolvedPayments().map(item => item.paymentHash) : [only];
         const signal = stopSignal(timeoutSeconds);
         emit({ event: 'reconcile-started', payments: targets.length });
-        // At most RECONCILE_CONCURRENCY TrackPaymentV2 streams at once, however many payments are unresolved.
-        const outcomes = await inPool(targets, RECONCILE_CONCURRENCY, hash => reconcile(deps, hash, signal));
+        // At most RECONCILE_CONCURRENCY TrackPaymentV2 streams at once, however many payments are unresolved, each read in turn.
+        const outcomes = await reconcileInTurns(deps, targets, signal, timeoutSeconds === undefined ? undefined : timeoutSeconds * 1000);
         // Then the effects of operations completed so far (this pass's and earlier ones'); they do not change the exit code.
         // Not once stopped (SIGINT, SIGTERM, --timeout-s), as the listener does not: stopping means stop.
         if (signal.aborted) emit({ event: 'outbox-pass-skipped', reason: 'reconcile was stopped' });

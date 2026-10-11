@@ -620,6 +620,19 @@ export class Oracle {
     if (exit !== undefined && exit !== (result.unknown > 0 ? 75 : 0)) {
       this.fail('reconcile-buckets-partition', `receiver reconcile exited ${exit} with unknown ${result.unknown}`, states());
     }
+    // A late invoice the pass learned of (one of its store calls recorded a delivery as late-invoice: LND holds the invoice OPEN or
+    // ACCEPTED while its order has another live invoice or no longer awaits payment) is canceled in that pass ('cancel-attempted':
+    // the pass called CancelInvoice for it, whatever came of it), unless the pass was stopped first. Left as it is, the order keeps
+    // two payable invoices until a later pass (the 1.3.1 audit's F07: a lookup answer landing after the record was decided).
+    if (!aborted) {
+      for (const [hash, seen] of answers) {
+        const row = end.invoices.get(hash);
+        if (seen.has('late-invoice') && !seen.has('cancel-attempted') && row?.state === 'not-created' && (row.late === 'OPEN' || row.late === 'ACCEPTED')) {
+          this.fail('superseded-canceled-never-settled', `reconcile recorded ${this.lnd.labelOf(hash)} as a late invoice (LND holds it ${row.late} while order `
+            + `${row.order} has another live invoice or no longer awaits payment) and did not call CancelInvoice for it in the pass`, states());
+        }
+      }
+    }
   }
 
   // ------------------------------------------------------------------------------------------

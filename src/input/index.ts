@@ -30,9 +30,8 @@ function decodeBase64(value: string): Buffer {
   const url = /^[A-Za-z0-9_-]+={0,2}$/.test(value);
   if ((!standard && !url) || value.length % 4 === 1) return invalidForm();
   const padding = value.length - value.replace(/=+$/, '').length;
-  if ((padding > 0 && value.length % 4 !== 0) ||
-      (padding === 1 && value.at(-2) === '=') ||
-      (padding === 2 && value.at(-3) === '=')) return invalidForm();
+  // An inner '=' or more than two trailing ones already failed the alphabet tests above.
+  if (padding > 0 && value.length % 4 !== 0) return invalidForm();
   const decoded = Buffer.from(value, standard ? 'base64' : 'base64url');
   if (decoded.length === 0) return invalidForm();
   const canonical = decoded.toString(standard ? 'base64' : 'base64url');

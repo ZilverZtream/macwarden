@@ -11,7 +11,12 @@ const nwcSecret = sentinel().subarray(0, 32).toString('hex');
 const nwc = `nostr+walletconnect://${'ab'.repeat(32)}?relay=wss://relay.invalid&secret=${nwcSecret}`;
 for (const command of ['revoke', 'rotate'] as const) {
   it(`CP-039/B2-renderers ${command} retains dry-run plans after NWC redaction and copying`, async () => scratch(async dir => {
-    const old = entry({ caveats: [{ type: 'unknown', value: `operator-note ${nwc}` }] });
+    // rotate refuses an entry with a caveat it cannot reproduce before any plan exists (S5, 1.3.1), so its
+    // plan is rendered for a reproducible expiry; the NWC-bearing unknown caveat is covered by the revoke
+    // plan here and by the rotate refusal test below. The warning pushed later carries the secret for both.
+    const old = command === 'rotate'
+      ? entry({ caveats: [{ type: 'time-before', value: '2027-01-01T00:00:00Z', requested: '90d' }] })
+      : entry({ caveats: [{ type: 'unknown', value: `operator-note ${nwc}` }] });
     const f = context(dir, [old]);
     if (command === 'revoke') f.lnd.ids = [0n]; // V7's already-absent repair plan.
     const run = command === 'revoke' ? revoke : rotate;
@@ -38,6 +43,19 @@ for (const command of ['revoke', 'rotate'] as const) {
     noCredential(text);
   }));
 }
+it('CP-039/B2-renderers rotate refuses an NWC-bearing unknown caveat at S5 without rendering the secret', async () => scratch(async dir => {
+  const old = entry({ caveats: [{ type: 'unknown', value: `operator-note ${nwc}` }] });
+  const f = context(dir, [old]);
+  const result = await rotate(['Alice', ...f.online, '--dry-run', '--out', f.out], f.deps);
+  expect(result.error).toMatchObject({ code: 3, step: 'S5' });
+  expect(f.lnd.calls, 'refused before any LND call').toEqual([]);
+  result.warnings.push({ code: 'snapshot-drift', message: `peer-note ${nwc}` });
+  const text = render(result, 'text');
+  expect(text.includes(nwcSecret), 'NWC secret absent').toBe(false);
+  expect(text).toContain('unknown');
+  expect(JSON.stringify(JSON.parse(render(result, 'json'))).includes(nwcSecret), 'JSON excludes NWC secret').toBe(false);
+  noCredential(text);
+}));
 it('CP-039/B2-renderers inventory age uses the injected clock across copied results', async () => scratch(async dir => {
   const f = context(dir, [entry()]);
   const liveClock = vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2040-01-01T00:00:00Z'));

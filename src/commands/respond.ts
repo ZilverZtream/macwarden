@@ -13,7 +13,7 @@ import { hasCustomCaveat, openRegistry, replacementLinkProblems, type RegistryEn
 import type { Secret } from '../secret.js';
 import { writeRotatePrompt, type OutputResult } from '../output/index.js';
 import type { RespondItem, RespondProof, RespondResult } from '../command-result.js';
-import { run as rotate, type Deps as RotateDeps } from './rotate.js';
+import { rotationDropsCaveats, run as rotate, type Deps as RotateDeps } from './rotate.js';
 
 export type Deps = RotateDeps;
 type RespondOutput = OutputResult & { schema: 1 };
@@ -46,6 +46,7 @@ export const BAKING_RISK_GUIDANCE = [
   'Each PROVEN result covers that credential only: its old root key ID is gone and its replacement is accepted. It does not prove that no other credential exists.',
 ];
 export const CUSTOM_CAVEAT_NOTE = 'carries a custom caveat (a canary, or another lnd-custom caveat): not rotated, because a replacement would be an ordinary credential. If a thief may know it, revoke it (macwarden revoke <label>), bake a new canary (macwarden bake --canary) and restart macwarden watch.';
+export const UNREPRODUCED_CAVEAT_NOTE = 'carries caveats a rotation does not reproduce (<types>): not rotated, because the replacement would be baked without them. Bake a new credential with macwarden bake, attenuate it with macwarden attenuate, then revoke this one (macwarden revoke <label>).';
 export const UNKNOWN_GUIDANCE = 'Not in this registry. Lightning Terminal, Loop, Pool, Faraday or another operator may own these root key IDs, so macwarden never revokes them automatically. If one may have leaked, find its owner, then run macwarden revoke <id> --unregistered.';
 
 function fail(code: number, step: string, message: string, warnings: OutputResult['warnings'] = []): RespondOutput {
@@ -219,12 +220,18 @@ async function runSteps(args: string[], deps: Deps): Promise<RespondOutput> {
   // Whether a credential is a canary is decided by its file, not by the editable registry caveat list:
   // a custom caveat the registry does not record would let the batch rotate a canary into an
   // ordinary credential. Refused before any mutation, like a forged replacement link.
+  // An entry whose caveats a stage would not reproduce (an IP lock, recorded or in the file;
+  // rotate S5, 1.3.1) is skipped with a note that names them, never failing the batch for it.
+  const dropped = new Map<string, string[]>();
   for (const entry of index.originals) {
     if (hasCustomCaveat(entry)) continue;
     const file = await readCredential(entry.outPath, deps);
-    if (file && file.facts.fingerprint === entry.fingerprint && file.facts.caveats.some(caveat => caveat.type === 'lnd-custom'))
+    const facts = file && file.facts.fingerprint === entry.fingerprint ? file.facts : undefined;
+    if (facts?.caveats.some(caveat => caveat.type === 'lnd-custom'))
       return fail(3, 'P5', `registry tampering: root key ID ${entry.rootKeyId}: its credential file carries a custom caveat ` +
         '(a canary, or another lnd-custom caveat) that the registry does not record; restore the registry from a trusted copy', warnings);
+    const types = rotationDropsCaveats(entry, facts);
+    if (types.length) dropped.set(entry.rootKeyId, types);
   }
   // Only active entries cover an ID LND holds; a revoked entry for a present ID needs action.
   const active = new Set(mine.filter(entry => entry.status === 'active').map(entry => entry.rootKeyId));
@@ -270,6 +277,10 @@ async function runSteps(args: string[], deps: Deps): Promise<RespondOutput> {
     else if (!inLnd.has(entry.rootKeyId))
       items.push({ ...base, action: 'repair', status: 'manual',
         note: `absent from LND while the registry says active: run macwarden revoke ${target(entry)} to record it` });
+    // After the staged branches: a replacement staged before 1.3.1 is still finished.
+    else if (dropped.has(entry.rootKeyId))
+      items.push({ ...base, action: 'manual', status: 'manual',
+        note: UNREPRODUCED_CAVEAT_NOTE.replace('<types>', dropped.get(entry.rootKeyId)!.join(', ')).replace('<label>', target(entry)) });
     else items.push({ ...base, action: 'stage', status: 'planned', note: null });
   }
   // Each root key ID once, even if LND lists one twice.

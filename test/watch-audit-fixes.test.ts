@@ -411,6 +411,56 @@ it('WATCH/session-isolation attribution queued by a lost session never correlate
     expect.objectContaining({ method: '/lnrpc.Lightning/WalletBalance', credential: wallet!.credential })]);
 }, 60_000);
 
+it('WATCH/session-isolation a response of a lost session still queued at the reconnect is recorded before its IDs are forgotten', async () => {
+  const s = setup();
+  const admin = vector('default-admin');
+  const app = vector('preset-read-only');
+  const script = newScript();
+  const lines: string[] = [];
+  const errorsSeen = () => lines.filter(line => line.includes('"event":"error"')).length;
+  let errorsAtReconnect = -1;
+  const base = fakeRegister(script);
+  // Notes, when the next session registers, whether the lost session's error was still queued.
+  const register = ((...args: Parameters<Register>) => {
+    const session = base(...args);
+    if (script.count === 2) errorsAtReconnect = errorsSeen();
+    return session;
+  }) as Register;
+  const h = start([...s.args, '--json'], register, { emit: line => { lines.push(line); } });
+  await until(() => script.count === 1);
+  await turns();
+  // A stream opened under request ID 5 and attributed (its key is known to this session).
+  script.decide[0](call('stream_auth', 5, '/lnrpc.Lightning/SubscribeChannelEvents', admin, { streamRpc: true }));
+  await turns();
+  // In one turn: a backlog of ordinary calls, then the stream's final error, then the session is
+  // lost; the error's attribution is still queued when the next session begins.
+  for (let n = 0; n < 5_000; n++) script.decide[0](call('request', 1_000 + n, '/lnrpc.Lightning/GetInfo', null));
+  script.decide[0](call('response', 5, '/lnrpc.Lightning/SubscribeChannelEvents', null, { streamRpc: true, isError: true }));
+  script.end[0]({ registered: true, code: 4, stage: 'middleware-stream', message: 'LND transport failure', disabled: false });
+  await until(() => script.count === 2);
+  // LND restarted request IDs: ID 5 is now a different call by a different credential.
+  script.decide[1](call('request', 5, '/lnrpc.Lightning/WalletBalance', app));
+  script.decide[1](call('response', 5, '/lnrpc.Lightning/WalletBalance', null, { isError: true }));
+  await until(() => lines.filter(line => line.includes('"event":"call"')).length >= 5_002);
+  await turns();
+  h.stop();
+  const result = await h.result;
+  // Precondition: the lost session's error was still queued when the next session began.
+  expect(errorsAtReconnect).toBe(0);
+  expect(result).toMatchObject({ ok: true, result: { calls: 5_002, errors: 2, reconnects: 1, droppedAttributions: 0 } });
+  const events = lines.map(line => JSON.parse(line) as { event: string; method?: string; credential?: string });
+  const stream = events.find(event => event.event === 'call' && event.method === '/lnrpc.Lightning/SubscribeChannelEvents');
+  const wallet = events.find(event => event.event === 'call' && event.method === '/lnrpc.Lightning/WalletBalance');
+  expect(stream!.credential).toBe(macaroonId(new Secret(admin)).id);
+  expect(wallet!.credential).toBe(macaroonId(new Secret(app)).id);
+  // The lost session's error, then the next session's, each under its own credential.
+  expect(events.filter(event => event.event === 'error')).toEqual([
+    expect.objectContaining({ method: '/lnrpc.Lightning/SubscribeChannelEvents', credential: stream!.credential }),
+    expect.objectContaining({ method: '/lnrpc.Lightning/WalletBalance', credential: wallet!.credential })]);
+  const usage = JSON.parse(readFileSync(`${s.registry}.usage.json`, 'utf8')) as { entries: { method: string; calls: number; errors: number }[] };
+  expect(usage.entries).toContainEqual(expect.objectContaining({ method: '/lnrpc.Lightning/SubscribeChannelEvents', calls: 1, errors: 1 }));
+}, 60_000);
+
 // --- the stream flag ------------------------------------------------------------------------
 
 it('LND/middleware-proto RPCMessage.stream_rpc (field 2) is decoded; false or absent is false; stream_auth is a stream', () => {

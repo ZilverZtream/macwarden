@@ -486,9 +486,12 @@ it('PAYJ/alive while registered an alive record is written after 5 quiet minutes
   const dir = scratch();
   const path = join(dir, 'alive.journal');
   vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
-  const journal = await openJournal(path);
+  // The keep-alive gate follows the monotonic clock (audit 1.4.0), injected here beside the timers.
+  let mono = 0;
+  const journal = await openJournal(path, { monotonic: () => mono });
   journal.registered();
   await settle();
+  mono = 6 * 60_000;
   vi.advanceTimersByTime(6 * 60_000);
   await settle();
   await journal.close();

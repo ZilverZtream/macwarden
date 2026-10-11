@@ -1404,3 +1404,36 @@ describe('payment lab audit 5a8ddb1', () => {
     expect(await lab.verifyLedger(store)).toMatchObject({ balanced: true, invalidEntries: [] });
   });
 });
+
+describe('payment lab audit 9245e00', () => {
+  it('F01: a delayed tracker of submission 1 that observes submission 2\'s payment does not make submission 2\'s own FAILED look earlier', async () => {
+    const store = payerStore('audit-f01-delayed-tracker.db');
+    const hash = budgeted(store, 'audit-f01', 'OP-AUDIT-F01');
+    // Submission 1's SendPaymentV2 never connected: another worker reverts it to intent (submission 1 stays open, not closed) and claims submission 2.
+    const first: { submission?: number } = {};
+    expect(store.claimForSubmission(hash, first)).toBe(true);
+    expect(first.submission).toBe(1);
+    expect(store.markNotInitiated(hash, 'connection not established: connect ECONNREFUSED', 1)).toBe('reverted');
+    const second: { submission?: number } = {};
+    expect(store.claimForSubmission(hash, second)).toBe(true);
+    expect(second.submission).toBe(2);
+    // LND initialises the payment for submission 2 and makes HTLC attempt 42; a TrackPaymentV2 request opened for submission 1 sees it first.
+    const created = (BigInt(Date.now()) + 60_000n) * 1_000_000n;
+    const inFlight = { ...payment('audit-f01', 'IN_FLIGHT', 1000n, [attempt('42', 'IN_FLIGHT')]), creationTimeNs: created };
+    expect(store.applyUpdate(inFlight, 'TrackPaymentV2', 1)).toMatchObject({ state: 'submitting', stale: true });
+    expect(store.applyUpdate(inFlight, 'SendPaymentV2', 2)).toMatchObject({ state: 'in_flight' });
+    // The attempt belongs to the payment LND holds now, submission 2's, whichever stream showed it first.
+    expect(attemptTags(store)).toEqual(['42:2:IN_FLIGHT']);
+    // The sending process stops; a fresh reconciliation receives submission 2's genuine FAILED (same creation time, attempt 42 failed).
+    const deps = payer(store);
+    const failed = { ...payment('audit-f01', 'FAILED', 1000n, [attempt('42', 'FAILED')]), creationTimeNs: created };
+    deps.api.track.push(async onUpdate => { onUpdate(failed); });
+    expect(await lab.reconcile(deps, hash)).toMatchObject({ kind: 'failed', paymentHash: hash, reason: 'FAILURE_REASON_NO_ROUTE' });
+    expect(store.payment(hash)).toMatchObject({ state: 'failed', submissions: 2, failureReason: 'FAILURE_REASON_NO_ROUTE' });
+    expect(attemptTags(store)).toEqual(['42:2:FAILED']);
+    expect(store.budgetStatus('B')).toMatchObject({ heldMsat: 0n, availableMsat: 1100n });
+    expect(store.prepareRetry('OP-AUDIT-F01')).toMatchObject({ outcome: 'recorded', payment: { paymentHash: hash, state: 'intent', submissions: 2 } });
+    expect(store.events(hash).map(item => item.kind)).toEqual(['intent-recorded', 'submit', 'not-initiated', 'submit', 'stale-update', 'in-flight', 'failed',
+      'retry-prepared']);
+  });
+});

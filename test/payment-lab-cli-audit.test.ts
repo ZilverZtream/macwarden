@@ -288,6 +288,48 @@ describe('payer reconcile', () => {
     expect(most).toBeLessThanOrEqual(16);
     expect(events().filter(item => item.event === 'outcome')).toHaveLength(count);
   });
+
+  it('F02: with more unresolved payments than streams, a payment after the first 16 is still read before the deadline', async () => {
+    const setup = payerStore('pool-starved.db');
+    const count = 17;
+    const hashes: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const { paymentHash } = preimageFor(`starved-${String(index)}`);
+      setup.recordIntent({ operationId: `OP-S-${String(index)}`, kind: 'payout', paymentRequest: `lnbcrt1starved${String(index)}`,
+        invoice: decoded(paymentHash), feeLimitMsat: 10n, maxParts: 1 });
+      setup.claimForSubmission(paymentHash);
+      hashes.push(paymentHash);
+    }
+    setup.close();
+    const last = hashes[count - 1] as string;
+    const queried = new Set<string>();
+    let open = 0;
+    let most = 0;
+    // The first 16 streams stay open without delivering anything until aborted; the 17th payment LND has already failed.
+    const api: FakePayerApi = { ...noPayerCalls, trackPaymentV2: (paymentHash, onUpdate, signal) => {
+      queried.add(paymentHash);
+      if (paymentHash === last) { onUpdate({ ...lndPayment('starved-16', 'FAILED'), paymentHash }); return Promise.resolve(); }
+      open += 1;
+      most = Math.max(most, open);
+      return new Promise((_resolve, reject) => {
+        const abort = (): void => { open -= 1; reject(new lab.TransportError('aborted by the caller', 'response')); };
+        if (signal === undefined) { abort(); return; }
+        if (signal.aborted) { abort(); return; }
+        signal.addEventListener('abort', abort, { once: true });
+      });
+    } };
+    const { services } = labLike('pool-starved.db', api);
+    expect(await lab.main(['payer', 'reconcile', '--as', 'customer-payer', '--timeout-s', '1'], services)).toBe(75);
+    expect(most).toBeLessThanOrEqual(16);
+    expect(queried.has(last), 'the 17th payment was read').toBe(true);
+    const outcomes = events().filter(item => item.event === 'outcome');
+    expect(outcomes).toHaveLength(count);
+    expect(outcomes.find(item => item.paymentHash === last)).toMatchObject({ kind: 'failed', reason: 'FAILURE_REASON_NO_ROUTE' });
+    expect(outcomes.filter(item => item.kind === 'unresolved')).toHaveLength(count - 1);
+    const after = payerStore('pool-starved.db');
+    expect(after.payment(last)?.state).toBe('failed');
+    expect(hashes.filter(hash => after.payment(hash)?.state === 'submitting')).toHaveLength(count - 1);
+  });
 });
 
 /** explain run directly, its output collected. */
@@ -656,6 +698,58 @@ describe('payer pay keeps the operation\'s recorded kind', () => {
       '--fee-limit-msat', '10'], services)).toBe(2);
     expect(stderr.join('')).toContain('--kind refund differs from operation OP-K\'s recorded kind payout');
     expect(decode).not.toHaveBeenCalled();
+  });
+
+  it('F06: two concurrent pay commands for an absent operation with different --kind: the second is refused by the record, not booked as the first\'s kind', async () => {
+    const payout = preimageFor('kind-race-payout');
+    const refund = preimageFor('kind-race-refund');
+    const decodes = new Map<string, { promise: Promise<DecodedPayReq>; resolve: (value: DecodedPayReq) => void }>();
+    for (const request of ['lnbcrt1kindpayout', 'lnbcrt1kindrefund']) {
+      let resolve!: (value: DecodedPayReq) => void;
+      const promise = new Promise<DecodedPayReq>(done => { resolve = done; });
+      decodes.set(request, { promise, resolve });
+    }
+    const sent: string[] = [];
+    const api: FakePayerApi = {
+      decodePayReq: request => (decodes.get(request) as { promise: Promise<DecodedPayReq> }).promise,
+      sendPaymentV2: async (request, onUpdate) => {
+        const { paymentRequest } = request as { paymentRequest: string };
+        sent.push(paymentRequest);
+        onUpdate(paymentRequest === 'lnbcrt1kindpayout' ? lndPayment('kind-race-payout', 'FAILED') : lndPayment('kind-race-refund', 'SUCCEEDED'));
+      },
+      trackPaymentV2: () => Promise.reject(new Error('not used')),
+    };
+    // Two processes: each main gets its own store handle on the same file (labLike opens one per call).
+    const { services } = labLike('kind-race.db', api);
+    const run = (kind: string, invoice: string): Promise<number> => lab.main(['payer', 'pay', '--as', 'customer-payer', '--operation', 'OP-RACE',
+      '--kind', kind, '--invoice', invoice, '--fee-limit-msat', '10'], services);
+    const first = run('payout', 'lnbcrt1kindpayout');
+    const second = run('refund', 'lnbcrt1kindrefund');
+    // Both passed the --kind check before the operation existed and await DecodePayReq; the payout's decode completes first and its payment fails.
+    for (let turn = 0; turn < 20; turn += 1) await new Promise(resolve => setImmediate(resolve));
+    (decodes.get('lnbcrt1kindpayout') as { resolve: (value: DecodedPayReq) => void }).resolve(decoded(payout.paymentHash));
+    expect(await first).toBe(1);
+    const between = payerStore('kind-race.db');
+    expect(between.operation('OP-RACE')).toMatchObject({ kind: 'payout', state: 'failed' });
+    between.close();
+    opened.pop();
+    // The refund's decode completes: its intent names kind refund for an operation recorded as a payout, and is refused inside the record's transaction.
+    (decodes.get('lnbcrt1kindrefund') as { resolve: (value: DecodedPayReq) => void }).resolve(decoded(refund.paymentHash));
+    expect(await second).toBe(3);
+    expect(sent).toEqual(['lnbcrt1kindpayout']);
+    expect(events().map(item => item.event)).toEqual(['invoice-decoded', 'outcome', 'invoice-decoded']);
+    const after = payerStore('kind-race.db');
+    expect(after.operation('OP-RACE')).toMatchObject({ kind: 'payout', state: 'failed' });
+    expect(after.payment(refund.paymentHash)).toBeUndefined();
+    expect(after.outbox('OP-RACE')).toEqual([]);
+    // The record's own refusal, as the command received it (its deps.emit is silent here).
+    expect(after.recordIntent({ operationId: 'OP-RACE', kind: 'refund', paymentRequest: 'lnbcrt1kindrefund', invoice: decoded(refund.paymentHash),
+      feeLimitMsat: 10n, maxParts: 1 })).toEqual({ outcome: 'refused', reason: '--kind refund differs from operation OP-RACE\'s recorded kind payout' });
+    // The same kind for the same hash (a replay of the payout's own invoice) is still answered from the record.
+    expect(after.recordIntent({ operationId: 'OP-RACE', kind: 'refund', paymentRequest: 'lnbcrt1kindpayout', invoice: decoded(payout.paymentHash),
+      feeLimitMsat: 10n, maxParts: 1 })).toEqual({ outcome: 'refused', reason: '--kind refund differs from operation OP-RACE\'s recorded kind payout' });
+    expect(after.recordIntent({ operationId: 'OP-RACE', kind: 'payout', paymentRequest: 'lnbcrt1kindpayout', invoice: decoded(payout.paymentHash),
+      feeLimitMsat: 10n, maxParts: 1 })).toMatchObject({ outcome: 'existing', payment: { paymentHash: payout.paymentHash, state: 'failed' } });
   });
 });
 

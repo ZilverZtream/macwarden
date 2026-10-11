@@ -597,12 +597,31 @@ function revokeTarget(activeLabels: ReadonlyMap<string, number>, row: InventoryR
  * `<label>-<YYYY-MM-DD>.macaroon` next to the recorded file (or in the current directory when no
  * file is recorded); ADMIN adds `--allow-admin`, which rotate requires.
  */
+/**
+ * The caveat types recorded for an entry that `rotate` would not carry over to the replacement:
+ * S11 re-applies one `time-before` from the recorded `requested` duration and nothing else, so an
+ * entry with any other caveat (an IP lock, a third-party or unknown caveat, an expiry without a
+ * recorded duration, a second expiry) is refused at S5, skipped by `respond` and gets no rotate
+ * advice here (1.3.1). Sorted and unique, for naming in messages.
+ */
+export function unreproducedCaveatTypes(caveats: ReadonlyArray<{ type: string; requested?: string }>): string[] {
+  const types = new Set<string>();
+  let expiries = 0;
+  for (const caveat of caveats) {
+    if (caveat.type === 'time-before' && caveat.requested !== undefined && ++expiries === 1) continue;
+    types.add(caveat.type);
+  }
+  return [...types].sort();
+}
+
 function rotateCommand(row: InventoryRow, now: number): string | null {
   const entry = row.entry;
   if (!entry || entry.status !== 'active' || entry.label === null || row.rootKeyId === '0') return null;
   if (['own-credential', 'default-root-key', 'replacement', 'pending-replacement', 'invalid-replacement']
     .some(flag => row.flags.includes(flag))) return null;
+  // A canary (rotate S3), or any caveat the rotation would drop, such as an IP lock (rotate S5, 1.3.1).
   if (entry.caveats.some(caveat => caveat.type === 'lnd-custom') || entry.grade === 'UNASSESSED') return null;
+  if (unreproducedCaveatTypes(entry.caveats).length) return null;
   const name = `${entry.label}-${new Date(now).toISOString().slice(0, 10)}.macaroon`;
   const out = entry.outPath ? join(dirname(entry.outPath), name) : name;
   return ['macwarden', 'rotate', entry.label, '--out', out, ...(entry.grade === 'ADMIN' ? ['--allow-admin'] : [])]

@@ -160,9 +160,16 @@ export class FakeLnd {
   #foreign = 0;
   /** Per payment hash and submission: when that submission's first SendPaymentV2 call was made (wall-clock ns). */
   #sendMade = new Map<string, bigint>();
-  /** Per HTLC attempt: the submission of the payment stream that first delivered it to the payer. */
+  /**
+   * Per payment hash: the highest submission a SendPaymentV2 call was made for, the submission LND holds the payment for
+   * from then on (the harness claims and sends in one step, so it is the payer's current submission). What a stream shows
+   * the payer is recorded under it, not under the submission the stream was opened for: a stream opened for an earlier
+   * submission can observe the current one's payment (a tracking request that reaches LND after the retry's send did).
+   */
+  #latestSend = new Map<string, number>();
+  /** Per HTLC attempt: the submission LND held the payment for (#latestSend) when a payment stream first delivered it to the payer. */
   #attemptFirstSeen = new Map<string, number | undefined>();
-  /** Per payment hash and stream submission: the highest creation time a payment stream of that submission showed the payer. */
+  /** Per payment hash and submission (#latestSend when delivered): the highest creation time a payment stream showed the payer. */
   #creationSeen = new Map<string, { submission: number; creationTimeNs: bigint }>();
   #lastNs = 0n;
 
@@ -207,6 +214,7 @@ export class FakeLnd {
     this.hooks.callCreated(call);
     const made = `${hash}#${String(call.submission)}`;
     if (kind === 'send' && !this.#sendMade.has(made)) this.#sendMade.set(made, this.#now());
+    if (kind === 'send' && call.submission !== undefined && (this.#latestSend.get(hash) ?? 0) < call.submission) this.#latestSend.set(hash, call.submission);
     this.hooks.progress();
     if (signal !== undefined) {
       const abort = (): void => this.cut(call, new this.lab.TransportError('aborted by the caller', 'response'));
@@ -331,14 +339,16 @@ export class FakeLnd {
       call.reject(error);
       return;
     }
-    // The payer recorded these attempts (a handler that returns has applied the update): note which submission's stream showed each first.
+    // The payer recorded these attempts (a handler that returns has applied the update): note under which submission each was
+    // first shown, the one LND holds the payment for now (#latestSend), whichever submission this stream was opened for.
     if ('payment' in item) {
-      for (const attempt of item.payment.htlcs) if (!this.#attemptFirstSeen.has(attempt.attemptId)) this.#attemptFirstSeen.set(attempt.attemptId, call.submission);
-      if (call.submission !== undefined) {
-        const key = `${item.payment.paymentHash}#${call.submission}`;
+      const current = this.#latestSend.get(item.payment.paymentHash) ?? call.submission;
+      for (const attempt of item.payment.htlcs) if (!this.#attemptFirstSeen.has(attempt.attemptId)) this.#attemptFirstSeen.set(attempt.attemptId, current);
+      if (current !== undefined) {
+        const key = `${item.payment.paymentHash}#${current}`;
         const seen = this.#creationSeen.get(key);
         if (seen === undefined || item.payment.creationTimeNs > seen.creationTimeNs) {
-          this.#creationSeen.set(key, { submission: call.submission, creationTimeNs: item.payment.creationTimeNs });
+          this.#creationSeen.set(key, { submission: current, creationTimeNs: item.payment.creationTimeNs });
         }
       }
     }
@@ -434,10 +444,11 @@ export class FakeLnd {
 
   /**
    * Whether a payment snapshot shows the payment as LND held it before `submission`'s first SendPaymentV2 call
-   * was made, as far as the payer can know: every HTLC attempt in it was first shown to the payer on a stream of an
-   * earlier submission, or it has no attempts and LND created it no later than a payment an earlier submission's stream
-   * showed (else, when none did, before that call). Such a snapshot is an earlier
-   * submission's answer (oracle predicate notfound-revert-keeps-live-updates).
+   * was made, as far as the payer can know: every HTLC attempt in it was first shown to the payer while LND held the
+   * payment for an earlier submission (#latestSend when delivered, not the submission the delivering stream was opened
+   * for), or it has no attempts and LND created it no later than a payment shown for an earlier submission (else, when
+   * none was, before that call). Such a snapshot is an earlier submission's answer (oracle predicate
+   * notfound-revert-keeps-live-updates).
    */
   predatesSubmission(snapshot: Payment, submission: number): boolean {
     if (submission <= 1) return false;

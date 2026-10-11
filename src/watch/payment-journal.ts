@@ -531,7 +531,9 @@ export class PaymentJournal {
   private lastTime = 0;
   // The last system clock reading taken as a record time, with the monotonic clock at that moment.
   private anchor: { wall: number; mono: number } | null = null;
-  private lastWrite = Date.now();
+  // The monotonic clock at the last write, for the keep-alive gate: on the system clock a backward
+  // step of X delayed the next alive record by X (audit 1.4.0).
+  private lastWrite = NaN;
   private session = 0;
   private registeredSession: number | null = null;
   private aliveTimer: ReturnType<typeof setInterval> | undefined;
@@ -543,6 +545,12 @@ export class PaymentJournal {
     private readonly clock: () => Date, path: string, private readonly onStop?: WriterDeps['onStop'],
     private readonly monotonic: () => number = () => performance.now()) {
     this.stats = { path, payments: 0, deletions: 0, dropped: 0, stopped: null };
+    this.lastWrite = this.monotonicNow();
+  }
+
+  /** The monotonic clock, or NaN when it cannot be read: the keep-alive then writes on every tick. */
+  private monotonicNow(): number {
+    try { const now = this.monotonic(); return Number.isFinite(now) ? now : NaN; } catch { return NaN; }
   }
 
   /**
@@ -717,8 +725,9 @@ export class PaymentJournal {
 
   private keepAlive(): void {
     if (this.registeredSession === null || this.stats.stopped || this.closing) return;
-    if (Date.now() - this.lastWrite < JOURNAL_ALIVE_MS) return;
-    this.lastWrite = Date.now();
+    const now = this.monotonicNow();
+    if (now - this.lastWrite < JOURNAL_ALIVE_MS) return;
+    this.lastWrite = now;
     this.marker(time => ({ ...this.base(time), type: 'alive' }));
   }
 
@@ -895,7 +904,7 @@ export class PaymentJournal {
     }
     this.pending.push(line);
     this.pendingBytes += bytes;
-    this.lastWrite = Date.now();
+    this.lastWrite = this.monotonicNow();
   }
 
   private stop(reason: NonNullable<JournalStats['stopped']>): void {

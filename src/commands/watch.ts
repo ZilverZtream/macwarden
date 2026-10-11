@@ -732,10 +732,17 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
       else await new Promise(resolve => setImmediate(resolve));
       refresh = new AbortController();
       const sessions: MiddlewareSession[] = [];
-      // Request IDs restart when LND restarts: never carry them across sessions. Clearing alone
-      // is not enough (deferred attribution of the last session may still add keys), so keys
-      // also carry the session number.
-      requestKeys.clear();
+      // Request IDs restart when LND restarts: never carry them across sessions. Keys carry the
+      // session number, so an ID of the lost session never matches one of the next; the lost
+      // session's keys are forgotten once its queued attribution has run (the purge is queued
+      // behind that work, FIFO, so its queued responses are still recorded). Clearing here would
+      // strand them: a queued error response finds no key and is silently lost. The purge is
+      // pushed directly, never admitted against the queue limits, so it cannot be dropped.
+      if (sessionNumber > 0) {
+        const lost = sessionNumber;
+        work.push({ run: () => { for (const key of requestKeys.keys()) if (key.startsWith(`${lost}:`)) requestKeys.delete(key); }, bytes: 0 });
+        if (!workScheduled) { workScheduled = true; setImmediate(drainWork); }
+      }
       sessionNumber += 1;
       const registeredSessions = new Set<number>();
       const expected = canaries.size ? 2 : 1;

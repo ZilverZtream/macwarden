@@ -129,6 +129,8 @@ export class Run {
   readonly counts: Record<string, number> = {};
   readonly #als = new AsyncLocalStorage<Workflow>();
   readonly #storeErrors = new WeakSet<object>();
+  /** Per workflow, the invoices one of its store calls recorded as late-invoice (an applyInvoice outcome; see #answers). */
+  readonly #lateInvoices = new WeakMap<Workflow, Set<string>>();
   #progress = 0;
   #workflowSeq = 0;
   #delivering: Call | undefined;
@@ -249,6 +251,12 @@ export class Run {
     const after = side === 'payer' ? this.oracle.payerSnap() : this.oracle.receiverSnap();
     if (method === 'claimForSubmission' && result === true && workflow !== undefined && side === 'payer') {
       workflow.submission = (after as ReturnType<Oracle['payerSnap']>).payments.get(String(args[0]))?.subs;
+    }
+    if (side === 'receiver' && method === 'applyInvoice' && result === 'late-invoice' && workflow !== undefined) {
+      const hash = (args[0] as { paymentHash?: unknown } | undefined)?.paymentHash;
+      let late = this.#lateInvoices.get(workflow);
+      if (late === undefined) { late = new Set(); this.#lateInvoices.set(workflow, late); }
+      if (typeof hash === 'string') late.add(hash);
     }
     const call: StoreCall = { proc: state.name, side, method, args, before, after, result, error, submission };
     this.oracle.afterCall(call);
@@ -537,8 +545,9 @@ export class Run {
   }
 
   /**
-   * The lookup answers a reconcile workflow received, per invoice (see Oracle.reconcileDone): an invoice state or
-   * not-found, 'no-answer' for a lookup that ended without one, and 'cancel-failed' for a CancelInvoice that failed.
+   * What a reconcile workflow learned and did, per invoice (see Oracle.reconcileDone): the lookup answers it received (an
+   * invoice state or not-found), 'no-answer' for a lookup that ended without one, 'cancel-attempted' for every CancelInvoice
+   * it made and 'cancel-failed' for one that failed, and 'late-invoice' when one of its store calls recorded a delivery so.
    */
   #answers(workflow: Workflow): Map<string, Set<string>> {
     const answers = new Map<string, Set<string>>();
@@ -548,7 +557,9 @@ export class Run {
       if (call.kind === 'lookup' && call.answered !== undefined) add(call.hash, call.answered);
       else if (call.kind === 'lookup' && call.outcome === 'error') add(call.hash, 'no-answer');
       else if (call.kind === 'cancel' && call.outcome === 'error') add(call.hash, 'cancel-failed');
+      if (call.kind === 'cancel') add(call.hash, 'cancel-attempted');
     }
+    for (const hash of this.#lateInvoices.get(workflow) ?? []) add(hash, 'late-invoice');
     return answers;
   }
 
@@ -1122,9 +1133,9 @@ export class Run {
     // The other process commits between a workflow's read and its store call (LABHARNESS-07).
     const otherStreams = this.lnd.calls.filter(call => call.proc !== p && call.open && (call.kind === 'send' || call.kind === 'track' || call.kind === 'sub'));
     if (otherStreams.length > 0) {
-      options.push([0.8, () => ({ t: 'preempt', p, method: weighted(rng, PREEMPT_METHODS), pick: Number(rng.next().toFixed(4)) })]);
+      options.push([0.8, () => ({ t: 'preempt', p, method: weighted(rng, PREEMPT_METHODS), pick: fraction(rng) })]);
     }
-    options.push([0.3, () => ({ t: 'cursor-set', p, pick: Number(rng.next().toFixed(4)), add: Number(rng.next().toFixed(4)) })]);
+    options.push([0.3, () => ({ t: 'cursor-set', p, pick: fraction(rng), add: fraction(rng) })]);
     options.push([0.6, () => ({ t: 'age' })]);
     // The outbox worker, killed now and then at a point of a row.
     options.push([1.2, () => ({ t: 'outbox', p, side: rng.chance(0.5) ? 'payer' : 'receiver',
@@ -1155,6 +1166,16 @@ const PENDING_STATES = new Set(['intent', 'submitting', 'in_flight', 'uncertain'
 /** The pick that selects `item` from `items` (an event picks its target by position). */
 function pickAt<T>(items: T[], item: T): number {
   return Number(((items.indexOf(item) + 0.5) / items.length).toFixed(4));
+}
+
+/**
+ * A drawn pick or add field: a fraction at four decimals from 0 to below 1. A draw of 0.99995 or more
+ * would round to 1, which the replay validator (PICK) refuses, so a recorded case could not replay;
+ * it is clamped to 0.9999, which selects the same last item at execution (floor(0.9999 n) = n - 1 for
+ * any list the harness holds).
+ */
+function fraction(rng: Rng): number {
+  return Math.min(0.9999, Number(rng.next().toFixed(4)));
 }
 
 function parseLabel(label: string): { op: number; inv: number } {
@@ -1408,9 +1429,11 @@ export function validateReplay(file: string, value: unknown): Replay {
 export function replayOf(result: CaseResult, predicate: PredicateName, origin: { seed: number | null; case: number | null; originalSteps: number }): Replay {
   const violation = result.violations.find(item => item.predicate === predicate);
   if (violation === undefined) throw new Error('no violation to record');
-  return { schema: 1, kind: 'macwarden-payment-lab-harness-replay', predicate: violation.predicate, rule: PREDICATES[violation.predicate],
+  const replay: Replay = { schema: 1, kind: 'macwarden-payment-lab-harness-replay', predicate: violation.predicate, rule: PREDICATES[violation.predicate],
     message: violation.message, seed: origin.seed, case: origin.case, config: result.config, failingStep: violation.step,
     originalSteps: origin.originalSteps, events: result.events, states: violation.states };
+  // What is recorded must replay: an event the validator would refuse when the file is read back is a generator defect, reported now.
+  return validateReplay(`recorded replay (seed ${origin.seed ?? '-'}, case ${origin.case ?? '-'})`, replay);
 }
 
 export function readReplay(path: string): Replay {
