@@ -4,8 +4,8 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createPrivateDirectory } from './private-scratch.mjs';
-import { findLeaks, sentinelRedactor } from './leak-check.mjs';
-import { run, runNpm, commandTimeout, oracleCommandTimeout, fullSuite, skippedSourceCount, candidateInputsClean, safeSerialize, collectedCaseName, resolveVitestConfig, npmVitestConfigArgs } from './validation-support.mjs';
+import { findLeaks, leakScans, sentinelRedactor } from './leak-check.mjs';
+import { run, runNpm, commandTimeout, oracleCommandTimeout, fullSuite, skippedSourceCount, candidateInputsClean, safeSerialize, collectedCaseName, resolveVitestConfig, npmVitestConfigArgs, collectedNameDuplicates } from './validation-support.mjs';
 
 const scriptRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const vitestCli = join(scriptRoot, 'node_modules', 'vitest', 'vitest.mjs');
@@ -126,6 +126,18 @@ async function validate(args) {
   };
   try {
     const unit = await context('unit');
+    // Fail fast: two checks the end of the run repeats, made before any test phase so a
+    // run that cannot pass stops in seconds rather than after every phase.
+    result.checks.push({ name: 'no-skipped-source:early', status: skippedSourceCount(root) ? 'FAIL' : 'PASS' });
+    const names = collectedNameDuplicates(root, unit.env, unit.scratch, timeout);
+    for (const { output, ...command } of names.commands) {
+      result.commands.push({ owner: unit.owner, program: process.execPath, ...command });
+      unit.output += output;
+    }
+    // Counts only: a test name is metadata the evidence must not echo.
+    result.checks.push({ name: 'unique-test-names:early', status: names.collected && !names.duplicates.length ? 'PASS' : 'FAIL',
+      detail: names.collected ? `${names.duplicates.length} duplicate names among ${names.count}` : 'test collection failed' });
+    if (result.checks.some(check => check.status !== 'PASS')) throw new Error('fail fast');
     await perform(unit, ['run', 'build']);
     await perform(unit, ['run', 'lint']);
     const unitConfig = resolveVitestConfig(root);
@@ -219,22 +231,41 @@ async function validate(args) {
   } catch {
     result.checks.push({ name: 'validation-completeness', status: 'FAIL' });
   } finally {
-    for (const ctx of contexts) {
+    // Every owner's output is written, and its redacted copy retained, before any scan,
+    // so each owner's scan also covers every owner's retained log. The scans then run
+    // at once on one worker pool; each result is what findLeaks returns or throws for
+    // that owner, and checks are recorded in owner order as before.
+    const scans = contexts.map(ctx => {
       const options = { root, sentinels: join(root, 'test/sentinels.json'), sentinelDir: ctx.sentinels,
         testTmp: ctx.scratch, evidenceDir: attempt };
       try {
         writeFileSync(join(ctx.scratch, 'original-output.log'), ctx.output);
-        const leak = findLeaks({ ...options, commandOutput: ctx.output, paths: [ctx.scratch, attempt] });
-        result.checks.push({ name: `leak-check:${ctx.owner}`, status: leak ? 'FAIL' : 'PASS' });
         const safe = sentinelRedactor(options)(ctx.output);
         writeFileSync(join(attempt, `${ctx.owner}-output.log`), safe);
-        result.reports.push({ label: `${ctx.owner}-output`, originalPath: join(ctx.scratch, 'original-output.log'), originalSha256: hash(ctx.output), retainedSha256: hash(safe) });
+        return { ctx, options, safe };
       } catch (error) {
+        return { ctx, options, error };
+      }
+    });
+    const ready = scans.filter(scan => !scan.error);
+    let outcomes;
+    try {
+      outcomes = await leakScans(ready.map(({ ctx, options }) => ({ ...options, commandOutput: ctx.output, paths: [ctx.scratch, attempt] })));
+    } catch (error) {
+      outcomes = ready.map(() => ({ error }));
+    }
+    for (const scan of scans) {
+      const { ctx } = scan;
+      const outcome = scan.error ? { error: scan.error } : outcomes[ready.indexOf(scan)];
+      if ('error' in outcome) {
         // The scan refused or could not read the tree (a link inside scratch, an unreadable file):
         // fail closed, and say why, since the evidence otherwise shows only FAIL.
         result.checks.push({ name: `leak-check:${ctx.owner}`, status: 'FAIL',
-          detail: `leak scan failed: ${error instanceof Error ? error.message : String(error)}` });
+          detail: `leak scan failed: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}` });
+        continue;
       }
+      result.checks.push({ name: `leak-check:${ctx.owner}`, status: outcome.hit ? 'FAIL' : 'PASS' });
+      result.reports.push({ label: `${ctx.owner}-output`, originalPath: join(ctx.scratch, 'original-output.log'), originalSha256: hash(ctx.output), retainedSha256: hash(scan.safe) });
     }
     result.status = result.checks.length && result.checks.every(check => check.status === 'PASS') ? 'PASS' : 'FAIL';
     result.finishedAt = new Date().toISOString();
