@@ -89,10 +89,12 @@ function sources(pick: ReturnType<typeof random>, count: number, lengths: () => 
     ? Buffer.concat([shared, pick.bytes(lengths(), 0)]) : pick.bytes(lengths()));
 }
 
-it('PERF-01 the prefilter agrees with the literal-alternation reference on every encoding of sources of 1 to 300 bytes', () => {
-  const pick = random(20261011);
+// Six runs of 50 source lengths each (1 to 300 in all): one run takes a few seconds, so a
+// loaded machine stays inside the default test timeout.
+it.each([1, 51, 101, 151, 201, 251].map(first => ({ first, last: first + 49 })))('PERF-01 the prefilter agrees with the literal-alternation reference on every encoding of sources of $first to $last bytes', ({ first, last }) => {
+  const pick = random(20261011 + first);
   const tally = { cases: 0, positive: 0, negative: 0, disagreements: [] as string[] };
-  for (let length = 1; length <= 300; length++) {
+  for (let length = first; length <= last; length++) {
     const population = sources(pick, 6, () => 1 + pick.int(300));
     population[0] = pick.bytes(length);
     const states = population.map(source => internals.preparedCredential(source));

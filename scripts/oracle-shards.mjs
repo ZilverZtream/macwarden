@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -17,6 +17,14 @@ export function readDurations(root) {
   } catch {
     return { defaultSeconds: 30, files: {} };
   }
+}
+
+/** The LND oracle files (vitest.oracle.config.ts includes test/oracle), root-relative and sorted. */
+export function listOracleFiles(root) {
+  return readdirSync(resolve(root, 'test/oracle'), { recursive: true })
+    .map(name => `test/oracle/${String(name).replaceAll('\\', '/')}`)
+    .filter(file => file.endsWith('.test.ts'))
+    .sort();
 }
 
 /**
@@ -42,7 +50,15 @@ export function assignShards(files, durations, count) {
 
 // Regenerates the map from Vitest JSON reports (per-file startTime/endTime):
 //   node scripts/oracle-shards.mjs <report.json>...
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Prints shard <index> of <count> (1-based), one file per line, for CI's oracle matrix:
+//   node scripts/oracle-shards.mjs --files <index>/<count>
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url) && process.argv[2] === '--files') {
+  const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
+  const match = /^([1-9]\d*)\/([1-9]\d*)$/.exec(process.argv[3] ?? '');
+  const shard = match && assignShards(listOracleFiles(root), readDurations(root), Number(match[2]))[Number(match[1]) - 1];
+  if (!shard || process.argv.length !== 4) { process.stderr.write('usage: oracle-shards.mjs --files <index>/<count>\n'); process.exit(2); }
+  process.stdout.write(`${shard.files.join('\n')}\n`);
+} else if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
   const files = {};
   for (const path of process.argv.slice(2)) {

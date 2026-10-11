@@ -42,9 +42,15 @@ jobs:
       - run: npm run test:harness -- --reporter=default --reporter=json --outputFile.json=${{ runner.temp }}/vitest-harness.json
       # Vitest exits 0 with skipped tests; every test must have run and passed.
       - run: node scripts/validation-support.mjs --no-pending "${{ runner.temp }}/vitest-product.json" "${{ runner.temp }}/vitest-harness.json"
+  # The LND oracle files run in four jobs, balanced by measured duration (scripts/oracle-shards.mjs);
+  # every file is in exactly one quarter, and each job has its own runner and fixture.
   oracle:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
         with:
@@ -55,7 +61,7 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run fixture:up
-      - run: npm run test:oracle
+      - run: npm run test:oracle -- $(node scripts/oracle-shards.mjs --files ${{ matrix.shard }}/4)
       - if: always()
         run: npm run fixture:down
   # The Core Lightning rune comparison runs in its own job, so an LND oracle failure cannot skip it.

@@ -1,6 +1,7 @@
+import { execFileSync, spawnSync } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import { expect, it } from 'vitest';
-import { assignShards, readDurations } from '../../scripts/oracle-shards.mjs';
+import { assignShards, listOracleFiles, readDurations } from '../../scripts/oracle-shards.mjs';
 import { lndOwners } from '../../scripts/full-validation.mjs';
 import { fixtureTopology } from '../fixture/topology.mjs';
 
@@ -46,5 +47,18 @@ it('TOOLING-PERF/oracle-shards the checked-in duration map names only existing o
   for (const [file, seconds] of Object.entries(durations.files)) {
     expect(oracleFiles, file).toContain(file);
     expect(seconds).toBeGreaterThanOrEqual(0);
+  }
+});
+
+it('TOOLING-PERF/oracle-shards the CI matrix quarters cover every oracle file exactly once', () => {
+  const quarters = [1, 2, 3, 4].map(index => execFileSync(process.execPath, ['scripts/oracle-shards.mjs', '--files', `${index}/4`], { encoding: 'utf8' })
+    .split('\n').filter(Boolean));
+  for (const files of quarters) expect(files.length).toBeGreaterThan(0);
+  const listed = quarters.flat();
+  expect(new Set(listed).size).toBe(listed.length);
+  expect(listed.sort()).toEqual([...oracleFiles].sort());
+  expect(listOracleFiles('.')).toEqual([...oracleFiles].sort());
+  for (const bad of [['--files', '5/4'], ['--files', '0/4'], ['--files', '1/0'], ['--files'], ['--files', '1/4', 'x']]) {
+    expect(spawnSync(process.execPath, ['scripts/oracle-shards.mjs', ...bad], { encoding: 'utf8' }).status, bad.join(' ')).toBe(2);
   }
 });

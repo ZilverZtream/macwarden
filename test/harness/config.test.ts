@@ -142,7 +142,10 @@ it('CP-001/B12 runs the pinned CI matrix and commands', () => {
   // Superseded runs are cancelled except on main, where every commit keeps its result (audit TOOLING-14).
   expect(blockFor(yaml, 'concurrency', 0)).toBe(
     "concurrency:\n  group: ci-${{ github.workflow }}-${{ github.ref }}\n  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}");
-  expect(runsFor(oracleJob)).toEqual(['npm ci', 'npm run build', 'npm run fixture:up', 'npm run test:oracle', 'npm run fixture:down']);
+  // Four duration-balanced quarters of the LND oracle files, one per matrix job (oracle-shards.test.ts proves the cover).
+  expect(runsFor(oracleJob)).toEqual(['npm ci', 'npm run build', 'npm run fixture:up',
+    'npm run test:oracle -- $(node scripts/oracle-shards.mjs --files ${{ matrix.shard }}/4)', 'npm run fixture:down']);
+  expect(oracleJob).toMatch(/^ {6}fail-fast: false\n {6}matrix:\n {8}shard: \[1, 2, 3, 4\]$/m);
   expect(oracleJob).toMatch(/^ {6}- if: always\(\)\n {8}run: npm run fixture:down$/m);
   // The Core Lightning comparison is its own job: an LND oracle failure cannot skip it.
   expect(runsFor(clnJob)).toEqual(['npm ci', 'npm run build', 'npm run fixture:cln:up', 'npm run test:cln-oracle', 'npm run fixture:cln:down']);
