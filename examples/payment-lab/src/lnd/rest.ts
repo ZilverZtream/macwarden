@@ -56,12 +56,18 @@ export interface StreamOptions {
   signal?: AbortSignal;
 }
 
+/**
+ * The LndError for an error body. `httpStatus` is the response's status, undefined for an error frame inside a
+ * 200 stream. The status the transport saw wins over the body's `http_code`: a proxy that answers 502, 503 or 504
+ * with LND's relayed body (`"http_code": 500`) is a gateway failure, ambiguous, not LND's definite answer. The
+ * body's `http_code` is used only for an in-stream error frame, which has no status of its own.
+ */
 function lndErrorFrom(body: unknown, httpStatus: number | undefined): LndError {
   if (body !== null && typeof body === 'object' && !Array.isArray(body)) {
     const o = body as JsonObject;
     const message = typeof o.message === 'string' ? o.message : `HTTP ${httpStatus ?? 'error'}`;
     const code = typeof o.code === 'number' ? o.code : typeof o.grpc_code === 'number' ? o.grpc_code : undefined;
-    const status = typeof o.http_code === 'number' ? o.http_code : httpStatus;
+    const status = httpStatus ?? (typeof o.http_code === 'number' ? o.http_code : undefined);
     return new LndError(message, code, status);
   }
   return new LndError(`HTTP ${httpStatus ?? 'error'}`, undefined, httpStatus);

@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import type { LedgerVerification } from './lab.ts';
-import type { FakeLnd, Proc } from './lnd.ts';
+import type { FakeLnd, LedgerSource, Proc } from './lnd.ts';
 
 /**
  * The oracle: the payment lab README's rules (examples/payment-lab/README.md, "Design decisions"),
@@ -23,31 +23,31 @@ export const PREDICATES = {
   'one-pending-payment-per-operation':
     'One operation has at most one pending payment (intent, submitting, in_flight or uncertain); a payment of an operation another payment completed is never claimed for submission nor reverted to intent (it is withdrawn).',
   'reservation-held-iff-live':
-    'A budgeted payment holds exactly one reservation while it is unresolved; failed releases it; succeeded consumes exactly one, at LND\'s value plus the actual fee.',
+    'A budgeted payment (its operation names a budget, or it has a reservation) holds exactly one reservation, at its amount and fee limit, while it is unresolved; failed releases it; succeeded consumes exactly one, at LND\'s value plus the actual fee.',
   'ledger-once-per-succeeded-payment':
-    'A payment LND reports succeeded is recorded succeeded and posted exactly once (principal = value, routing fee = fee); nothing else is posted (per payment hash only payment-succeeded, budget entries and, for every succeeded payment of an operation but the first, one double-payment entry); the operation is completed iff a payment succeeded; two succeeded payments of one operation are both flagged double-payment.',
+    'A payment LND reports succeeded is recorded succeeded at LND\'s value and fee and posted exactly once (principal = value, routing fee = fee); nothing else is posted (per payment hash only payment-succeeded, budget entries and, for every succeeded payment of an operation but the first, one double-payment entry); the operation is completed iff a payment succeeded; two succeeded payments of one operation are both flagged double-payment.',
   'stale-submission-changes-nothing':
     'An update or call outcome (other than SUCCEEDED) for a superseded submission changes neither the payment, its operation nor its reservation.',
   'notfound-revert-keeps-live-updates':
-    'An update or refusal for the live submission applies (IN_FLIGHT -> in_flight, FAILED or a definite refusal -> failed), also after a NotFound sent the record back to intent.',
+    'An update or refusal for the live submission applies (IN_FLIGHT -> in_flight, FAILED or a definite refusal -> failed), also after a NotFound sent the record back to intent; a TrackPaymentV2 snapshot LND took before the live submission\'s request reached it (every HTLC attempt in it first shown for an earlier submission, or none and created no later than a payment shown for an earlier submission, or before the live submission was sent when none was) is an earlier submission\'s answer and changes neither the payment, its operation nor its reservation.',
   'terminal-states-final':
     'Succeeded is final and a completed operation stays completed; failed changes only by a retry (to intent) or by LND reporting success.',
   'budget-admission-within-limit':
-    'Admission follows bigint arithmetic (admitted iff principal + fee allowance <= limit - held - consumed), never throws on large sums, budgetStatus equals the exact sums, and held + consumed stays within the limit unless LND reported success after a recorded failure or a budget-overrun event records the excess.',
+    'Admission follows bigint arithmetic (admitted iff principal + fee allowance <= limit - committed, where committed is computed from the payments themselves: amount + fee limit for each unresolved budgeted payment, value + fee for each succeeded one), never throws on large sums, budgetStatus equals the exact sums of the reservations, and both the reservations and the payments stay within the limit unless LND reported success after a recorded failure or a budget-overrun event records the excess.',
   'canceled-final-for-open-accepted':
     'A canceled invoice (or a late invoice LND was seen to cancel: its CANCELED is recorded in late_lnd_state) is never made live again by a replayed OPEN or ACCEPTED or a delayed create answer.',
   'settled-outranks-canceled':
-    'LND reporting SETTLED for an invoice recorded canceled makes the record settled.',
+    'LND reporting SETTLED for an invoice recorded canceled makes the record settled; at the end of a case (after a subscription catch-up from the cursor and reconciliation), no invoice LND holds SETTLED is recorded canceled.',
   'settlement-posted-once':
-    'Every settlement LND reports is posted exactly once (one ledger entry for the amount paid, however often it is delivered; the first settlement recorded wins over a later report of another amount); per payment hash only one invoice-settled (paid in full) or underpaid-settlement entry, and a double-payment entry exactly when an invoice-settled one has no fulfillment; settled is final; an order has at most one fulfillment, and is fulfilled iff it has one.',
+    'Every settlement LND reports is posted exactly once (one ledger entry for the amount paid, however often it is delivered; the first settlement recorded wins over a later report of another amount); per payment hash only one invoice-settled (paid in full) or underpaid-settlement entry, and a double-payment entry exactly when an invoice-settled one has no fulfillment; settled is final; an order has at most one fulfillment, and is fulfilled iff it has one; at the end of a case every invoice LND holds SETTLED is recorded settled with exactly one settlement entry, whatever it was paid (unless an explicit cursor-set skipped it, or the subscription cursor never left 0, where LND replays nothing).',
   'cursor-moves-only-from-subscription':
-    'The subscription cursor moves only with subscription deliveries (to the highest index seen) or an explicit cursor-set.',
+    'The subscription cursor moves only with subscription deliveries or an explicit cursor-set. Its add index moves to the highest seen; its settle index only contiguously: from c to c + 1 when the subscription delivered settlement c + 1, then on over c + 2, ... while the subscription delivered each (from 0, the first settle index the subscription delivers becomes the cursor: LND replays nothing for 0), so a restarted listener never skips a settlement it did not receive; lookups never move it.',
   'reconcile-buckets-partition':
-    'receiver reconcile counts every invoice it covers exactly once (resolved + open + unknown = targets), each in its own bucket (resolved: final when listed, or settled, canceled or not-created as LND or the record decided it; open: OPEN or ACCEPTED in LND as the pass looked it up; unknown: otherwise), and exits 75 iff unknown > 0, else 0.',
+    'receiver reconcile counts every invoice it covers exactly once (resolved + open + unknown = targets), each in its own bucket (resolved: final when listed, or settled, canceled or not-created as LND or the record decided it; open: OPEN or ACCEPTED in LND as the pass looked it up; unknown: only when the pass was stopped, a lookup of it got no answer, a cancel of it by the pass failed, or a creating invoice was not found within its creation window), and exits 75 iff unknown > 0, else 0.',
   'superseded-canceled-never-settled':
     'SettleInvoice is never called for an invoice of an order fulfilled by another invoice; after reconciliation every superseded or late invoice is canceled in LND, so no order has two payable invoices.',
   'ledger-balanced':
-    "Both books pass ledger verify after every step: every entry balances and follows its posting rule, the stored balances equal the entries, and the payer's budget, wallet and fee accounts equal its records.",
+    "Both books pass ledger verify after every step: every entry balances and follows its posting rule, the stored balances equal the entries, the payer's budget, wallet and fee accounts equal its records, and the amounts posted equal what LND lists (ListPayments, ListInvoices) for every resolved record.",
   'effects-once':
     "Every fulfilled order has exactly one fulfill-order row (its fulfillment's, with the settlement's amount and entry) and every completed operation one confirm-operation row (its first succeeded payment's); nothing else is enqueued; a done row has its receipt or confirmation, valid under the lab's key and carrying the row's fields; no effect is written twice, also when the worker is killed at any point; after the last pass every row is done.",
   'no-internal-error':
@@ -66,8 +66,10 @@ const finalRecord = (row: InvoiceRow): boolean => row.state === 'settled' || row
 /** A record that is decided: final, or not-created and not live in LND as far as the record knows. */
 const decidedRecord = (row: InvoiceRow): boolean => finalRecord(row) || (row.state === 'not-created' && row.late !== 'OPEN' && row.late !== 'ACCEPTED');
 const MAX_INT64 = 2n ** 63n - 1n;
+/** How long a not-created invoice of unknown late state is rechecked (README, receiver reconcile: 24 hours). */
+const LATE_RECHECK_MS = 24 * 60 * 60 * 1000;
 
-export interface PaymentRow { op: string; state: string; subs: number; amount: bigint; fee: bigint | undefined; value: bigint | undefined }
+export interface PaymentRow { op: string; state: string; subs: number; amount: bigint; feeLimit: bigint; fee: bigint | undefined; value: bigint | undefined }
 export interface ReservationRow { id: bigint; budget: string; hash: string; principal: bigint; allowance: bigint; actual: bigint | undefined; state: string }
 /** A journal entry: its event, payment hash, operation (or order) and the amount of its first line. */
 export interface EntryRow { id: bigint; event: string; hash: string; op: string; amount: bigint }
@@ -77,12 +79,14 @@ export interface PayerSnap {
   entries: EntryRow[];
   outbox: OutboxRowSnap[];
   operations: Map<string, string>;
+  /** Per operation, the budget it names (operations.budget_id), if any. */
+  opBudgets: Map<string, string | undefined>;
   reservations: ReservationRow[];
   ledger: { op: string; hash: string; account: string; amount: bigint }[];
   events: Map<string, Set<string>>;
   budgets: Map<string, bigint>;
 }
-export interface InvoiceRow { order: string; state: string; late: string | undefined; amount: bigint; amtPaid: bigint | undefined }
+export interface InvoiceRow { order: string; state: string; late: string | undefined; amount: bigint; amtPaid: bigint | undefined; createdAt: string }
 export interface ReceiverSnap {
   invoices: Map<string, InvoiceRow>;
   entries: EntryRow[];
@@ -152,12 +156,23 @@ export class Oracle {
   readonly closed = new Map<string, number>();
   /** The cursor the oracle expects (subscription deliveries and cursor-set only). */
   expectedCursor: { settle: bigint; add: bigint } | undefined;
+  /** Settle indexes the subscription gave the store (applyInvoice without an error). */
+  readonly #settlesBySubscription = new Set<bigint>();
+  /**
+   * Invoices delivered SETTLED (any source), and settlements the cursor passed before they were delivered: by an explicit
+   * cursor-set, or below the first settle index delivered from a zero cursor (LND replays none of them).
+   */
+  readonly #settledDelivered = new Set<string>();
+  readonly #skippedByCursorSet = new Set<string>();
   /** Budgets on which LND reported success after a recorded failure (the release was undone; the limit may be exceeded). */
   readonly overspendAllowed = new Set<string>();
   /** The budgetStatus of the store under test, read once per step by the runner. */
   budgetStatus: ((budgetId: string) => { heldMsat: bigint; consumedMsat: bigint; availableMsat: bigint } | undefined) | undefined;
-  /** `ledger verify` of the source under test (1.3.0), run on the oracle's own read-only connections. */
-  verifyLedger: ((store: { db: unknown; book: 'payer' | 'receiver' }) => Promise<LedgerVerification>) | undefined;
+  /**
+   * `ledger verify` of the source under test (1.3.0), run on the oracle's own read-only connections, with the
+   * scripted LND's ListPayments and ListInvoices (FakeLnd.ledgerSource), so posted amounts are compared with LND's.
+   */
+  verifyLedger: ((store: { db: unknown; book: 'payer' | 'receiver' }, api?: LedgerSource) => Promise<LedgerVerification>) | undefined;
   /** The effect files (1.3.0): read and checked with the source's own functions, by the runner. */
   effects: EffectFiles | undefined;
   /** Effects written per idempotency key (counted by the runner around each claimed row). */
@@ -205,10 +220,12 @@ export class Oracle {
       events.get(hash)?.add(String(row.kind));
     }
     return {
-      payments: new Map(all('SELECT payment_hash, operation_id, state, submissions, amount_msat, fee_msat, value_msat FROM payments ORDER BY rowid').map(row => [
+      payments: new Map(all('SELECT payment_hash, operation_id, state, submissions, amount_msat, fee_limit_msat, fee_msat, value_msat FROM payments ORDER BY rowid').map(row => [
         String(row.payment_hash), { op: String(row.operation_id), state: String(row.state), subs: Number(row.submissions), amount: big(row.amount_msat),
-          fee: opt(row.fee_msat), value: opt(row.value_msat) }])),
+          feeLimit: big(row.fee_limit_msat), fee: opt(row.fee_msat), value: opt(row.value_msat) }])),
       operations: new Map(all('SELECT operation_id, state FROM operations').map(row => [String(row.operation_id), String(row.state)])),
+      opBudgets: new Map(all('SELECT operation_id, budget_id FROM operations').map(row => [String(row.operation_id),
+        row.budget_id === null || row.budget_id === undefined ? undefined : String(row.budget_id)])),
       reservations: all('SELECT reservation_id, budget_id, payment_hash, principal_msat, fee_allowance_msat, actual_fee_msat, state FROM reservations ORDER BY reservation_id')
         .map(row => ({ id: big(row.reservation_id), budget: String(row.budget_id), hash: String(row.payment_hash), principal: big(row.principal_msat),
           allowance: big(row.fee_allowance_msat), actual: opt(row.actual_fee_msat), state: String(row.state) })),
@@ -230,10 +247,10 @@ export class Oracle {
     const late = this.#lateColumn ? ', late_lnd_state' : '';
     const cursor = all(`SELECT settle_index, add_index FROM subscription_cursor WHERE name = 'invoices'`)[0] ?? {};
     return {
-      invoices: new Map(all(`SELECT payment_hash, order_id, state, amount_msat, amt_paid_msat${late} FROM invoices ORDER BY rowid`).map(row => [
+      invoices: new Map(all(`SELECT payment_hash, order_id, state, amount_msat, amt_paid_msat, created_at${late} FROM invoices ORDER BY rowid`).map(row => [
         String(row.payment_hash), { order: String(row.order_id), state: String(row.state),
           late: row.late_lnd_state === null || row.late_lnd_state === undefined ? undefined : String(row.late_lnd_state),
-          amount: big(row.amount_msat), amtPaid: opt(row.amt_paid_msat) }])),
+          amount: big(row.amount_msat), amtPaid: opt(row.amt_paid_msat), createdAt: String(row.created_at) }])),
       orders: new Map(all('SELECT order_id, state FROM orders').map(row => [String(row.order_id), String(row.state)])),
       fulfillments: all('SELECT payment_hash, order_id FROM fulfillments').map(row => ({ hash: String(row.payment_hash), order: String(row.order_id) })),
       ledger: all(this.#receiverJournal ? RECEIVER_JOURNAL_LEGS : 'SELECT payment_hash, order_id, amount_msat FROM ledger_entries ORDER BY entry_id')
@@ -294,7 +311,16 @@ export class Oracle {
           this.fail('stale-submission-changes-nothing', `${method}${update === undefined ? '' : ` ${status}`} for superseded submission ${submission} of ${label(hash)} `
             + `(record at submission ${b.subs}, closed ${closed}) moved it ${b.state} -> ${a.state}, held reservations ${held(before, hash)} -> ${held(after, hash)}`, states());
         }
-        if (!stale && submission === b.subs && PENDING.has(b.state) && error === undefined) {
+        // A TrackPaymentV2 snapshot LND took before the live submission's request reached it (a retried payment's earlier
+        // FAILED, which LND shows until the retry arrives) is an earlier submission's answer: it changes nothing.
+        const earlier = update !== undefined && args[1] === 'TrackPaymentV2' && status !== 'SUCCEEDED' && submission === b.subs
+          && this.lnd.predatesSubmission(update as Parameters<FakeLnd['predatesSubmission']>[0], submission);
+        if (!stale && earlier && error === undefined && (a.state !== b.state || held(after, hash) !== held(before, hash)
+          || after.operations.get(a.op) !== before.operations.get(b.op))) {
+          this.fail('notfound-revert-keeps-live-updates', `TrackPaymentV2 ${status} taken before the live submission ${submission} of ${label(hash)} reached LND `
+            + `moved it ${b.state} -> ${a.state}, held reservations ${held(before, hash)} -> ${held(after, hash)}`, states());
+        }
+        if (!stale && !earlier && submission === b.subs && PENDING.has(b.state) && error === undefined) {
           const expected = status === 'IN_FLIGHT' || status === 'INITIATED' ? 'in_flight' : status === 'FAILED' || status === 'markRejected' ? 'failed' : undefined;
           if (expected !== undefined && a.state !== expected) {
             this.fail('notfound-revert-keeps-live-updates', `${method}${update === undefined ? '' : ` ${status}`} for the live submission ${submission} of ${label(hash)} left it ${a.state} `
@@ -311,6 +337,8 @@ export class Oracle {
         }
         if (b.state === 'failed' && a?.state === 'succeeded') {
           for (const row of after.reservations) if (row.hash === hash) this.overspendAllowed.add(row.budget);
+          const budget = after.opBudgets.get(a.op);
+          if (budget !== undefined) this.overspendAllowed.add(budget);
         }
       }
       // The lab refuses a FAILED for a payment already recorded succeeded by throwing; LND sent it before the success.
@@ -358,12 +386,21 @@ export class Oracle {
           const added = after.reservations.filter(row => !before.reservations.some(old => old.id === row.id));
           const row = added[0];
           if (row !== undefined) return { budget: row.budget, requested: row.principal + row.allowance };
+          // No reservation taken: the failed payment's own figures, against its operation's budget.
+          const op = `${String(args[0])}`;
+          const failed = [...before.payments.values()].find(item => item.op === op && item.state === 'failed');
+          const budget = before.opBudgets.get(op);
+          if (failed !== undefined && budget !== undefined) return { budget, requested: failed.amount + failed.feeLimit };
           return result?.requestedMsat === undefined ? undefined : { budget: 'B', requested: result.requestedMsat };
         };
         const admission = budgetOf();
         if (admission !== undefined && before.budgets.has(admission.budget)) {
-          const available = (before.budgets.get(admission.budget) ?? 0n) - sums(before, admission.budget).held - sums(before, admission.budget).consumed;
-          const reserved = after.reservations.length > before.reservations.length;
+          // Available as the README defines it: the limit less what the payments themselves commit (not the reservation rows,
+          // which a store that forgot to reserve would leave empty); with correct reservations the two agree.
+          const available = (before.budgets.get(admission.budget) ?? 0n) - committed(before, admission.budget);
+          // Admitted: a reservation was taken, or a payment entered intent (a new one, or a failed one retried).
+          const reserved = after.reservations.length > before.reservations.length
+            || [...after.payments].some(([hash, row]) => row.state === 'intent' && before.payments.get(hash)?.state !== 'intent');
           if (reserved && admission.requested > available) {
             this.fail('budget-admission-within-limit', `${method} reserved ${admission.requested} msat on budget ${admission.budget} with ${available} msat available`, states());
           }
@@ -446,12 +483,42 @@ export class Oracle {
         }
       }
       if (error === undefined) {
-        const expected = source === 'subscription'
-          ? { settle: max(this.expectedCursor.settle, invoice.settleIndex), add: max(this.expectedCursor.add, invoice.addIndex) }
-          : this.expectedCursor;
-        this.#checkCursor(after, expected, `applyInvoice via ${source}`, states);
+        if (invoice.state === 'SETTLED') this.#settledDelivered.add(hash);
+        if (invoice.settleIndex > 0n) {
+          if (source === 'subscription') this.#settlesBySubscription.add(invoice.settleIndex);
+        }
+        if (source === 'subscription') {
+          // The settle index moves only contiguously (LABHARNESS-01): SubscribeInvoices sends the add backlog (each invoice
+          // in its current state, settled ones with their settle index) before the settle backlog, so moving to the highest
+          // index seen would pass settlements not delivered yet. From c it moves to c + 1 when the subscription delivered
+          // settlement c + 1, and on over c + 2, ... while the subscription delivered each. From 0 the first settle index the
+          // subscription delivers becomes the cursor (LND replays nothing for a cursor of 0, so the lower ones never come;
+          // they were settled before the listener started) and it moves on from there. The add index keeps the highest seen.
+          const from = this.expectedCursor.settle;
+          const start = from === 0n && invoice.settleIndex > 0n ? invoice.settleIndex : from;
+          const expected = contiguous(start, this.#settlesBySubscription);
+          if (from === 0n && start > 0n) {
+            // The settlements below the first one delivered from a zero cursor are left to reconciliation: excused at the end.
+            for (const item of this.lnd.invoices.values()) {
+              if (item.settleIndex > 0n && item.settleIndex < start && !this.#settledDelivered.has(item.hash)) this.#skippedByCursorSet.add(item.hash);
+            }
+          }
+          const add = max(this.expectedCursor.add, invoice.addIndex);
+          if (after.cursor.settle !== expected || after.cursor.add !== add) {
+            this.fail('cursor-moves-only-from-subscription', `after applyInvoice via subscription (settle index ${invoice.settleIndex}, add index ${invoice.addIndex}) `
+              + `the cursor is settle ${after.cursor.settle} / add ${after.cursor.add}, expected settle ${expected} / add ${add} `
+              + `(it was settle ${from}; settlements the subscription delivered: ${sorted(this.#settlesBySubscription)})`, states());
+          }
+          this.expectedCursor = after.cursor;
+        } else {
+          this.#checkCursor(after, this.expectedCursor, `applyInvoice via ${source}`, states);
+        }
       }
     } else if (method === 'setCursor' && error === undefined) {
+      // Settlements an explicit cursor-set moves past before they were delivered are the operator's call: excused at the end.
+      for (const item of this.lnd.invoices.values()) {
+        if (item.settleIndex > 0n && item.settleIndex <= big(args[0]) && !this.#settledDelivered.has(item.hash)) this.#skippedByCursorSet.add(item.hash);
+      }
       this.#checkCursor(after, { settle: big(args[0]), add: big(args[1]) }, 'setCursor', states);
     } else if (error === undefined) {
       this.#checkCursor(after, this.expectedCursor, method, states);
@@ -484,28 +551,35 @@ export class Oracle {
     }
   }
 
-  /** The invoices receiver reconcile covers (README: every unresolved invoice, and not-created ones rechecked for 24 hours; or every invoice of one order). */
+  /**
+   * The invoices receiver reconcile covers (README: every unresolved invoice, and not-created ones rechecked for 24 hours; or
+   * every invoice of one order). A not-created invoice LND was seen to hold OPEN or ACCEPTED stays covered however old; one
+   * of unknown late state only while it was created within the last 24 hours (the README's recheck window, computed here from
+   * created_at, not taken from the source).
+   */
   reconcileTargets(order: string | undefined): Map<string, InvoiceRow> {
     const snap = this.receiverSnap();
+    const recheckSince = new Date(Date.now() - LATE_RECHECK_MS).toISOString();
     const targets = new Map<string, InvoiceRow>();
     for (const [hash, row] of snap.invoices) {
       if (order !== undefined) { if (row.order === order) targets.set(hash, row); continue; }
       if (row.state === 'creating' || row.state === 'open' || row.state === 'accepted') targets.set(hash, row);
-      if (row.state === 'not-created' && row.late !== 'CANCELED' && row.late !== 'SETTLED') targets.set(hash, row);
+      if (row.state === 'not-created' && (row.late === 'OPEN' || row.late === 'ACCEPTED' || (row.late === undefined && row.createdAt >= recheckSince))) targets.set(hash, row);
     }
     return targets;
   }
 
   /**
-   * `answers`: per invoice, the lookup answers the reconcile itself received (an invoice state, or not-found).
+   * `answers`: per invoice, the lookup answers the reconcile itself received (an invoice state, or not-found), and
+   * 'no-answer' for a lookup that ended without one, 'cancel-failed' for a CancelInvoice of the pass that failed.
    * Each target may be in these buckets only: resolved when its record was final as listed, or when the record
    * ends settled, canceled or not-created (not live in LND), or a lookup of the pass answered not-found,
    * CANCELED or SETTLED; open when a lookup of the pass answered OPEN or ACCEPTED (and it was not final as
-   * listed); unknown when it was not final as listed. The counts must be an assignment of the targets to
-   * buckets they may be in (Hall's condition over the three buckets).
+   * listed); unknown when it was not final as listed and the pass could not decide it (see below). The counts must
+   * be an assignment of the targets to buckets they may be in (Hall's condition over the three buckets).
    */
   reconcileDone(targets: Map<string, InvoiceRow>, result: { resolved: number; open: number; unknown: number }, exit: number | undefined,
-    answers: Map<string, Set<string>> = new Map()): void {
+    answers: Map<string, Set<string>> = new Map(), aborted = false): void {
     const counted = result.resolved + result.open + result.unknown;
     const end = this.receiverSnap();
     const states = (): Record<string, unknown> => this.readable({ targets: [...targets.keys()], result, exit,
@@ -521,7 +595,10 @@ export class Oracle {
         const row = end.invoices.get(hash);
         if (finalRecord(start)) may.add('resolved');
         else {
-          may.add('unknown');
+          // Unknown only when the pass could not decide (LABHARNESS-06): it was stopped, a lookup of the invoice got no answer
+          // ('no-answer'), a cancel of it by the pass failed ('cancel-failed'), or a creating invoice was not found within its
+          // creation window (its create call may still reach LND).
+          if (aborted || seen.has('no-answer') || seen.has('cancel-failed') || (start.state === 'creating' && seen.has('not-found'))) may.add('unknown');
           if ((row !== undefined && decidedRecord(row)) || [...seen].some(state => state === 'not-found' || state === 'CANCELED' || state === 'SETTLED')) may.add('resolved');
           if ([...seen].some(state => state === 'OPEN' || state === 'ACCEPTED')) may.add('open');
         }
@@ -569,7 +646,10 @@ export class Oracle {
       const states = (): Record<string, unknown> => this.readable({ after: book === 'payer' ? payer : receiver }) as Record<string, unknown>;
       let result: LedgerVerification;
       try {
-        result = await this.verifyLedger({ db: book === 'payer' ? this.#payer() : this.#receiver(), book });
+        // LND's lists as a second source, unless a resettle fault made LND report two amounts for one settled invoice.
+        const resettled = [...this.lnd.invoices.values()].some(item => item.resettled === true);
+        result = await this.verifyLedger({ db: book === 'payer' ? this.#payer() : this.#receiver(), book },
+          book === 'receiver' && resettled ? undefined : this.lnd.ledgerSource());
       } catch (error) {
         this.fail('ledger-balanced', `ledger verify of the ${book}'s book threw: ${this.#labelText(String((error as Error).message ?? error))}`, states());
         continue;
@@ -669,12 +749,17 @@ export class Oracle {
       const rows = snap.reservations.filter(item => item.hash === hash);
       const held = rows.filter(item => item.state === 'held').length;
       const consumed = rows.filter(item => item.state === 'consumed');
-      if (rows.length > 0) {
-        const fine = PENDING.has(row.state) ? held === 1 && consumed.length === 0
+      // Budgeted: its operation names a budget that exists, or it has reservations (LABHARNESS-03: a store that never
+      // reserved left no rows, and the rule was not checked at all).
+      const opBudget = snap.opBudgets.get(row.op);
+      if (rows.length > 0 || (opBudget !== undefined && snap.budgets.has(opBudget))) {
+        const heldRow = rows.find(item => item.state === 'held');
+        const fine = PENDING.has(row.state) ? held === 1 && consumed.length === 0 && heldRow?.principal === row.amount && heldRow.allowance === row.feeLimit
           : row.state === 'failed' ? held === 0 && consumed.length === 0
             : held === 0 && consumed.length === 1 && consumed[0]?.actual === row.fee && (row.value === undefined || consumed[0]?.principal === row.value);
         if (!fine) {
           this.fail('reservation-held-iff-live', `${label(hash)} is ${row.state} with ${held} held and ${consumed.length} consumed reservation(s)`
+            + (heldRow === undefined ? '' : ` (held ${heldRow.principal} + ${heldRow.allowance} for amount ${row.amount} + fee limit ${row.feeLimit})`)
             + (consumed[0] === undefined ? '' : ` (principal ${consumed[0].principal}, LND value ${row.value}; actual fee ${consumed[0].actual}, recorded fee ${row.fee})`), states());
         }
       }
@@ -693,6 +778,10 @@ export class Oracle {
       const lnd = this.lnd.payments.get(hash);
       if (row.state === 'succeeded' && lnd?.status !== 'SUCCEEDED') {
         this.fail('ledger-once-per-succeeded-payment', `${label(hash)} is recorded succeeded but LND has it ${lnd?.status ?? 'absent'}`, states());
+      } else if (row.state === 'succeeded' && lnd !== undefined && (row.value !== lnd.valueMsat || row.fee !== lnd.feeMsat)) {
+        // LABHARNESS-04: the record (and so its entries, consumption and confirmation) must carry LND's value and fee, not the invoice's.
+        this.fail('ledger-once-per-succeeded-payment', `succeeded ${label(hash)} is recorded at value ${row.value}, fee ${row.fee}; `
+          + `LND reports value ${lnd.valueMsat}, fee ${lnd.feeMsat}`, states());
       }
     }
     for (const [op, state] of snap.operations) {
@@ -738,6 +827,12 @@ export class Oracle {
       const { held, consumed } = sums(snap, budget);
       if (held + consumed > limit && !this.overspendAllowed.has(budget) && !overrun.has(budget)) {
         this.fail('budget-admission-within-limit', `budget ${budget}: held ${held} + consumed ${consumed} exceeds the limit ${limit}`, states());
+      }
+      // The same from the payments themselves (LABHARNESS-03): reservations that were never taken hide nothing.
+      const commitment = committed(snap, budget);
+      if (commitment > limit && !this.overspendAllowed.has(budget) && !overrun.has(budget)) {
+        this.fail('budget-admission-within-limit', `budget ${budget}: its payments commit ${commitment} msat (unresolved at amount + fee limit, `
+          + `succeeded at value + fee), more than the limit ${limit}; the reservations hold ${held} and consume ${consumed}`, states());
       }
       if (this.budgetStatus !== undefined) {
         try {
@@ -802,8 +897,46 @@ export class Oracle {
   // ------------------------------------------------------------------------------------------
   // At the end of a case, after reconciliation with every call answered.
 
-  quiescent(): void {
+  /**
+   * LABHARNESS-05: every invoice LND holds SETTLED is recorded settled (or, a late invoice, SETTLED in late_lnd_state) with
+   * exactly one settlement entry, whatever it was paid. Checked at the end, after the subscription caught up from the
+   * cursor (`catchUpSettleIndex`) and reconciliation: a settlement the store was given is required; so is every other one
+   * when the catch-up started from a non-zero settle index (LND replays every settlement after it, and the cursor never
+   * passes one that was not delivered), except one the cursor passed undelivered: by an explicit cursor-set, or below the
+   * first settle index delivered from a zero cursor (those are left to reconciliation). From a zero cursor LND replays
+   * nothing, and a canceled record is not looked up again, so a settlement nobody delivered is not required then.
+   */
+  #settlementsApplied(snap: ReceiverSnap, catchUpSettleIndex: bigint): void {
+    const states = (): Record<string, unknown> => this.readable({ after: snap, lnd: [...this.lnd.invoices.values()]
+      .map(item => ({ label: item.label, state: item.state, settleIndex: item.settleIndex, amtPaidMsat: item.amtPaidMsat })) }) as Record<string, unknown>;
+    for (const item of this.lnd.invoices.values()) {
+      const row = snap.invoices.get(item.hash);
+      if (item.state !== 'SETTLED' || row === undefined || this.#skippedByCursorSet.has(item.hash)) continue;
+      if (catchUpSettleIndex === 0n && !this.#settledDelivered.has(item.hash)) continue;
+      const settled = row.state === 'settled' || row.late === 'SETTLED';
+      if (row.state === 'canceled') {
+        this.fail('settled-outranks-canceled', `at the end of the case LND holds ${item.label} SETTLED (settle index ${item.settleIndex}) and the record is canceled`, states());
+      } else if (!settled) {
+        this.fail('settlement-posted-once', `at the end of the case LND holds ${item.label} SETTLED (settle index ${item.settleIndex}) and the record is `
+          + `${row.state}${row.late === undefined ? '' : `/${row.late}`}`, states());
+      }
+      if (this.#receiverJournal === true) {
+        const settlements = snap.entries.filter(entry => entry.hash === item.hash && (entry.event === 'invoice-settled' || entry.event === 'underpaid-settlement'));
+        if (settlements.length !== 1) {
+          this.fail('settlement-posted-once', `at the end of the case LND holds ${item.label} SETTLED for ${item.amtPaidMsat} msat and the receiver's journal `
+            + `has ${settlements.length} settlement entries for it`, states());
+        } else if (item.resettled !== true && settlements[0]?.amount !== item.amtPaidMsat) {
+          // The oracle's own comparison with LND, independent of ledger verify's (Improvement 15 of the second external audit).
+          this.fail('settlement-posted-once', `at the end of the case LND holds ${item.label} SETTLED for ${item.amtPaidMsat} msat and the receiver posted `
+            + `${settlements[0]?.amount} msat`, states());
+        }
+      }
+    }
+  }
+
+  quiescent(catchUpSettleIndex = 0n): void {
     const snap = this.receiverSnap();
+    this.#settlementsApplied(snap, catchUpSettleIndex);
     for (const [order, state] of snap.orders) {
       // An invoice LND misreported as canceled is left out: the record rightly treats it as canceled.
       const payable = [...snap.invoices].filter(([hash, row]) => row.order === order && this.lnd.invoices.get(hash)?.misreported !== true
@@ -838,6 +971,30 @@ const canonicalFields = (fields: Record<string, unknown>): string => JSON.string
 
 function max(a: bigint, b: bigint): bigint {
   return a > b ? a : b;
+}
+
+/** From `from`, on over every next index in `delivered` (from + 1, from + 2, ...): the contiguous settle cursor. */
+function contiguous(from: bigint, delivered: ReadonlySet<bigint>): bigint {
+  let cursor = from;
+  while (delivered.has(cursor + 1n)) cursor += 1n;
+  return cursor;
+}
+
+const sorted = (items: ReadonlySet<bigint>): string => [...items].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)).join(',') || 'none';
+
+/**
+ * What a budget commits, from the payments themselves (not the reservation rows): amount + fee limit for every
+ * unresolved payment of an operation naming the budget (or reserved against it), value + fee for every succeeded one.
+ */
+export function committed(snap: PayerSnap, budget: string): bigint {
+  let total = 0n;
+  for (const [hash, row] of snap.payments) {
+    const reservedOn = snap.reservations.find(item => item.hash === hash)?.budget;
+    if ((reservedOn ?? snap.opBudgets.get(row.op)) !== budget) continue;
+    if (PENDING.has(row.state)) total += row.amount + row.feeLimit;
+    else if (row.state === 'succeeded') total += (row.value ?? row.amount) + (row.fee ?? 0n);
+  }
+  return total;
 }
 
 /** A budget's held and consumed amounts, summed exactly (bigint), as the README requires of the store. */

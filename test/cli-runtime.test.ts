@@ -7,7 +7,7 @@ import { expect, it } from 'vitest';
 import { main } from '../src/cli.js';
 import { run as inspect } from '../src/commands/inspect.js';
 import { run as scan } from '../src/commands/scan.js';
-import { SUPPORTED_NODE, nodeVersionWarning, supportedNode, unsafeNodeFlags } from '../src/environment.js';
+import { SUPPORTED_NODE, nodeVersionWarning, supportedNode, unsafeNodeDiagnostics, unsafeNodeFlags } from '../src/environment.js';
 import { captureMain } from './support/capture.js';
 
 // Audit 1.2.1: Node flags on the command line are the counterpart of NODE_OPTIONS; watch's
@@ -23,6 +23,34 @@ it('CLI/runtime node flags are refused before any command runs', async () => {
     expect(unsafeNodeFlags([flag]), flag).toBe(true);
   for (const flag of ['--max-old-space-size=4096', '--experimental-transform-types', '--no-warnings', '--enable-source-maps'])
     expect(unsafeNodeFlags([flag]), flag).toBe(false);
+});
+
+// Audit 1.4.0: Node and V8 read `_` and `-` in an option name alike, so `--tls_keylog` wrote TLS secrets.
+it('CLI/runtime node flags spelled with underscores are refused too', async () => {
+  for (const flag of ['--tls_keylog=x', '--cpu_prof', '--heap_prof', '--heap_prof_dir=x', '--track_heap_objects', '--perf_basic_prof',
+    '--cpu_prof_dir=x', '--cpu-prof-dir=x', '--heapsnapshot_signal=SIGUSR2', '--report_on_signal', '--diagnostic_dir=x',
+    '--trace_events_enabled', '--inspect_brk', '--prof_cpp', '--log', '--log_all', '--log-all', '--logfile=v8.log', '--perf-prof'])
+    expect(unsafeNodeFlags([flag]), flag).toBe(true);
+  // The value after '=' is not normalised or matched: a runtime size flag with any value stays allowed.
+  for (const flag of ['--max_old_space_size=4096', '--stack_size=984', '--no_warnings', '--title=tls_keylog'])
+    expect(unsafeNodeFlags([flag]), flag).toBe(false);
+  const flagged = await captureMain(main, ['inspect', resolve('test/vectors/default-readonly.macaroon'), '--json'], { execArgv: ['--tls_keylog=x'] });
+  expect(flagged.code).toBe(2);
+  expect(JSON.parse(flagged.stdout)).toMatchObject({ command: 'inspect', ok: false, error: { code: 2, message: 'unsafe Node diagnostic settings (node flags)' } });
+});
+
+// Audit 1.4.0: Windows reads environment names in any letter case, and { ...process.env } keeps the
+// spelling, so node_options or Node_Debug passed the guard while Node applied them. The Windows
+// variant test/lnd-audit-env-case.windows-fs.test.ts runs the built CLI with such a variable.
+it('ENV-CASE/portable NODE_OPTIONS and NODE_DEBUG are matched in any letter case', async () => {
+  for (const env of [{ node_options: '--require=x' }, { Node_Options: '--no-warnings' }, { Node_Debug: 'tls' }, { node_debug: 'net,other' },
+    { NODE_OPTIONS: '', node_options: '--require=x' }, { NODE_DEBUG: 'other', node_debug: 'http' }])
+    expect(unsafeNodeDiagnostics(env), JSON.stringify(env)).toBe(true);
+  for (const env of [{}, { node_options: '' }, { Node_Debug: 'http2' }, { NODE_OPTIONS_X: '--require=x' }, { node_debug: 'other' }])
+    expect(unsafeNodeDiagnostics(env), JSON.stringify(env)).toBe(false);
+  const stdin = Object.assign(Readable.from([]), { isTTY: false });
+  const result = await inspect([resolve('test/vectors/default-readonly.macaroon')], { stdin, fs, clock: () => new Date(), env: { node_options: '--require=x' } });
+  expect(result).toMatchObject({ ok: false, error: { code: 2, message: 'unsafe Node diagnostic settings' } });
 });
 
 it('CLI/runtime watch warns on a Node version outside the engines ranges; every other command does not check', async () => {

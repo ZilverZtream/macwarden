@@ -38,7 +38,7 @@ npm i -g macwarden
 On production hosts, install an exact version and check the registry signatures of what you installed with `npm audit signatures` in a project that depends on MacWarden:
 
 ```sh
-npm i -g macwarden@1.3.0
+npm i -g macwarden@1.3.1
 ```
 
 After installing on a new host or upgrading, the [field check](docs/field-check.md) confirms a release against your own node in about 15 minutes.
@@ -61,7 +61,10 @@ In GitHub Actions:
 - uses: actions/checkout@v5
   with:
     fetch-depth: 0
-- run: npx --yes macwarden@1.3.0 scan . --git-history --fail-on READ --format github
+- uses: actions/setup-node@v5
+  with:
+    node-version: 22
+- run: npx --yes macwarden@1.3.1 scan . --git-history --fail-on READ --format github
 ```
 
 [CI integration](docs/ci-integration.md) covers SARIF upload for GitHub code scanning, the pre-commit hook and the gitleaks and TruffleHog rule packs.
@@ -119,7 +122,7 @@ $ macwarden inventory --verify
 node 03f2a1c97b5e4d0e8a6b9f31c2d47e5a0b8c6d2e9f1a3b5c7d9e0f2a4b6c8d0e1f (shop-node) mainnet
 ROOT KEY ID  LABEL      GRADE    AGE  EXPIRES     STATUS
 0            —          —        —    —           default root key: cannot be individually revoked
-4294967341   btcpay     RECEIVE  41d  —           active; accepted; last used 2026-10-08T09:12:44Z (18324 calls)
+4294967341   btcpay     SPEND    41d  —           active; accepted; last used 2026-10-08T09:12:44Z (18324 calls)
 4294967342   lnbits     SPEND    12d  2026-10-26  active; accepted; expires in 17d; rotate with: macwarden rotate lnbits --out /home/op/lnbits-2026-10-09.macaroon
 4294967355   ci-reader  READ     3d   2026-10-07  active; expired; revoke with: macwarden revoke ci-reader
 9187201950   —          —        —    —           unknown — not in this registry (another tool or operator may own it)
@@ -144,7 +147,7 @@ macwarden watch --payment-journal ./payments.journal      # as a supervised serv
 macwarden reconcile --payment-journal ./payments.journal --since 7d
 ```
 
-The journal records, for each SendPaymentV2 and SendToRouteV2 call, the caller's credential ID and root key ID, the payment hash, the requested amount and the fee limit, and it records every period in which `watch` was not registered. It never stores the invoice text, preimages or macaroons. `reconcile` then asks LND (read-only, `info:read` and `offchain:read`) how each journaled payment ended: settled amount, routing fees over all attempts, failure reason, or still in flight. It keeps the two kinds of evidence apart: a journaled request is not a payment, and a payment LND lists in a period the journal does not cover is reported as unattributed with that gap, never assigned to anyone. Exit 0 means the window was fully covered and everything matched; exit 1 lists what did not.
+The journal records, for each SendPaymentV2 and SendToRouteV2 call, the caller's credential ID and root key ID, the payment hash, the requested amount and the fee limit, and it records every period in which `watch` was not registered. It never stores the invoice text, preimages or macaroons. `reconcile` then asks LND (read-only, `info:read` and `offchain:read`) how each journaled payment ended: settled amount, routing fees over all attempts, failure reason, or still in flight. It keeps the two kinds of evidence apart: a journaled request is not a payment, and a payment LND lists in a period the journal does not cover is reported as unattributed with that gap, never assigned to anyone. Exit 0 means the window was fully covered and everything matched; exit 1 lists what did not. `reconcile` needs its own read-only credential with `info:read` and `offchain:read` (for example `info:read uri:/lnrpc.Lightning/ListPayments uri:/routerrpc.Router/TrackPaymentV2`); the session macaroon above does not include them.
 
 The [incident playbook](docs/incident-playbook.md) walks through the whole response: what patching fixes, replacing and revoking credentials with `respond`, `rotate` and `revoke`, what to do about root key 0, re-pairing apps and checking for unauthorized activity.
 
@@ -176,7 +179,7 @@ Every command that changes the node has `--dry-run`. `revoke`, `rotate --finish`
 
 These rules are enforced in code and covered by tests; [docs/security-model.md](docs/security-model.md) defines them as SAFE-01 to SAFE-11 and describes the threat model.
 
-- It never prints, logs or stores credential bytes. The only file that holds a credential is one you asked for with `--out`. It is never overwritten and is owner-only before its first byte: the `0600` mode or the Windows owner-only ACL is read back and verified, and the command fails without writing when the file system cannot keep it (for example WSL's `/mnt/c`). A Windows FAT or exFAT volume, which stores no permissions, is written with a warning.
+- It never prints, logs or stores credential bytes. The only files that hold a credential are those you asked for with `--out` (or `respond --out-dir`). Such a file is never overwritten and is owner-only before its first byte: the `0600` mode or the Windows owner-only ACL is read back and verified, and the command fails without writing when the file system cannot keep it (for example WSL's `/mnt/c`). A Windows FAT or exFAT volume, which stores no permissions, is written with a warning.
 - It never calls `changepassword`, never deletes root key ID 0, and never reads or writes `macaroons.db`, wallet passwords, seeds or TLS keys.
 - Rotation has two steps. The stage step bakes the replacement and verifies that LND accepts it, and changes nothing else. The old credential keeps working until you run `--finish`, which revokes it and then checks that LND rejects it and still accepts the replacement. A failure at any point before the revoke leaves the old credential valid.
 - When the outcome of a change is uncertain (a timeout or a dropped connection), it says so, exits 7 and prints the command to reconcile. It reports "nothing changed" only when it has checked.
@@ -206,7 +209,7 @@ The online commands are for LND only. Core Lightning runes are decoded by `inspe
 
 ## Limits
 
-- A clean `scan` is not proof that nothing leaked. Encrypted, archived or unusually encoded credentials can be missed, and git history covers only what is present in your local clone.
+- A clean `scan` is not proof that nothing leaked. Encrypted, archived or unusually encoded credentials can be missed, and git history covers only what is present in your local clone. Files whose names look like wallet secrets (`*.key`, names containing `seed`, `password` or `passwd` as a word, `macaroons.db`, `wallet.db`) are never opened (SAFE-02): they are reported as skipped (`never-open`) and named in text, JSON, SARIF and GitHub output, not scanned, and do not count toward `--fail-on`.
 - Revoking a credential blocks new requests. Streams opened before the revoke, such as an invoice subscription, stay open until they disconnect; restart LND if a compromised credential may hold one.
 - While `watch` is registered, LND waits for it on every RPC. Run it as a supervised service and never enable `rpcmiddleware.addmandatory`. Its own work is bounded whatever callers do: canary alerts are rate-limited, at most one alert command runs (stopped after 12 s), and usage data keeps at most 20,000 records.
 - On nodes run with `--no-macaroons`, stateless init or a remote signer, MacWarden sees only part of the picture.

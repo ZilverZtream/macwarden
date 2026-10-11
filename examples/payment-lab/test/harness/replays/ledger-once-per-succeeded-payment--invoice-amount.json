@@ -1,0 +1,147 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "ledger-once-per-succeeded-payment",
+  "rule": "A payment LND reports succeeded is recorded succeeded at LND's value and fee and posted exactly once (principal = value, routing fee = fee); nothing else is posted (per payment hash only payment-succeeded, budget entries and, for every succeeded payment of an operation but the first, one double-payment entry); the operation is completed iff a payment succeeded; two succeeded payments of one operation are both flagged double-payment.",
+  "message": "succeeded op1/i0 is recorded at value 2000, fee 10; LND reports value 2100, fee 10",
+  "seed": 1,
+  "case": 1,
+  "config": {
+    "scale": "small",
+    "budget": true,
+    "limit": "10000"
+  },
+  "failingStep": 5,
+  "originalSteps": 26,
+  "events": [
+    {
+      "t": "intent",
+      "p": "p1",
+      "op": 1,
+      "inv": 0
+    },
+    {
+      "t": "submit",
+      "p": "p1",
+      "op": 1,
+      "inv": 0
+    },
+    {
+      "t": "send.arrive",
+      "pick": 0.5
+    },
+    {
+      "t": "lnd.payment",
+      "pick": 0.5,
+      "what": "succeed",
+      "amount": "over"
+    },
+    {
+      "t": "send.deliver",
+      "pick": 0.5
+    },
+    {
+      "t": "send.deliver",
+      "pick": 0.25
+    }
+  ],
+  "states": {
+    "after": {
+      "payments": {
+        "op1/i0": {
+          "op": "op1",
+          "state": "succeeded",
+          "subs": 1,
+          "amount": "2000",
+          "feeLimit": "100",
+          "fee": "10",
+          "value": "2000"
+        }
+      },
+      "operations": {
+        "op1": "completed"
+      },
+      "opBudgets": {
+        "op1": "B"
+      },
+      "reservations": [
+        {
+          "id": "1",
+          "budget": "B",
+          "hash": "op1/i0",
+          "principal": "2000",
+          "allowance": "100",
+          "actual": "10",
+          "state": "consumed"
+        }
+      ],
+      "ledger": [
+        {
+          "op": "op1",
+          "hash": "op1/i0",
+          "account": "principal",
+          "amount": "2000"
+        },
+        {
+          "op": "op1",
+          "hash": "op1/i0",
+          "account": "routing-fee",
+          "amount": "10"
+        }
+      ],
+      "events": {
+        "op1/i0": [
+          "intent-recorded",
+          "submit",
+          "in-flight",
+          "amount-mismatch",
+          "succeeded"
+        ]
+      },
+      "budgets": {
+        "B": "10000"
+      },
+      "entries": [
+        {
+          "id": "1",
+          "event": "budget-held",
+          "hash": "op1/i0",
+          "op": "op1",
+          "amount": "2100"
+        },
+        {
+          "id": "2",
+          "event": "payment-succeeded",
+          "hash": "op1/i0",
+          "op": "op1",
+          "amount": "2000"
+        },
+        {
+          "id": "3",
+          "event": "budget-consumed",
+          "hash": "op1/i0",
+          "op": "op1",
+          "amount": "90"
+        }
+      ],
+      "outbox": [
+        {
+          "id": "1",
+          "kind": "confirm-operation",
+          "key": "op1:dcade659d89a8c7e531f267c48742b63ff178db67ff5e1191211265793ca7e94",
+          "subject": "op1",
+          "payload": {
+            "operationId": "op1",
+            "operationKind": "payout",
+            "paymentHash": "op1/i0",
+            "valueMsat": "2000",
+            "feeMsat": "10",
+            "ledgerEntryId": 2
+          },
+          "state": "pending"
+        }
+      ]
+    }
+  },
+  "mutant": "ledger-once-per-succeeded-payment--invoice-amount.cjs"
+}

@@ -1,0 +1,157 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "notfound-revert-keeps-live-updates",
+  "rule": "An update or refusal for the live submission applies (IN_FLIGHT -> in_flight, FAILED or a definite refusal -> failed), also after a NotFound sent the record back to intent; a TrackPaymentV2 snapshot LND took before the live submission's request reached it (every HTLC attempt in it first shown for an earlier submission, or none and created before the live submission was sent) is an earlier submission's answer and changes neither the payment, its operation nor its reservation.",
+  "message": "markRejected for the live submission 1 of op1/i0 left it intent (was intent), expected failed",
+  "seed": 1,
+  "case": 23,
+  "config": {
+    "scale": "small",
+    "budget": true,
+    "limit": "2200"
+  },
+  "failingStep": 5,
+  "originalSteps": 20,
+  "events": [
+    {
+      "t": "intent",
+      "p": "p1",
+      "op": 1,
+      "inv": 0
+    },
+    {
+      "t": "submit",
+      "p": "p0",
+      "op": 1,
+      "inv": 0
+    },
+    {
+      "t": "reconcile",
+      "p": "p1",
+      "op": 1,
+      "inv": 0
+    },
+    {
+      "t": "track.deliver",
+      "pick": 0.75
+    },
+    {
+      "t": "send.end",
+      "pick": 0.5,
+      "mode": "definite"
+    },
+    {
+      "t": "track.deliver",
+      "pick": 0.75
+    }
+  ],
+  "states": {
+    "call": {
+      "proc": "p0",
+      "method": "markRejected",
+      "args": [
+        "op1/i0",
+        "rate limit exceeded",
+        1
+      ]
+    },
+    "before": {
+      "payments": {
+        "op1/i0": {
+          "op": "op1",
+          "state": "intent",
+          "subs": 1,
+          "amount": "2000",
+          "feeLimit": "100"
+        }
+      },
+      "operations": {
+        "op1": "open"
+      },
+      "opBudgets": {
+        "op1": "B"
+      },
+      "reservations": [
+        {
+          "id": "1",
+          "budget": "B",
+          "hash": "op1/i0",
+          "principal": "2000",
+          "allowance": "100",
+          "state": "held"
+        }
+      ],
+      "ledger": [],
+      "events": {
+        "op1/i0": [
+          "intent-recorded",
+          "submit",
+          "not-initiated"
+        ]
+      },
+      "budgets": {
+        "B": "2200"
+      },
+      "entries": [
+        {
+          "id": "1",
+          "event": "budget-held",
+          "hash": "op1/i0",
+          "op": "op1",
+          "amount": "2100"
+        }
+      ],
+      "outbox": []
+    },
+    "after": {
+      "payments": {
+        "op1/i0": {
+          "op": "op1",
+          "state": "intent",
+          "subs": 1,
+          "amount": "2000",
+          "feeLimit": "100"
+        }
+      },
+      "operations": {
+        "op1": "open"
+      },
+      "opBudgets": {
+        "op1": "B"
+      },
+      "reservations": [
+        {
+          "id": "1",
+          "budget": "B",
+          "hash": "op1/i0",
+          "principal": "2000",
+          "allowance": "100",
+          "state": "held"
+        }
+      ],
+      "ledger": [],
+      "events": {
+        "op1/i0": [
+          "intent-recorded",
+          "submit",
+          "not-initiated"
+        ]
+      },
+      "budgets": {
+        "B": "2200"
+      },
+      "entries": [
+        {
+          "id": "1",
+          "event": "budget-held",
+          "hash": "op1/i0",
+          "op": "op1",
+          "amount": "2100"
+        }
+      ],
+      "outbox": []
+    }
+  },
+  "mutant": "notfound-revert-keeps-live-updates--m5c.cjs"
+}

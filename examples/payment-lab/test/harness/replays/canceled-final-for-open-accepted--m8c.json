@@ -1,0 +1,124 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "canceled-final-for-open-accepted",
+  "rule": "A canceled invoice (or a late invoice LND was seen to cancel: its CANCELED is recorded in late_lnd_state) is never made live again by a replayed OPEN or ACCEPTED or a delayed create answer.",
+  "message": "CANCELED for late invoice o2#1 (via lookup) left it not-created/OPEN",
+  "seed": 1,
+  "case": 8,
+  "config": {
+    "scale": "small",
+    "budget": false,
+    "limit": "10000"
+  },
+  "failingStep": 7,
+  "originalSteps": 28,
+  "events": [
+    {
+      "t": "create",
+      "p": "p0",
+      "order": 2,
+      "hold": false
+    },
+    {
+      "t": "answer",
+      "kind": "create",
+      "pick": 0.5,
+      "mode": "in-transit"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "answer",
+      "kind": "lookup",
+      "pick": 0.75,
+      "mode": "ok"
+    },
+    {
+      "t": "create",
+      "p": "p0",
+      "order": 2,
+      "hold": false
+    },
+    {
+      "t": "answer",
+      "kind": "create",
+      "pick": 0.5,
+      "mode": "ok"
+    },
+    {
+      "t": "create.arrive",
+      "pick": 0.75
+    }
+  ],
+  "states": {
+    "call": {
+      "proc": "p0",
+      "method": "applyInvoice",
+      "args": [
+        {
+          "paymentHash": "o2#1",
+          "state": "CANCELED",
+          "settleIndex": "0",
+          "amtPaidMsat": "0",
+          "htlcs": 0
+        },
+        "lookup"
+      ]
+    },
+    "before": {
+      "invoices": {
+        "o2#1": {
+          "order": "o2",
+          "state": "not-created",
+          "late": "OPEN",
+          "amount": "7000"
+        },
+        "o2#2": {
+          "order": "o2",
+          "state": "open",
+          "amount": "7000"
+        }
+      },
+      "orders": {
+        "o2": "awaiting-payment"
+      },
+      "fulfillments": [],
+      "ledger": [],
+      "cursor": {
+        "settle": "0",
+        "add": "0"
+      },
+      "entries": [],
+      "outbox": []
+    },
+    "after": {
+      "invoices": {
+        "o2#1": {
+          "order": "o2",
+          "state": "not-created",
+          "late": "OPEN",
+          "amount": "7000"
+        },
+        "o2#2": {
+          "order": "o2",
+          "state": "open",
+          "amount": "7000"
+        }
+      },
+      "orders": {
+        "o2": "awaiting-payment"
+      },
+      "fulfillments": [],
+      "ledger": [],
+      "cursor": {
+        "settle": "0",
+        "add": "0"
+      },
+      "entries": [],
+      "outbox": []
+    }
+  },
+  "mutant": "canceled-final-for-open-accepted--m8c.cjs"
+}

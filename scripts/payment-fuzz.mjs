@@ -1369,10 +1369,12 @@ function reconcileOracle(model, lnd, window, now) {
     const credentials = [...new Set(list.map(item => item.credential))].sort();
     const found = settlementOf.get(hash);
     const created = typeof found === 'object' ? Number(found.createdAtNs / 1_000_000n) : null;
-    // As reconcile states it: the first journaled request for the hash, in file order.
+    // Reconcile judges historical against the earliest request time (audit 1.4.0), not file order.
     const firstInFile = Date.parse(list[0].time);
     const earliest = Math.min(...list.map(item => Date.parse(item.time)));
-    const kind = credentials.length > 1 ? 'ambiguous' : created !== null && created < firstInFile - CLOCK_TOLERANCE_MS ? 'historical' : 'single';
+    // A requester watch could not identify may be any credential: the payment is attributed to none (audit 1.4.0).
+    const kind = credentials.some(credential => UNIDENTIFIED.has(credential)) ? 'unidentified' : credentials.length > 1 ? 'ambiguous'
+      : created !== null && created < earliest - CLOCK_TOLERANCE_MS ? 'historical' : 'single';
     attribution.set(hash, { kind, credentials, created, earliest, firstInFile });
     if (kind === 'single' && typeof found === 'object') {
       const fromSummary = found.status === 'succeeded' && found.succeededAttempts === 0;
@@ -1496,6 +1498,9 @@ export async function reconcileCampaign(api, { seed, cases, start = 0, scratchRo
   return { stats, timing, failures };
 }
 
+/** Journal credentials that name no credential (a call without a macaroon watch could decode). */
+const UNIDENTIFIED = new Set(['id:none', 'id:undecodable']);
+
 function checkReconcile(result, exit, expected, fail, stats, rendered) {
   const say = (kind, message) => fail(kind, message, rendered);
   if (result.window.since !== iso(expected.since) || result.window.until !== iso(expected.until))
@@ -1519,10 +1524,11 @@ function checkReconcile(result, exit, expected, fail, stats, rendered) {
     if (!oracle) continue;
     stats[item.attribution] = (stats[item.attribution] ?? 0) + 1;
     if (!same(item.credentials, oracle.credentials)) say('attribution', `${item.paymentHash}: credentials ${item.credentials}, requested by ${oracle.credentials}`);
-    if (oracle.credentials.length > 1 && item.attribution !== 'ambiguous') say('attribution', `${item.paymentHash} requested by ${oracle.credentials.length} credentials is ${item.attribution}`);
+    if (oracle.credentials.length > 1 && item.attribution !== 'ambiguous' && oracle.kind !== 'unidentified') say('attribution', `${item.paymentHash} requested by ${oracle.credentials.length} credentials is ${item.attribution}`);
     if (oracle.credentials.length === 1 && item.attribution === 'ambiguous') say('attribution', `${item.paymentHash} requested by one credential is ambiguous`);
     const created = item.settlement.createdAt === null ? null : Date.parse(item.settlement.createdAt);
-    if (oracle.credentials.length === 1 && created !== null && created < oracle.earliest - CLOCK_TOLERANCE_MS && item.attribution !== 'historical')
+    if (oracle.credentials.length === 1 && oracle.kind !== 'unidentified' && created !== null && created < oracle.earliest - CLOCK_TOLERANCE_MS
+      && item.attribution !== 'historical')
       say('attribution', `${item.paymentHash}: LND created it at ${item.settlement.createdAt}, before every journaled request (${iso(oracle.earliest)}), but it is ${item.attribution}`);
     if (item.attribution === 'historical' && !(created !== null && created < oracle.earliest - CLOCK_TOLERANCE_MS)) stats.historicalByFileOrder++;
     if (item.attribution !== oracle.kind) say('attribution', `${item.paymentHash} is ${item.attribution}, expected ${oracle.kind}`);
@@ -1545,7 +1551,9 @@ function checkReconcile(result, exit, expected, fail, stats, rendered) {
     if (row.inFlightMsat !== total('inFlightMsat')) say('credential', `${row.credential}: inFlightMsat ${row.inFlightMsat}, its single payments ${total('inFlightMsat')}`);
     if (row.payments !== row.succeeded + row.failed + row.inFlight + row.notFound + row.unknown) say('credential', `${row.credential}: payments ${row.payments} != the sum of its outcomes`);
     if (row.payments !== singles.length) say('credential', `${row.credential}: payments ${row.payments}, single payments credited ${singles.length}`);
-    const ambiguous = result.payments.filter(item => item.attribution === 'ambiguous' && item.credentials.includes(row.credential)).length;
+    // An identified credential that shares a hash with an unidentified requester counts it as ambiguous.
+    const ambiguous = result.payments.filter(item => (item.attribution === 'ambiguous' || (item.attribution === 'unidentified'
+      && !UNIDENTIFIED.has(row.credential))) && item.credentials.includes(row.credential)).length;
     if (row.ambiguous !== ambiguous) say('credential', `${row.credential}: ambiguous ${row.ambiguous}, expected ${ambiguous}`);
     const historical = result.payments.filter(item => item.attribution === 'historical' && item.credentials[0] === row.credential).length;
     if (row.historical !== historical) say('credential', `${row.credential}: historical ${row.historical}, expected ${historical}`);

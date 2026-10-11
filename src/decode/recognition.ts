@@ -1,11 +1,22 @@
 import { isL402Identifier, validMacaroonIdentifier, macaroonEosEnd, macaroonPacketRange, macaroonSectionRange } from './index.js';
 
+// Identifier parsing one macaroonEnds call may do, in bytes read by the protobuf parser per byte
+// of its input (audit 1.4.0). Nested candidate headers can share one long identifier tail, so
+// parsing each in full costs the input length times the number of candidates. Only the bytes a
+// check actually reads are charged: a candidate refused at its first field costs a few bytes,
+// whatever its length. Past the budget a structurally complete candidate is taken as a
+// credential without finishing its identifier check: recognition then redacts more, never less.
+const IDENTIFIER_PARSE_BUDGET_PER_BYTE = 4;
+// Floor for short inputs, so a few real credentials in a small value are always parsed.
+const IDENTIFIER_PARSE_BUDGET_MIN = 65_536;
+
 // Packet and caveat endings depend only on their byte offset. Compute them
 // backwards once per decoded run so candidate headers can share a long tail.
 export function macaroonEnds(bytes: Buffer): (start: number) => number | null {
   if (!bytes.includes(2)) return () => null;
   const tails = new Int32Array(bytes.length + 1).fill(-1);
   const identifiers = new Map<number, boolean>();
+  const meter = { remaining: Math.max(IDENTIFIER_PARSE_BUDGET_MIN, IDENTIFIER_PARSE_BUDGET_PER_BYTE * bytes.length) };
   function packet(start: number): [bigint, bigint, number, number] | null {
     const item = macaroonPacketRange(bytes, start);
     return item ? [BigInt(item.kind), BigInt(item.end - item.start), item.start, item.end] : null;
@@ -19,7 +30,7 @@ export function macaroonEnds(bytes: Buffer): (start: number) => number | null {
     if (cached !== undefined) return cached;
     // LND macaroons, and L402 macaroons (Aperture identifiers), are redacted alike.
     const identifier = bytes.subarray(start, end);
-    const valid = validMacaroonIdentifier(identifier) || isL402Identifier(identifier);
+    const valid = isL402Identifier(identifier) || validMacaroonIdentifier(identifier, meter);
     identifiers.set(start, valid);
     return valid;
   }

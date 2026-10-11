@@ -266,15 +266,17 @@ it('CP-008/B7 missing paths and unsafe malformed literals reach the stated stage
 });
 
 it('CP-008/B8 TTY stdin is refused promptly without reading', async () => {
-  const stdin = Readable.from([]) as Readable & { isTTY?: boolean };
+  // A terminal that never sends anything and never ends: a command that waited on it could not
+  // return at all, so its result is the proof that it did not wait (no wall-clock bound).
+  const stdin = new Readable({ read() { /* never pushes, never ends */ } }) as Readable & { isTTY?: boolean };
   stdin.isTTY = true;
   const read = vi.spyOn(stdin, 'read');
   const implementation = await loadCommand();
-  const started = performance.now();
   const result = await implementation.run(['-', '--json'], { stdin, fs, clock: () => new Date() });
-  expect(performance.now() - started).toBeLessThan(1000);
   expect(result.error).toMatchObject({ code: 2, step: null });
   expect(read).not.toHaveBeenCalled();
+  expect(stdin.listenerCount('data') + stdin.listenerCount('readable') + stdin.listenerCount('end')).toBe(0);
+  stdin.destroy();
 });
 
 it('CP-008/B9 raw negative inputs respect input parsing and text forms reach decoder stages', () => {

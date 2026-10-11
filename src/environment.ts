@@ -21,16 +21,31 @@ export function supportedNode(version: string): boolean {
  * NODE_DEBUG and NODE_OPTIONS (audit 1.2.1): an inspector, a CPU or heap profile, a heap
  * snapshot, a diagnostic report, tracing or a TLS key log would hold or expose what macwarden
  * handles. Flags that only size the runtime (--max-old-space-size) or select a syntax are allowed.
+ * Node and V8 read `_` and `-` in an option name alike (`--tls_keylog`, `--cpu_prof`), so the name
+ * is normalised before matching; the value after `=` is left alone. `--log` is V8's logger.
  */
-const DIAGNOSTIC_FLAG = /^--?(?:inspect|debug|cpu-prof|heap-prof|heapsnapshot|report|diagnostic|trace|prof\b|track-heap|tls-keylog|logfile|log-|perf-)/i;
-export function unsafeNodeFlags(execArgv: readonly string[]): boolean { return execArgv.some(flag => DIAGNOSTIC_FLAG.test(flag)); }
+const DIAGNOSTIC_FLAG = /^--?(?:inspect|debug|cpu-prof|heap-prof|heapsnapshot|report|diagnostic|trace|prof\b|track-heap|tls-keylog|logfile|log\b|perf-)/i;
+export function unsafeNodeFlags(execArgv: readonly string[]): boolean {
+  return execArgv.some(flag => DIAGNOSTIC_FLAG.test(flag.split('=', 1)[0].replace(/_/g, '-')));
+}
+
+/**
+ * Every value of `name` in `env`, whatever the letter case of its key. Windows environment names
+ * are case-insensitive (Node reads `node_options` as NODE_OPTIONS there), and a copy such as
+ * `{ ...process.env }` keeps each key as it was spelled, so an exact-case lookup missed them. The
+ * match is case-insensitive on every platform: refusing `node_options` on POSIX, where Node
+ * ignores it, costs nothing.
+ */
+function values(env: Record<string, string | undefined>, name: string): string[] {
+  return Object.keys(env).filter(key => key.toUpperCase() === name).map(key => env[key] ?? '');
+}
 
 export function unsafeNodeDiagnostics(env: Record<string, string | undefined>): boolean {
-  const debug = (env.NODE_DEBUG ?? '').split(/[\s,]+/).some(pattern => {
+  const debug = values(env, 'NODE_DEBUG').join(',').split(/[\s,]+/).some(pattern => {
     // Node's debug categories support '*' wildcards; other metacharacters are literal.
     const expression = pattern.replace(/[|\\{}()[\]^$+?.]/g, '\\$&').replace(/\*/g, '.*');
     const enabled = new RegExp(`^${expression}$`, 'i');
     return ['http', 'https', 'tls', 'net'].some(category => enabled.test(category));
   });
-  return debug || (env.NODE_OPTIONS ?? '').length > 0;
+  return debug || values(env, 'NODE_OPTIONS').some(value => value.length > 0);
 }

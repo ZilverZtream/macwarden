@@ -1,7 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { Invoice } from '../lnd/types.ts';
 import { entriesFor, legsFor, post, type JournalEntry } from '../ledger/journal.ts';
-import { migrateReceiverLedger } from '../ledger/migrate.ts';
+import { migrateReceiverLedger, upgradeReceiverLedger } from '../ledger/migrate.ts';
 import { migrateReceiverOutbox } from '../outbox/migrate.ts';
 import { enqueue, fulfillOrder, outboxRows, type OutboxRow } from '../outbox/outbox.ts';
 import { invoiceSettled, receiverDoublePayment, underpaidSettlement } from '../ledger/postings.ts';
@@ -13,7 +13,7 @@ import { changes, immediate, int, nowIso, openDatabase, optionalInt, optionalTex
  *
  * - order_id       the business operation
  * - payment_hash   the invoice LND tracks for it
- * - deliveries     every invoice update received, from any source, repeats included
+ * - deliveries     every invoice update received, from any source; a repeat that changed nothing is logged once
  * - fulfillments   the business effect, at most once per (payment_hash, order_id)
  * - journal        the double-entry ledger (src/ledger/): an invoice-settled entry at most once per
  *                  payment hash, posted in the transaction that records the settlement
@@ -95,7 +95,28 @@ migrateReceiverOutbox, `
 -- deliveries (the timeline) scanned every delivery. Both now read in their output order.
 CREATE INDEX IF NOT EXISTS invoices_by_order ON invoices (order_id, created_at);
 CREATE INDEX IF NOT EXISTS deliveries_by_payment ON deliveries (payment_hash, delivery_id);
-`];
+`, `
+-- 6: an invoice LND settled for less than its order (underpaid-settlement) no longer counts as the order's
+-- live invoice: the order still awaits payment, and a replacement invoice may be issued for it.
+DROP INDEX IF EXISTS invoices_one_live_per_order;
+CREATE UNIQUE INDEX invoices_one_live_per_order ON invoices (order_id) WHERE ${live('invoices')};
+-- The settle cursor moves contiguously over the settle indexes the subscription delivered (applyInvoice): one lookup per index.
+CREATE INDEX IF NOT EXISTS deliveries_by_settle_index ON deliveries (source, settle_index);
+`,
+// 7: the journal's 1.3 upgrade (src/ledger/migrate.ts, upgradeReceiverLedger): idempotent, a no-op on a fresh book.
+upgradeReceiverLedger];
+
+/**
+ * An invoice that is its order's live invoice: one that may still be paid (creating, open,
+ * accepted) or that was settled in full. One settled for less than the order (an
+ * underpaid-settlement) is not: the order still awaits payment and may get a replacement.
+ * A settled record without an amount counts as live. The unique index invoices_one_live_per_order
+ * and every query that looks for an order's live invoice use this predicate.
+ */
+function live(table: string): string {
+  return `(${table}.state IN ('creating', 'open', 'accepted') OR (${table}.state = 'settled'
+    AND (${table}.amt_paid_msat IS NULL OR ${table}.amt_paid_msat >= ${table}.amount_msat)))`;
+}
 
 export type InvoiceRecordState = 'creating' | 'open' | 'accepted' | 'settled' | 'canceled' | 'not-created';
 export type DeliverySource = 'subscription' | 'lookup' | 'single-subscription' | 'settle-call' | 'create-call';
@@ -154,11 +175,14 @@ const LND_TO_RECORD: Record<string, InvoiceRecordState | undefined> = {
 };
 
 /**
- * States only move forward; a stale delivery never moves a record back. Canceled is final for
- * a replayed OPEN or ACCEPTED, but settled outranks it: an invoice LND reports SETTLED after a
- * CANCELED was recorded (a stale or wrong cancel) was paid, and the record says so.
+ * States only move forward; a stale delivery never moves a record back from canceled or settled.
+ * Canceled is final for a replayed OPEN or ACCEPTED, but settled outranks it: an invoice LND
+ * reports SETTLED after a CANCELED was recorded (a stale or wrong cancel) was paid, and the
+ * record says so. Open and accepted rank alike (as in LATE_RANK below): LND returns a hold
+ * invoice from ACCEPTED to OPEN when its accepted HTLCs are canceled or time out, so either can
+ * follow the other, and the record takes LND's latest word (an OPEN clears the amount paid).
  */
-const RANK: Record<InvoiceRecordState, number> = { 'not-created': 0, creating: 0, open: 1, accepted: 2, canceled: 3, settled: 4 };
+const RANK: Record<InvoiceRecordState, number> = { 'not-created': 0, creating: 0, open: 1, accepted: 1, canceled: 3, settled: 4 };
 /**
  * The order for LND's state of a late invoice (late_lnd_state), so a stale delivery never moves
  * it back from CANCELED or SETTLED. OPEN and ACCEPTED rank alike: LND returns a hold invoice
@@ -194,7 +218,7 @@ export class ReceiverStore {
   }
 
   liveInvoiceForOrder(orderId: string): InvoiceRecord | undefined {
-    const row = this.db.prepare(`SELECT * FROM invoices WHERE order_id = ? AND state IN ('creating', 'open', 'accepted', 'settled')`).get(orderId);
+    const row = this.db.prepare(`SELECT * FROM invoices WHERE order_id = ? AND ${live('invoices')}`).get(orderId);
     return row === undefined ? undefined : invoiceFrom(row);
   }
 
@@ -333,7 +357,7 @@ export class ReceiverStore {
     return immediate(this.db, () => {
       this.db.prepare(`UPDATE invoices SET state = CASE WHEN state = 'creating' THEN 'open'
           WHEN state = 'not-created' AND (late_lnd_state IS NULL OR late_lnd_state IN ('OPEN', 'ACCEPTED')) AND NOT EXISTS (SELECT 1 FROM invoices other WHERE other.order_id = invoices.order_id
-            AND other.payment_hash <> invoices.payment_hash AND other.state IN ('creating', 'open', 'accepted', 'settled'))
+            AND other.payment_hash <> invoices.payment_hash AND ${live('other')})
             AND EXISTS (SELECT 1 FROM orders WHERE orders.order_id = invoices.order_id AND orders.state = 'awaiting-payment') THEN 'open'
           ELSE state END,
           late_lnd_state = CASE WHEN state = 'not-created' AND late_lnd_state IS NULL THEN 'OPEN' ELSE late_lnd_state END,
@@ -366,7 +390,7 @@ export class ReceiverStore {
   /** Whether a not-created record may not become its order's live invoice: another one is live, or the order is decided. */
   #mayNotAdopt(record: InvoiceRecord): boolean {
     return this.db.prepare(`SELECT 1 AS n FROM invoices WHERE order_id = ? AND payment_hash <> ?
-      AND state IN ('creating', 'open', 'accepted', 'settled')`).get(record.orderId, record.paymentHash) !== undefined
+      AND ${live('invoices')}`).get(record.orderId, record.paymentHash) !== undefined
       || this.order(record.orderId)?.state !== 'awaiting-payment';
   }
 
@@ -376,21 +400,59 @@ export class ReceiverStore {
    * journal entry are inserted, keyed on (payment_hash, order_id) and on the
    * payment hash, with the fulfill-order outbox row keyed on order_id:payment_hash. A repeat of the same settlement finds both keys present and
    * changes nothing else.
+   * A delivery that changed nothing (`unchanged` or `unknown-invoice`) and repeats the latest
+   * delivery logged for its hash (same source, LND state, settle index and outcome) is not logged
+   * again: reconciliation looks every open invoice up on every pass, and the subscription reports
+   * invoices of other receivers, so logging each repeat would grow the table without bound. Every
+   * delivery that changed something, and the first of each run of repeats, is logged.
    * Only subscription deliveries move the cursor, because only the
-   * subscription delivers settlements in settle-index order.
+   * subscription delivers settlements in settle-index order; the settle cursor moves only
+   * contiguously over the settle indexes it delivered (#advanceSettleCursor).
    */
   applyInvoice(invoice: Invoice, source: DeliverySource): DeliveryOutcome {
     return immediate(this.db, (): DeliveryOutcome => {
       const now = nowIso();
       const outcome = this.#apply(invoice, now);
-      this.db.prepare(`INSERT INTO deliveries (payment_hash, source, lnd_state, settle_index, outcome, received_at)
-        VALUES (?, ?, ?, ?, ?, ?)`).run(invoice.paymentHash, source, invoice.state, invoice.settleIndex, outcome, now);
+      const repeat = (outcome === 'unchanged' || outcome === 'unknown-invoice') && this.db.prepare(`SELECT 1 AS n FROM
+          (SELECT source, lnd_state, settle_index, outcome FROM deliveries WHERE payment_hash = ? ORDER BY delivery_id DESC LIMIT 1)
+        WHERE source = ? AND lnd_state = ? AND settle_index = ? AND outcome = ?`)
+        .get(invoice.paymentHash, source, invoice.state, invoice.settleIndex, outcome) !== undefined;
+      if (!repeat) {
+        this.db.prepare(`INSERT INTO deliveries (payment_hash, source, lnd_state, settle_index, outcome, received_at)
+          VALUES (?, ?, ?, ?, ?, ?)`).run(invoice.paymentHash, source, invoice.state, invoice.settleIndex, outcome, now);
+      }
       if (source === 'subscription') {
-        this.db.prepare(`UPDATE subscription_cursor SET settle_index = MAX(settle_index, ?), add_index = MAX(add_index, ?), updated_at = ?
-          WHERE name = 'invoices'`).run(invoice.settleIndex, invoice.addIndex, now);
+        this.db.prepare(`UPDATE subscription_cursor SET add_index = MAX(add_index, ?), updated_at = ? WHERE name = 'invoices'`)
+          .run(invoice.addIndex, now);
+        this.#advanceSettleCursor(invoice.settleIndex);
       }
       return outcome;
     });
+  }
+
+  /**
+   * The settle cursor moves only over settle indexes the subscription has delivered, contiguously: from cursor c it moves to
+   * c + 1 when a subscription delivery with settle index c + 1 is logged, then on over c + 2, c + 3, … as long as each has
+   * one. SubscribeInvoices sends its add backlog first, each invoice in its current state, so a settled invoice with a high
+   * settle index can come before the settle backlog's lower ones; moving to the highest index seen would skip those if the
+   * listener stopped in between, and a restart from that cursor would never deliver them. The add cursor keeps the highest
+   * add index seen: the add backlog and new invoices come in add-index order, and the settle backlog comes after the add
+   * backlog, so no add index below it is still to come. Runs inside applyInvoice's transaction.
+   *
+   * A cursor of zero is the exception: LND replays no settlement for it, so the indexes below the first one the
+   * subscription delivers will never come (they were settled before the listener started, and reconciliation looks
+   * those invoices up). The first delivered settle index `settleIndex` therefore becomes the cursor, and it moves on from
+   * there as above; otherwise a listener started on a node whose settle index is past 1 would keep a cursor of zero, and
+   * every restart would replay nothing.
+   */
+  #advanceSettleCursor(settleIndex: bigint): void {
+    const start = this.cursor().settleIndex;
+    const delivered = this.db.prepare(`SELECT 1 AS n FROM deliveries WHERE source = 'subscription' AND settle_index = ? LIMIT 1`);
+    let cursor = start === 0n && settleIndex > 0n ? settleIndex : start;
+    while (delivered.get(cursor + 1n) !== undefined) cursor += 1n;
+    if (cursor !== start) {
+      this.db.prepare(`UPDATE subscription_cursor SET settle_index = ? WHERE name = 'invoices'`).run(cursor);
+    }
   }
 
   #apply(invoice: Invoice, now: string): DeliveryOutcome {
@@ -398,6 +460,8 @@ export class ReceiverStore {
     if (record === undefined) return 'unknown-invoice';
     const next = LND_TO_RECORD[invoice.state];
     if (next === undefined) return 'unchanged';
+    // SETTLED with nothing paid is not a settlement LND can report: an unreadable answer, which changes nothing.
+    if (next === 'settled' && invoice.amtPaidMsat <= 0n) return 'unchanged';
     // One settlement per payment hash, whichever event posted it: invoice-settled and
     // underpaid-settlement have different (event, reference) keys, so posting idempotency alone
     // would let LND reporting a second, different amount post both (and fulfill an underpaid order).
@@ -430,10 +494,16 @@ export class ReceiverStore {
       if (next === 'open' || next === 'accepted') return behind ? 'unchanged' : 'late-invoice';
       if (next === 'canceled') return moved ? 'state-updated' : 'unchanged';
     }
+    // Forward, or between open and accepted (which rank alike, see RANK) when LND's state differs from the record's.
+    let move = !blocked && RANK[next] === RANK[record.state] && next !== record.state;
     if (!blocked && (RANK[next] > RANK[record.state] || (record.state === 'creating' && next === 'open'))) {
+      move = true;
+    }
+    if (move) {
       this.db.prepare(`UPDATE invoices SET state = ?, settle_index = ?, amt_paid_msat = ?, add_index = COALESCE(add_index, ?),
         payment_request = COALESCE(payment_request, ?), updated_at = ? WHERE payment_hash = ?`)
-        .run(next, invoice.settleIndex === 0n ? null : invoice.settleIndex, invoice.amtPaidMsat, invoice.addIndex,
+        // An OPEN invoice holds no accepted HTLCs, so nothing is paid (a hold invoice LND returned from ACCEPTED to OPEN).
+        .run(next, invoice.settleIndex === 0n ? null : invoice.settleIndex, next === 'open' ? 0n : invoice.amtPaidMsat, invoice.addIndex,
           invoice.paymentRequest === '' ? null : invoice.paymentRequest, now, invoice.paymentHash);
       outcome = 'state-updated';
       if (next === 'canceled') {

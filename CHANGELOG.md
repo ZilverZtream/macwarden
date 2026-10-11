@@ -1,5 +1,155 @@
 # Changelog
 
+## 1.3.1 (2026-10-11)
+
+Fixes from a section-by-section audit of 1.3.0 and a second external audit. No new features.
+
+### Security
+
+- `inspect` and `scan` graded an L402 value that carried an admin LND macaroon among several macaroons as L402 `READ`, so `scan --fail-on` did not count it. Such a value is now graded as its LND macaroon (the highest grade when there are several), and `scan` reports every LND macaroon in it at its own column.
+- `inspect` did not check `NODE_OPTIONS` and `NODE_DEBUG` when run from the command line, as the 1.2.1 release described; it now does.
+- Node diagnostic flags written with underscores (`--tls_keylog`, `--cpu_prof`, `--heap_prof`, `--track_heap_objects` and the like), and V8's `--log`, were accepted; they are now refused with exit 2 like their dashed spellings.
+- An `lndconnect://` URI with a second, percent-encoded `macaroon` parameter (`%6Dacaroon=`) was read with one of the two macaroons; it is now refused.
+- `recommend` printed a narrowing command that dropped the credential's expiry or IP lock; a recorded expiry duration is now carried as `--expires`, and any caveat `bake` cannot reproduce withholds the command with warning `recommendation-caveats`.
+- `recommend` suggested narrowing or revoking a canary; it now warns `canary-not-narrowed` instead.
+- `recommend` could print a narrowing command whose credential outlived the original; `--expires` is now capped by the original's remaining lifetime, an expired original gets warning `recommendation-expired` with rotate or revoke advice instead of a command, and an expiry that cannot be parsed withholds the command.
+- On Windows, `NODE_OPTIONS` and `NODE_DEBUG` written in another letter case (`node_options`, `Node_Debug`), which Node applies there, were not checked, so every command ran with them; they are now refused with exit 2 like the upper-case names.
+- `scan --git-history` refuses a link in the git directory or a location file whose target is a Windows 8.3 short name (or another file system alias) of a protected file.
+- `reconcile` attributed a payment to a single credential when a request for it came from a caller watch could not identify (`id:none` or `id:undecodable`). Such a payment is now reported with attribution `unidentified`, counted in no credential's totals, and keeps the run from exit 0.
+- `reconcile` did not list in `deletedBy` a payment-record deletion that watch could not read in full (oversized or malformed request), although LND may have carried it out; it now associates such a deletion with every journaled payment.
+- `watch --alert-command`: when several canaries alerted while an alert command was running, only the newest waiting alert ran and the others were dropped without notice; each canary now keeps its own waiting alert, run in order.
+- `watch` did not check the node behind the endpoint again on reconnect; a different node now ends the run with exit 4 instead of recording its calls under the first node.
+- `watch`: attribution still queued from a lost session could take over a request ID that LND reused in the next session, hiding the new call and recording its error under the old method and credential; request IDs are now matched only within their own session.
+- A Core Lightning rune limited to `listconfigs`, which returns bitcoind's RPC password, was graded `READ`; it is now `UNASSESSED`.
+- `scan --git-history` followed a symlink in the repository's git directory or location files to a network path; every location is now resolved link by link, and a UNC or device target is refused before it is touched.
+- `scan --git-history` read include paths in `.git/config` differently from git, so quoting, comments without spaces and line continuations could hide a protected or network include from the location check; include values are now read as git reads them, and a nested include is resolved from the including file's path, not from its link target.
+- `scan --git-history` refuses a repository whose refs or other git-directory files link to a protected file or a network path, refuses `~user/` include paths, and expands `~/` from the same home directory git is given.
+- `scan --git-history` could run git from a relative `PATH` entry such as the scanned directory; git is now found once in absolute `PATH` entries and run by its absolute path.
+- `scan` reported only the lndconnect credential when an lndconnect URI also held a different macaroon in another query parameter; the other credential is now reported.
+- `scan` skipped a raw binary macaroon or Aperture token file stored under a name other than `*.macaroon` (such as `admin.macaroon.bak`) as binary; it is now read as a credential file.
+- `scan` missed or only flagged as undecodable a percent-encoded standard base64 macaroon (`%2B`, `%2F`, `%3D`); it is now decoded and graded.
+- `scan` missed a Core Lightning rune given as `"--rune", "<rune>"` in an MCP or JSON args array, a TOML array or a YAML flow list, and in JSON held inside a JSON string.
+- `scan node_modules` or `scan .git` given as a path argument scanned nothing and exited 0; the argument is now scanned.
+- `inventory --report` did not escape bidirectional, invisible and Unicode whitespace characters or the `##[` marker; they are now escaped in every format, and on stdout.
+- On Windows, a dangling symbolic link at the registry lock or claim path was followed when the lock was taken; the lock is now refused and the file created through the link removed.
+- On POSIX, a registry directory owned by another user was accepted; it is now refused unless owned by the current user or root.
+- The registry was read by path after its size was checked, so a file replaced or grown in between was read whole; it is now read through the checked file's descriptor and at most 64 MiB.
+- `watch --payment-journal` followed a symbolic link at the journal path or its `.lock` path and journaled to its target; it now refuses such a path (exit 3 at W6), as specified.
+- The release workflow now publishes the exact tarball that its tests verified, only for a tagged commit on main, from a separate job that runs no dependency scripts while it holds the publishing token.
+
+### Fixed
+
+- CLI: `macwarden --json` alone was reported as "unknown flag", and `macwarden --json <command> …` and `macwarden --version --json` were refused. The first is now "missing command", the second runs the command with `--json`, and the third prints the version as one JSON document.
+- CLI: a second SIGINT, SIGTERM or SIGHUP while a command was blocked in a call that does not observe the interrupt did nothing; it now prints the interrupt result (exit 6, or 7 once a change may have reached LND) and ends the process. `watch` is not affected.
+- CLI: an unexpected exception in a command that then never resumed ended the process with exit 8 and no output; the internal error is now printed once (one JSON document with `--json`).
+- CLI: waiting for output to be flushed before an interrupt exit could exceed its 2-second limit when the system clock was set back; the limit now uses a monotonic clock.
+- `inspect` narrowed L402 text holding a character above U+007F to bytes (U+013A was read as `:`); such text is now refused.
+- `inspect` read the hex or base64 encoding of a rune, an NWC URI or an L402 value as that credential kind; hex, base64 and lndconnect input is now read as a macaroon only, and such an encoding exits 3.
+- `inspect`: an L402 macaroon whose preimage is in a third-party caveat ID is checked against that preimage, as Aperture does, and that caveat is withheld from output; a `_valid_until` value with leading zeros is read as Aperture reads it instead of being reported as unparseable.
+- Output redaction of nested macaroon-shaped data in a caveat or scanned file took tens of seconds for crafted inputs of a few hundred kilobytes; it now takes time linear in its size.
+- `scan` stops at the findings limit as soon as findings of files scanned out of order exceed it, instead of first scanning every file already queued.
+- `scan`: an ignore file with many long failing globs could make a scan take minutes; glob matching work is now bounded, and findings beyond the bound are kept.
+- `scan --agent-configs` failed with exit 3 when a well-known location was a link to a missing file, and treated a location it could not examine as absent; the first is now absent, the second fails the scan.
+- `scan` read an explicit symlink argument that points to a `*.macaroon` file as text, and could skip a distinct file as a duplicate on file systems whose file IDs are truncated (ReFS, Dev Drive).
+- `scan`: SARIF and GitHub output now name every file not opened because its name looks like a wallet secret; the unknown-flag message lists `--agent-configs` and `--format`.
+- `scan --git-history` with a file argument spelled in another case now scans that file's history on Windows and macOS, and scans files in trees and blobs that a tag names directly, and older stash entries.
+- `scan --git-history` bounds the memory a history listing uses for commits and path names, failing as too large to scan instead of exhausting memory; history paths that are not valid UTF-8 stay distinct; a `.git` file is read only in git's own `gitdir: <path>` format.
+- `scan --git-history` on Windows reports committed names containing `\` or `..` below the scanned path, and `\` counts as a separator for the `.git`/`node_modules` rule.
+- Bounded file reads compare file identities exactly on Windows, and a failed close no longer hides the read's own error.
+- `inventory` warns `usage-incomplete` when the usage file is incomplete, and the access review marks usage as incomplete or unreadable instead of "not observed".
+- `inventory --report` writes the expiry as a UTC instant, and `--json` `result.report.review` matches the escaped report; `inventory` reports no `expires` for an expiry outside the years 0000 to 9999, so its JSON matches the published schema.
+- `inventory` text output for very large node inventories renders in linear time; `inventory` and `recommend` take the latest last use by time, not by text, when timestamps have different precision.
+- `recommend` warns `usage-incomplete` when usage records were evicted or calls went unattributed, even when no record remains for the selected credential.
+- `recommend` prints a revoke step that names the root key ID when the label is shared (for example while a rotation is staged), and never suggests a label equal to the original or to another active label.
+- `recommend` left methods that were only ever refused in the recommendation and then withheld it as broader; they are now left out, and warning `recommendation-denied` names them.
+- `bake --canary --dry-run --json` printed a `canary` field that `schemas/output/bake.schema.json` did not allow; the schema now accepts it on a plan.
+- `rotate --finish` deleted the old root key even when the replacement file had been removed or overwritten while the confirmation prompt was open, leaving the app without a valid credential. The replacement file is now read again after confirmation and must still hold the same credential; otherwise the run exits 3 at F7 with nothing changed.
+- `attenuate` exited 8 "internal" for an input whose caveats, with the requested ones, exceeded 4,096; it now refuses such an input with exit 3 at A4 before writing anything.
+- `respond`: an interrupted batch that left a file system call pending (an `--out` check on a stalled mount) printed its result and then kept the process alive; it now exits with its code (6 or 7) as soon as the result is written.
+- `respond` lists a root key ID only once when LND returns it twice; `respond` and `verify` read the TLS certificate from the resolved path they checked.
+- A ListMacaroonIDs answer that lists a root key ID twice is refused as an invalid LND response (exit 5).
+- `watch`: a wall clock stepping forward (NTP on a host without a real-time clock, a restored VM snapshot) was counted as observed coverage, which could let `recommend` treat minutes of observation as days; coverage is now measured on a monotonic clock.
+- `watch`: a wall clock stepping back paused the periodic usage-file writes, the reconnect registry re-read and the stable-session backoff reset for the length of the step; these timers now use a monotonic clock.
+- `watch`: after a reconnect, or after many distinct calls, every further message of a live stream could be counted as a new call; request IDs are now kept after their response and forgotten least recently seen first, and a message of a stream whose opening the session never saw is recognised by LND's stream flag (`stream_rpc`) and not counted again.
+- `watch`: once output was closed (EPIPE), every drop notice counted itself as a new drop, so `droppedEvents` grew every 5 s for the rest of the run.
+- `watch`: responses were charged their macaroon size in the attribution queue although nothing is copied for them, so heavy traffic with large macaroons dropped attribution earlier than needed.
+- `watch --until`: a run whose `--until` ran out before LND confirmed the registration reported that it could not register and to check that LND is running; it now says that `--until` expired first.
+- `reconcile`: an authentication failure on TrackPaymentV2, which LND reports inside a stream error body, exits 4 instead of 5; a payment or HTLC status named after a JavaScript object member (`constructor`, `__proto__`, `toString`) is reported as `unknown` instead of breaking the output.
+- `reconcile` compared LND's payment record with the first journaled request in the file, so a payment requested again after a clock was set back between watch runs was reported as `historical` and left out of its credential's totals; it now uses the earliest request, and `observation.first` and `last` are the earliest and latest request times.
+- `reconcile` classified an unattributed payment near `--since` or `--until` as `boundary`; it now classifies it against the coverage around it, so one inside covered time is `covered`.
+- `reconcile` reported a window of no width (`--since` equal to `--until`) at an uncovered instant as complete; it now refuses it with exit 2 at Q1.
+- `reconcile`: the 10 minute budget now runs on a monotonic clock, so a system clock step no longer ends it early (reported as `lookups-limited`) or extends it.
+- Payment journal: record times were pinned to a system clock that stepped forward and was then corrected; within a run they now follow the system clock only while it moves with a monotonic clock, so a real gap after the correction is reported instead of read as covered.
+- Payment journal: coverage reported the time between a watch run's start and its registration with the reason of the gap before the run (or `before-journal` for the first run); it is now `not-registered`.
+- Payment journal: records were counted as dropped when the fsync after a complete write failed; the records are in the file, and journaling still stops with `write-failed`.
+- watch, the payment journal and recommend give a v1-encoded macaroon the same credential identity as its v2 form.
+- `watch` and the payment journal attributed a call whose macaroon was padded past 64 KiB, or whose unsigned location field was padded past 4 KiB, to `id:undecodable`; the macaroon's header is now kept (its first 4 KiB, or up to 64 KiB when the header ends later), so the call is attributed to the credential named in it.
+- `reconcile` reports `journal.firstRecord` and `lastRecord` (and the text output's journal span) as the earliest and latest record times; after a clock was set back between watch runs the span was shown backwards.
+- `reconcile` text output named a payment requested by an unidentified caller `ambiguous`; it now says `unidentified` and lists the journal credentials.
+- `inventory --verify` marked a credential `rejected` when LND reported its root key missing while still listing the root key ID; it now reports `error`, as `verify` does.
+- Loading a usage file holding more records than the limit could keep an older record over a newer one when their times were written with different precision; records are now ordered by time.
+- Registry: a lock that could not be released after a failed acquisition was forgotten by the process; it is now kept, retried and reported as still held.
+- Registry: a lock whose owner record could not be written was left behind when a virus scanner briefly held it, blocking every later run including `--break-lock`; its removal is now retried and, if it stays, the file is named.
+- Registry: `--break-lock` could link a verified stale lock back to the lock path when deleting it failed once, leaving a lock that every later `--break-lock` refused; the delete is now retried and the stale lock is never linked back.
+- Registry: two commands starting at the same moment could fail with advice to delete the `.lock.claim` file; a claim held briefly by another command is now waited for (up to 300 ms), and permission, read-only, disk-full and missing-directory errors say so instead of advising deletion.
+- Registry: on Windows, saving failed after about one second when another program held `registry.json` open; the save now waits about ten seconds and says the file is open in another program.
+- On Windows, a file holding data could be deleted when another program had it open while macwarden was creating it; only an empty file is now removed.
+
+### Changed
+
+- `reconcile`: payment attribution has a new value, `unidentified`, with warning `attribution-unidentified`; such a payment is counted in no credential's totals, an identified credential that also requested its hash counts it under `ambiguous`, and it keeps the run from exit 0.
+- `reconcile` refuses `--since` equal to `--until` (exit 2 at Q1).
+- `recommend` has new warnings `recommendation-caveats`, `recommendation-expired`, `canary-not-narrowed` and `recommendation-denied`, and its `bake` step carries a recorded expiry as `--expires`, capped by the original's remaining lifetime.
+- `inspect` and `scan` grade a rune limited to `listconfigs` `UNASSESSED`, and an L402 value carrying an LND macaroon as that macaroon.
+- `watch` exits 4 at `W5` when a different node answers after a reconnect, and at `W7` when `--until` runs out before the first registration.
+- `inventory` adds warning `usage-incomplete`; the access review shows "not observed (usage incomplete)" or "usage unreadable" where it showed "not observed".
+- `macwarden --version` reports 1.3.1 (read from `package.json`).
+- `scan` text output names each file it never opened because its name matches a protected pattern (`never-opened  <path>`), before the summary line.
+- A command other than `watch` and `respond` that finishes after an interrupt now reports exit 6 with the message "interrupted", as the specification states (it said "operation interrupted before mutation").
+- The release workflow publishes from the GitHub environment `npm-publish`. Before the next tag push, the owner creates that environment with required reviewers and, if npm trusted publishing is configured, sets its environment field to `npm-publish`.
+- Payment lab: the commands that only read (`show`, `budget-show`, `ledger-verify`, `outbox-status`, `explain`, `analysis diagnose`) open the database read-only and never create or migrate it; a database 1.3.0 wrote must first be opened by a command that records, such as `payer reconcile` or `receiver reconcile`.
+- Payment lab: payer migrations 9 and 10 and receiver migrations 6 and 7; a database this version wrote is refused by 1.3.0.
+- Payment lab: receipts and confirmations are written to one directory per profile (`receipts/<profile>/`, `confirmations/<profile>/`); a 1.3 lab's files are moved there when the profile's worker starts.
+
+### Payment lab
+
+- A retried payment was recorded failed, its reservation released and a replacement admitted, when TrackPaymentV2 still showed the earlier submission's FAILED before the retry reached LND; such a snapshot now leaves the payment unresolved, and `payer reconcile` returns a retry LND never received (for example after a crash between the claim and the send) to intent so it can be submitted again.
+- A submission read its number after the claim committed, so a concurrent revert and claim could make it act for another process's submission; the claim now returns its own number.
+- A proxy's 502, 503 or 504 that relayed an LND error body was read with the body's status and could count as a definite refusal; the response's own status now decides.
+- The offline BOLT11 reader accepted non-ASCII characters that case-fold to ASCII letters (such as the Kelvin sign) and took quadratic time on long strings.
+- `payer reconcile` reported a payment unresolved, citing recorded attempts, when its lookup answered NotFound or hit the deadline after another process had recorded the outcome; it now reports the recorded outcome, and names the case where no attempt was recorded.
+- `payer reconcile` opened a TrackPaymentV2 stream for every unresolved payment at once; it now follows at most 16 at a time, and asked a node that ends every stream at once again every second; the pause now grows to 15 s unless a stream changed the record or stayed open.
+- `payer pay` accepted a `--kind` other than the operation's recorded kind for a replacement invoice; it is now a usage error.
+- The receiver's settle cursor could move past settlements SubscribeInvoices had not delivered yet, so a listener stopped in its add backlog lost them; it now moves only over consecutive settle indexes the subscription delivered.
+- The receiver recorded a lookup or create answer that described another payment hash, so a proxy or hostile node could make it record another invoice's settlement or payment request for an order; such an answer is now refused.
+- An invoice LND deleted after canceling it stayed open and blocked its order's next invoice; it is now recorded canceled, as is a late invoice LND deleted.
+- A hold invoice LND returned from ACCEPTED to OPEN stayed recorded accepted; the record now follows it back to open with nothing paid. A SETTLED report with nothing paid is no longer recorded as a settlement.
+- An order whose invoice was settled for less than its amount could not take a replacement invoice; it now can (receiver migration 6).
+- Repeated deliveries that changed nothing were logged on every reconciliation pass; they are now logged once.
+- `payer show` printed the preimage of a succeeded payment, and `analysis payments` printed payment preimages and payment requests; neither does now.
+- A payment or forwarding scan that could not page past a full page was not reported incomplete; it now is, and `analysis diagnose` says so when given the scan.
+- A usage error (a missing or malformed argument, an option given twice, an `--as` such as `toString`) could create or migrate the database; every argument is now checked before anything is opened, and an unknown command or option name is printed escaped. `--fault none` is refused; `--fault` takes only `drop-stream-after-in-flight`.
+- The same order or operation ID in two profiles named one receipt or confirmation file, so the second never got its effect and `outbox-run --once` kept exiting 75.
+- `outbox run` started with its stop signal already set performed a pass; it no longer does.
+- An outbox effect containing characters outside the Basic Multilingual Plane was written with replacement characters; it is now written as is, and the worker checks the written file before acknowledging it.
+- On Linux and macOS a failed directory sync of an outbox effect was ignored; it is now an error, the directory is synced when an earlier attempt's effect is found, and the lab directory is synced after the outbox key is created. An outbox key readable or writable by group or others is refused.
+- A lost `outbox.key` could be recreated while receipts or confirmations signed with it existed in a profile directory; it no longer is.
+- A 1.2.1 database whose invoice was settled underpaid and then in full now migrates into a book that `ledger-verify` accepts; the record takes the fulfilling amount, the change is logged as a `settlement-amount-conflict` delivery, and the receipt carries the ledger entry's amount.
+- The ledger migration did not post the hold and the release of a released 1.2 reservation, and did not record the highest entry it posted; it now does both, and `ledger-verify` reports a released reservation without those entries and an entry whose origin does not match the watermark.
+- A live entry was pinned to a previous entry more than 24 hours ahead of the clock; it no longer is, and `ledger-verify` reports a live entry more than 24 hours ahead of its own clock.
+- `ledger-verify` could not read an entry whose ID is -2^63; it now reads it, reports an entry ID outside ±(2^53 - 1) as malformed, and posting refuses to assign such an ID.
+- `ledger-verify` lost per-payment differences from LND that cancelled out in an account's total; it now lists each (at most 100, with their count) in the summary event and `--json`, and names it in `firstDifference`. On an in-memory store it no longer holds its read transaction open while it reads LND.
+- `payer explain` described a withdrawn payment as reverted to intent; it now says it was never sent and stays failed. It showed an HTLC attempt's final state before the disconnect that preceded it; attempts are now shown at the end of their submission as their last recorded state.
+- `receiver explain` summarised an order canceled and then settled for less as canceled before it was paid, called an earlier unchanged OPEN delivery a replay after CANCELED when the invoice was canceled later, and said the first amount stands for the `settlement-amount-conflict` rows the ledger migration writes, where the fulfilling amount stands.
+- `explain` output and `explain --refresh` grew with the number of payments of one operation or order; the payment lists, the text header and the refresh lookups (at most 200, within 60 seconds) are now bounded.
+- `explain --json` printed a bare error event instead of its document when a record could not be read; `explain` showed budget-actual-principal and budget-overrun events as raw JSON without a rule, and now gives them their own timeline kinds; it also removes 32-byte values written in base64 from the strings it prints.
+- Harness: the oracle now catches a store that takes no budget reservation, a success recorded at the invoice amount instead of LND's, a listener that drops a settlement for an invoice recorded canceled, and an invoice LND holds OPEN counted as unknown by `receiver reconcile`.
+- Harness: the settle-cursor rule checks that the cursor moves contiguously over settlements the subscription delivered, and each case ends with a subscription catch-up after which every settlement LND made must be recorded once at LND's amount; ledger verification compares the posted amounts with the scripted LND's ListPayments and ListInvoices.
+- Harness: a preempt event lets the other process commit between a workflow's read and its write, and the scripted LND can end a subscription, delete a canceled invoice and answer settle and cancel with LND's own errors; it pays with one HTLC attempt at a time, so successful attempts add up to the payment.
+- Harness: the oracle applies the 24-hour recheck window when it computes reconcile targets, so long cases no longer report a false reconcile violation.
+- Harness: mutants are now kept in the repository for the predicates that had none, each caught by its replay, and the product suite runs the recorded replays against the 1.2.0 lab sources (`git archive v1.2.0`).
+- Harness runner: seeds up to 2^32 - 1 are accepted, an empty replay directory exits 2, and replay validation ignores inherited property names.
+
 ## 1.3.0 (2026-10-10)
 
 Payment operations in the example lab (`examples/payment-lab`): a model-based state-machine harness, a double-entry ledger, a transactional fulfillment outbox and `explain`, each verified by independent rounds as in 1.2.1 (oracle fuzzing, mutation testing of the oracle, crash-point kills, 7,000-mutation ledger checks). The product itself takes the fixes of a functional audit of 1.2.1.
@@ -20,7 +170,7 @@ Payment operations in the example lab (`examples/payment-lab`): a model-based st
 - Payment lab explain hardening from verification: every string is scrubbed with invisible characters ignored, payment requests are matched anywhere in a word and in any case, hex runs longer than 64 characters are redacted whole, a 64-hex subject ID is shown as a fingerprint; the journal is indexed once (50,000 entries explain in under a second instead of a minute); output is bounded (timeline 2,000 items, lists 200, HTLC attempts 200 per submission, strings 1,024 characters) with `truncated` counts.
 - Payment lab, from the functional audit: a store whose setup fails (PRAGMA, migration) closes its SQLite handle before the error propagates; a database whose schema version is newer than the code is refused, naming both versions, without writing; lookup indexes (payer migration 8, receiver migration 5) for an operation's payments, a payment's events, an order's invoices and an invoice's deliveries; when LND reports a succeeded value other than the invoice amount, the budget consumes LND's value plus fee as the ledger posts (`budget-actual-principal`, `budget-overrun`); a replacement of an operation another payment completed is withdrawn on NotFound or claim, never reverted to intent or sent; the README states the 24-hour automatic recovery horizon for not-created invoices and `receiver reconcile --order` as the explicit path.
 - Payment lab ledger, from the second verification: a live entry is posted at the later of the clock and the last live entry, so a clock set back flags nothing and `ledger-verify` names the entry that moved; `ledger-verify` checks the receiver's settlements and both books' double-payment entries against the records without LND; a damaged column is a named finding, not exit 4; the output lists the first 100 entries per category with `unbalancedEntryCount`/`invalidEntryCount`; the books are read in batches (100,000 entries in about 2.3 s with bounded memory).
-- Payment lab harness hardening from verification: the oracle runs ledger verification on both books after every step (`ledger-balanced`) and checks outbox rows and HMAC-valid receipts and confirmations against settlements and completions with worker kills at every point (`effects-once`); reconcile counts are checked per invoice; the fake node injects over- and under-payments, re-reported settlements, foreign invoices and failed cancels, and scripted plans drive rare paths; replays are validated before running (exit 2); predicates 1.2.0 already kept are proven by kept mutants (41 of 42 mutants caught, the last equivalent).
+- Payment lab harness hardening from verification: the oracle runs ledger verification on both books after every step (`ledger-balanced`) and checks outbox rows and HMAC-valid receipts and confirmations against settlements and completions with worker kills at every point (`effects-once`); reconcile counts are checked per invoice; the fake node injects over- and under-payments, re-reported settlements, foreign invoices and failed cancels, and scripted plans drive rare paths; replays are validated before running (exit 2); predicates 1.2.0 already kept are proven by kept mutants (six are kept in the repository).
 
 ### Fixed
 

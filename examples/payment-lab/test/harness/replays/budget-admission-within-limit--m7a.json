@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "budget-admission-within-limit",
+  "rule": "Admission follows bigint arithmetic (admitted iff principal + fee allowance <= limit - committed, where committed is computed from the payments themselves: amount + fee limit for each unresolved budgeted payment, value + fee for each succeeded one), never throws on large sums, budgetStatus equals the exact sums of the reservations, and both the reservations and the payments stay within the limit unless LND reported success after a recorded failure or a budget-overrun event records the excess.",
+  "message": "recordIntent threw: amount 9223372036854775809 msat is outside 0 to 2^63 - 1",
+  "seed": 1,
+  "case": 2,
+  "config": {
+    "scale": "huge",
+    "budget": true,
+    "limit": "9223372036854775807"
+  },
+  "failingStep": 0,
+  "originalSteps": 3,
+  "events": [
+    {
+      "t": "intent",
+      "p": "p0",
+      "op": 1,
+      "inv": 2
+    }
+  ],
+  "states": {
+    "call": {
+      "proc": "p0",
+      "method": "recordIntent",
+      "args": [
+        {
+          "operationId": "op1",
+          "paymentHash": "op1/i2",
+          "amountMsat": "4611686018427387905",
+          "feeLimitMsat": "4611686018427387904",
+          "budgetId": "B"
+        }
+      ],
+      "error": "amount 9223372036854775809 msat is outside 0 to 2^63 - 1"
+    },
+    "before": {
+      "payments": {},
+      "operations": {},
+      "opBudgets": {},
+      "reservations": [],
+      "ledger": [],
+      "events": {},
+      "budgets": {
+        "B": "9223372036854775807"
+      },
+      "entries": [],
+      "outbox": []
+    },
+    "after": {
+      "payments": {},
+      "operations": {},
+      "opBudgets": {},
+      "reservations": [],
+      "ledger": [],
+      "events": {},
+      "budgets": {
+        "B": "9223372036854775807"
+      },
+      "entries": [],
+      "outbox": []
+    }
+  },
+  "mutant": "budget-admission-within-limit--m7a.cjs"
+}

@@ -123,7 +123,7 @@ LND does not record by default which credential made a call, so check outcomes r
 
 Compare against the period since the vulnerable version was first exposed, not just since the advisory. If you find unauthorized activity, preserve the evidence (command output, BTCPay Server and LND logs) before changing more, and report it to the project concerned.
 
-To notice future use of a leaked location, put a canary where the old files were (`macwarden bake --canary --label <name> --out <file>`) and keep `macwarden watch` running: every use is denied and alerts.
+To notice future use of a leaked location, put a canary where the old files were (`macwarden bake --canary --label <name> --out <file>`) and keep `macwarden watch` running: every use LND lets through to its middleware is denied and alerted (rate-limited).
 
 To be able to say which credential spent what next time, run `watch` with `--payment-journal <file>` from now on and check it with `macwarden reconcile --payment-journal <file> --since <time>`. It lists, per credential, the payments it asked LND to make and how LND settled them, and the payments LND made that the journal cannot attribute, with the periods `watch` was not watching. It cannot attribute payments made before the journal existed: for the period of this incident, `lncli listpayments` remains the evidence.
 

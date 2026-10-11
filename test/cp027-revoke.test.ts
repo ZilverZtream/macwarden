@@ -5,9 +5,12 @@ import * as fs from 'node:fs/promises';
 import { join } from 'node:path';
 import { expect, it, vi } from 'vitest';
 import { render } from './helpers/render-adversarial.js';
+import { onRegistryOpen } from './helpers/integration-registry-read.js';
 import { entry, maxId, otherPubkey } from './helpers/cp026-revoke-support.mjs';
 import { absent, bytes, failure, instant, invoke, onlineFault, prefix, released, save, scratch,
   success, unchanged } from './helpers/cp027-revoke-support.js';
+// Each test runs the command and the leak check over the scratch tree (findLeaks); under a loaded full
+// suite that took 17-21 s against the 15 s default, so these tests get 90 s (as RECONCILE/bounds did in 1.2.1).
 
 it.each(['unregistered', 'revoked entry'])('CP-027/V7-repair absent %s has nothing to revoke',
   async kind => scratch(async f => {
@@ -18,7 +21,7 @@ it.each(['unregistered', 'revoked entry'])('CP-027/V7-repair absent %s has nothi
     const result = await invoke(f, ['--unregistered', '--yes'], maxId);
     failure(result, 5, 'V7'); expect(result.error!.message).toMatch(/nothing to revoke/i);
     expect(f.calls).toEqual(prefix); unchanged(f, before); released(f);
-  }));
+  }), 90_000);
 it.each(['--dry-run', '--dry-run --yes', '--dry-run --json']) (
   'CP-027/V7-repair %s plans already-absent repair without later LND calls or lock', async flags => scratch(async f => {
     absent(f); const before = bytes(f);
@@ -27,7 +30,7 @@ it.each(['--dry-run', '--dry-run --yes', '--dry-run --json']) (
     expect(result.result).toEqual({ dryRun: true, rootKeyId: maxId, label: 'Alice', grade: 'READ', proof: 'by-id-only' });
     expect(render(result, 'text')).toMatch(/already absent/i);
     expect(f.calls).toEqual(prefix); expect(f.prompt).not.toHaveBeenCalled(); unchanged(f, before); released(f);
-  }));
+  }), 90_000);
 it.each(['wrong text', 'EOF', 'non-TTY'])('CP-027/V7-repair %s declines absence repair with unchanged record',
   async kind => scratch(async f => {
     absent(f); const before = bytes(f);
@@ -36,13 +39,13 @@ it.each(['wrong text', 'EOF', 'non-TTY'])('CP-027/V7-repair %s declines absence 
     failure(await invoke(f, []), 6, 'V9');
     expect(f.calls).toEqual(prefix); unchanged(f, before); released(f);
     expect(f.prompt.mock.calls.length).toBe(kind === 'non-TTY' ? 0 : 1);
-  }));
+  }), 90_000);
 it.each(['typed label', '--yes'])('CP-027/V7-repair %s records by-id-only with one re-list and no mutation after absence',
   async kind => scratch(async f => {
     absent(f); success(f, await invoke(f, kind === '--yes' ? ['--yes'] : []), 'by-id-only', true);
     // The absence is observed again under the lock, after the confirmation (N07).
     expect(f.calls).toEqual([...prefix, 'ListMacaroonIDs']); expect(f.lnd.deleteMacaroonId).not.toHaveBeenCalled();
-  }));
+  }), 90_000);
 
 it.each(['present', 'absent repair'])('CP-027/V10 %s refuses a held lock without deleting or altering its owner',
   async kind => scratch(async f => {
@@ -54,7 +57,7 @@ it.each(['present', 'absent repair'])('CP-027/V10 %s refuses a held lock without
     for (const value of [String(owner.pid), owner.hostname, owner.startedAt]) expect(result.error!.message).toContain(value);
     expect(readFileSync(`${f.registry}.lock`, 'utf8')).toBe(lock);
     expect(f.lnd.deleteMacaroonId).not.toHaveBeenCalled(); unchanged(f, before);
-  }));
+  }), 90_000);
 it.each(['status', 'fingerprint', 'outPath', 'permissions', 'label', 'removed', 'absent repair']) (
   'CP-027/V10 entry %s changed during unlocked confirmation prevents mutation', async kind => scratch(async f => {
     if (kind === 'absent repair') absent(f);
@@ -76,16 +79,14 @@ it.each(['status', 'fingerprint', 'outPath', 'permissions', 'label', 'removed', 
     failure(await invoke(f, []), 3, 'V10');
     expect(f.prompt).toHaveBeenCalledTimes(1); expect(f.lnd.deleteMacaroonId).not.toHaveBeenCalled();
     unchanged(f, changed!); released(f);
-  }));
+  }), 90_000);
 it('CP-027/V10 registry reread failure after confirmation releases the acquired lock', async () => scratch(async f => {
-  f.deps.fs.readFile = vi.fn(async (...args: Parameters<typeof fs.readFile>) => {
-    if (args[0] === f.registry && existsSync(`${f.registry}.lock`))
-      throw Object.assign(new Error('injected reread failure'), { code: 'EACCES' });
-    return fs.readFile(...args);
-  }) as typeof fs.readFile;
+  f.deps.fs.open = onRegistryOpen(f.deps.fs, f.registry, () => {
+    if (existsSync(`${f.registry}.lock`)) throw Object.assign(new Error('injected reread failure'), { code: 'EACCES' });
+  });
   const before = bytes(f); failure(await invoke(f), 3, 'V10');
   expect(f.lnd.deleteMacaroonId).not.toHaveBeenCalled(); unchanged(f, before); released(f);
-}));
+}), 90_000);
 it('CP-027/V10 unrelated-node record change is preserved while the resolved entry stays stable', async () => scratch(async f => {
   const foreign = { ...f.target, nodePubkey: otherPubkey, label: 'Foreign', outPath: null };
   f.prompt.mockImplementation(async () => {
@@ -96,7 +97,7 @@ it('CP-027/V10 unrelated-node record change is preserved while the resolved entr
   });
   success(f, await invoke(f, []));
   expect(JSON.parse(bytes(f).toString()).entries).toContainEqual(foreign);
-}));
+}), 90_000);
 it('CP-027/V10 an unregistered ID gaining a registry entry during input is refused before deletion', async () => scratch(async f => {
   save(f, [f.other]); let changed: Buffer;
   f.prompt.mockImplementation(async question => {
@@ -105,7 +106,7 @@ it('CP-027/V10 an unregistered ID gaining a registry entry during input is refus
   });
   failure(await invoke(f, ['--unregistered'], maxId), 3, 'V10');
   unchanged(f, changed!); expect(f.lnd.deleteMacaroonId).not.toHaveBeenCalled(); released(f);
-}));
+}), 90_000);
 
 it.each(['error', 'deleted false'])('CP-027/V11 %s with ID still present stops after one reconciliation',
   async kind => scratch(async f => {
@@ -117,7 +118,7 @@ it.each(['error', 'deleted false'])('CP-027/V11 %s with ID still present stops a
     expect(result.error!.message).toMatch(/still|present|valid/i);
     expect(f.calls).toEqual([...prefix, 'CheckMacaroonPermissions', 'DeleteMacaroonID', 'ListMacaroonIDs']);
     expect(f.lnd.deleteMacaroonId).toHaveBeenCalledTimes(1); unchanged(f, before); released(f);
-  }));
+  }), 90_000);
 it.each(['error', 'deleted false'])('CP-027/V11 %s after completed deletion permits only the prescribed rejection proof',
   async kind => scratch(async f => {
     f.lnd.deleteMacaroonId.mockImplementation(async id => {
@@ -127,7 +128,7 @@ it.each(['error', 'deleted false'])('CP-027/V11 %s after completed deletion perm
     success(f, await invoke(f));
     expect(f.calls).toEqual([...prefix, 'CheckMacaroonPermissions', 'DeleteMacaroonID', 'ListMacaroonIDs', 'CheckMacaroonPermissions']);
     expect(f.lnd.deleteMacaroonId).toHaveBeenCalledTimes(1); expect(f.lnd.listMacaroonIds).toHaveBeenCalledTimes(2);
-  }));
+  }), 90_000);
 it.each(['error', 'deleted false'])('CP-027/V11 %s with unreadable reconciliation reports unknown state and inventory recovery',
   async kind => scratch(async f => {
     f.lnd.deleteMacaroonId.mockImplementation(async () => {
@@ -140,13 +141,13 @@ it.each(['error', 'deleted false'])('CP-027/V11 %s with unreadable reconciliatio
     expect(result.error!.message).toContain('LND state unknown'); expect(result.error!.message).toContain('macwarden inventory');
     expect(f.calls).toEqual([...prefix, 'CheckMacaroonPermissions', 'DeleteMacaroonID', 'ListMacaroonIDs']);
     unchanged(f, before); released(f);
-  }));
+  }), 90_000);
 it('CP-027/V11 absent reconciliation with unusable target records by ID only without another list', async () => scratch(async f => {
   f.target.outPath = null; save(f);
   f.lnd.deleteMacaroonId.mockImplementation(async () => { f.calls.push('DeleteMacaroonID'); absent(f); throw onlineFault(); });
   success(f, await invoke(f), 'by-id-only');
   expect(f.calls).toEqual([...prefix, 'DeleteMacaroonID', 'ListMacaroonIDs']);
-}));
+}), 90_000);
 
 it.each(['still present', 'list failure', 'still accepted', 'other rejection', 'transport']) (
   'CP-027/V12 %s determines whether the independent proof is sufficient', async kind => scratch(async f => {
@@ -171,7 +172,7 @@ it.each(['still present', 'list failure', 'still accepted', 'other rejection', '
     expect(result.error!.message).toContain('macwarden inventory');
     expect(f.lnd.deleteMacaroonId).toHaveBeenCalledTimes(1); expect(f.lnd.listMacaroonIds).toHaveBeenCalledTimes(2);
     expect(f.lnd.checkMacaroon.mock.calls.length).toBe(['still present', 'list failure'].includes(kind) ? 1 : 2);
-  }));
+  }), 90_000);
 it('CP-027/V12 accepted URI target is checked with exactly its decoded URI permissions after deletion', async () => scratch(async f => {
   f.target = entry('grade-uri-read-pair', maxId); save(f);
   f.lnd.checkMacaroon.mockImplementation(async (mac, perms, ...extra) => {
@@ -182,7 +183,7 @@ it('CP-027/V12 accepted URI target is checked with exactly its decoded URI permi
     return f.ids.includes(maxId) ? { valid: true } : { valid: false as const, reason: 'root-key-missing', message: 'root key missing' };
   });
   success(f, await invoke(f)); expect(f.lnd.checkMacaroon).toHaveBeenCalledTimes(2);
-}));
+}), 90_000);
 it('CP-027/V12 rejection proof failure after lost delete response stops without another reconciliation', async () => scratch(async f => {
   f.lnd.deleteMacaroonId.mockImplementation(async () => { f.calls.push('DeleteMacaroonID'); absent(f); throw onlineFault(); });
   f.lnd.checkMacaroon.mockImplementationOnce(async () => { f.calls.push('CheckMacaroonPermissions'); return { valid: true }; })
@@ -190,7 +191,7 @@ it('CP-027/V12 rejection proof failure after lost delete response stops without 
   const before = bytes(f); const result = await invoke(f); failure(result, 7, 'V12');
   expect(result.error!.message).toContain('macwarden inventory'); unchanged(f, before); released(f);
   expect(f.calls).toEqual([...prefix, 'CheckMacaroonPermissions', 'DeleteMacaroonID', 'ListMacaroonIDs', 'CheckMacaroonPermissions']);
-}));
+}), 90_000);
 it.each(['missing file', 'fingerprint mismatch', 'expired', 'baseline rejected', 'empty permissions']) (
   'CP-027/V12 %s uses ID-only proof and never claims credential rejection', async kind => scratch(async f => {
     if (kind === 'missing file') f.target.outPath = join(f.dir, 'missing.macaroon');
@@ -205,7 +206,7 @@ it.each(['missing file', 'fingerprint mismatch', 'expired', 'baseline rejected',
     success(f, await invoke(f), 'by-id-only');
     expect(f.lnd.checkMacaroon.mock.calls.length).toBe(kind === 'baseline rejected' ? 1 : 0);
     expect(f.lnd.listMacaroonIds).toHaveBeenCalledTimes(2);
-  }));
+  }), 90_000);
 
 it.each(['--yes', 'typed label', '--json'])('CP-027/V13 %s saves verified revocation with exact result and scope',
   async kind => scratch(async f => {
@@ -214,7 +215,7 @@ it.each(['--yes', 'typed label', '--json'])('CP-027/V13 %s saves verified revoca
     expect(f.calls).toEqual([...prefix, 'CheckMacaroonPermissions', 'DeleteMacaroonID', 'ListMacaroonIDs', 'CheckMacaroonPermissions']);
     expect(f.prompt.mock.calls.length).toBe(kind === 'typed label' ? 1 : 0);
     expect(JSON.parse(bytes(f).toString()).entries[0]).toEqual({ ...f.target, status: 'revoked', revokedAt: expect.any(String), revokeEvidence: 'rejected' });
-  }));
+  }), 90_000);
 it('CP-027/V13 unregistered numeric target creates label-null record without changing foreign ownership', async () => scratch(async f => {
   const foreign = { ...f.other, nodePubkey: otherPubkey, label: 'Foreign' };
   save(f, [f.other, foreign]);
@@ -224,7 +225,7 @@ it('CP-027/V13 unregistered numeric target creates label-null record without cha
   success(f, await invoke(f, ['--unregistered', '--yes'], maxId), 'by-id-only', false, null);
   expect(JSON.parse(bytes(f).toString()).entries).toContainEqual(foreign);
   expect(f.calls).toEqual([...prefix, 'DeleteMacaroonID', 'ListMacaroonIDs']);
-}));
+}), 90_000);
 it('CP-027/V13 unregistered typed ID confirms only after an unlocked complete plan', async () => scratch(async f => {
   save(f, [f.other]);
   f.prompt.mockImplementation(async question => {
@@ -235,7 +236,7 @@ it('CP-027/V13 unregistered typed ID confirms only after an unlocked complete pl
   });
   success(f, await invoke(f, ['--unregistered'], maxId), 'by-id-only', false, null);
   expect(f.prompt).toHaveBeenCalledTimes(1);
-}));
+}), 90_000);
 it.each(['write', 'rename', 'repair write'])('CP-027/V13 %s failure preserves registry and prints exact rerun that repairs absence',
   async kind => scratch(async f => {
     if (kind === 'repair write') absent(f);
@@ -263,17 +264,17 @@ it.each(['write', 'rename', 'repair write'])('CP-027/V13 %s failure preserves re
     f.lnd.deleteMacaroonId.mockClear(); f.lnd.checkMacaroon.mockClear(); f.lnd.listMacaroonIds.mockClear();
     success(f, await invoke(f), 'by-id-only', true);
     expect(f.calls).toEqual([...prefix, 'ListMacaroonIDs']); expect(f.lnd.deleteMacaroonId).not.toHaveBeenCalled();
-  }));
+  }), 90_000);
 
 it('CP-027/revoke-live-flow injected command flow removes only its target and preserves another ID and record', async () => scratch(async f => {
   const otherBefore = readFileSync(f.other.outPath); success(f, await invoke(f));
   expect(f.ids).toEqual(['0', f.other.rootKeyId]); expect(readFileSync(f.other.outPath).equals(otherBefore)).toBe(true);
   // Live credential acceptance is established separately by the independent lncli reference cases.
-}));
+}), 90_000);
 it('CP-027/revoke-live-flow command root-zero refusal remains before all LND calls', async () => scratch(async f => {
   const before = bytes(f); failure(await invoke(f, ['--yes', '--unregistered'], '0'), 2, 'V1');
   expect(f.calls).toEqual([]); unchanged(f, before); released(f);
-}));
+}), 90_000);
 
 it.each(['rejected', 'by-id-only'] as const)(
   'F12/V13 a recorded-revoked root key held again by LND (backup restore) is re-revoked with this run\'s time and evidence (old evidence %s)',
@@ -294,7 +295,7 @@ it.each(['rejected', 'by-id-only'] as const)(
     expect(row.revokeEvidence).toBe(result.result!.evidence);
     expect(result.warnings).toContainEqual({ code: 'revoked-but-present',
       message: expect.stringContaining(`recorded revoked at ${earlier} (evidence ${oldEvidence})`) });
-  }));
+  }), 90_000);
 
 // 1.2.1 (F12 follow-up): when the save after re-revoking a revoked-but-present root key fails, the
 // entry still records the earlier revocation; no output claims it records this one, and the message
@@ -321,4 +322,4 @@ it('F12/V13 a failed save after re-revoking a revoked-but-present key is reporte
   f.calls.length = 0;
   failure(await invoke(f, ['--yes'], maxId), 5, 'V7');
   unchanged(f, before); released(f);
-}));
+}), 90_000);

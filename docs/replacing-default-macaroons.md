@@ -21,7 +21,7 @@ export MACWARDEN_LND_REST='localhost:8080'
 export MACWARDEN_TLS_CERT='/operator/path/to/tls.cert'
 ```
 
-Replace the endpoint and certificate path for your setup. TLS verification remains enabled. Keep `NODE_DEBUG` HTTP/HTTPS/TLS/net tracing and `NODE_OPTIONS --report-*` disabled, because they can expose credentials. All development rehearsals and integration validation must contact only the disposable pinned regtest fixture (SAFE-10).
+Replace the endpoint and certificate path for your setup. TLS verification remains enabled. Unset `NODE_OPTIONS` and keep `NODE_DEBUG` HTTP/HTTPS/TLS/net tracing disabled, because they can expose credentials: macwarden refuses to run with any non-empty `NODE_OPTIONS` or such a `NODE_DEBUG`. All development rehearsals and integration validation must contact only the disposable pinned regtest fixture (SAFE-10).
 
 ## 2. Rotate the root keys yourself
 
@@ -107,7 +107,7 @@ macwarden scan /apps/btcpay/config /apps/dashboard/config /apps/invoice-service/
 
 Check findings against your labels, root key IDs and fingerprints: **no root-key-0 credential may remain in those app configs**. A scan exit 0 alone does not establish this; it can return findings successfully. Non-zero app credentials are expected findings. Review ignored findings, skipped files and undecodable candidates; do not hide an old credential with `.macwardenignore` or a grade threshold. A root-key-0 read-only credential is still a migration failure. Remove or replace remaining old app-config credentials, resolve incomplete coverage, and rescan the affected paths before declaring completion.
 
-A clean scan is not proof that no credential exists elsewhere or in an unrecognized encoding. Scan is pattern-based: text detectors require location `lnd`; split, line-wrapped, encrypted, archived or oddly encoded credentials may be missed. UTF-16 without a BOM is treated as binary, files over 5 MiB are skipped, and git history is scanned only with `scan --git-history`. Inventory likewise cannot establish complete coverage of stateless/offline baking or a remote signer's separate store; verification is meaningless with `--no-macaroons`. See the [threat model](security-model.md#threat-model).
+A clean scan is not proof that no credential exists elsewhere or in an unrecognized encoding. Scan is pattern-based: text detectors require location `lnd`; split, line-wrapped, encrypted, archived or oddly encoded credentials may be missed. UTF-16 without a BOM is treated as binary, files over 5 MiB are skipped, and git history is scanned only with `scan --git-history`. Files whose names look like wallet secrets (`*.key`, names containing `seed`, `password` or `passwd` as a word, `macaroons.db`, `wallet.db`) are never opened (SAFE-02): they are reported as skipped (`never-open`) and named in text, JSON, SARIF and GitHub output, not scanned, so check any app config with such a name by hand. Inventory likewise cannot establish complete coverage of stateless/offline baking or a remote signer's separate store; verification is meaningless with `--no-macaroons`. See the [threat model](security-model.md#threat-model).
 
 Declare this replacement complete only when every listed app works with its distinct non-zero-root-key credential, every replacement verifies accepted, and the final covered app configs contain no root-key-0 credentials. Failed verification or a remaining old config credential leaves the replacement incomplete; resolve it while maintaining the window. This procedure never delegates root-key rotation to macwarden.
 
@@ -122,4 +122,4 @@ lncli deletemacaroonid "$ID"
 rm ./macwarden-session.macaroon
 ```
 
-Confirm successful deletion before local cleanup; never use ID 0. If multiple fresh sessions were needed, revoke and remove each. This is the local cleanup from the SECURITY session recipe. Each app's different root key ID remains available for individual future revocation, without another global root-key rotation.
+Confirm successful deletion before local cleanup; never use ID 0. If multiple fresh sessions were needed, revoke and remove each. This is the local cleanup from the session recipe in [security-model.md](security-model.md). Each app's different root key ID remains available for individual future revocation, without another global root-key rotation.

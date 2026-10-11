@@ -1,0 +1,160 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "notfound-revert-keeps-live-updates",
+  "rule": "An update or refusal for the live submission applies (IN_FLIGHT -> in_flight, FAILED or a definite refusal -> failed), also after a NotFound sent the record back to intent; a TrackPaymentV2 snapshot LND took before the live submission's request reached it (every HTLC attempt in it first shown for an earlier submission, or none and created before the live submission was sent) is an earlier submission's answer and changes neither the payment, its operation nor its reservation.",
+  "message": "applyUpdate IN_FLIGHT for the live submission 1 of op0/i0 left it intent (was intent), expected in_flight",
+  "seed": 1,
+  "case": 0,
+  "config": {
+    "scale": "small",
+    "budget": true,
+    "limit": "3200"
+  },
+  "failingStep": 5,
+  "originalSteps": 17,
+  "events": [
+    {
+      "t": "intent",
+      "p": "p0",
+      "op": 0,
+      "inv": 0
+    },
+    {
+      "t": "submit",
+      "p": "p0",
+      "op": 0,
+      "inv": 0
+    },
+    {
+      "t": "reconcile",
+      "p": "p1",
+      "op": 0,
+      "inv": 0
+    },
+    {
+      "t": "track.deliver",
+      "pick": 0.1667
+    },
+    {
+      "t": "send.arrive",
+      "pick": 0.5
+    },
+    {
+      "t": "send.deliver",
+      "pick": 0.5
+    }
+  ],
+  "states": {
+    "call": {
+      "proc": "p0",
+      "method": "applyUpdate",
+      "args": [
+        {
+          "paymentHash": "op0/i0",
+          "status": "IN_FLIGHT",
+          "htlcs": 0
+        },
+        "SendPaymentV2",
+        1
+      ]
+    },
+    "before": {
+      "payments": {
+        "op0/i0": {
+          "op": "op0",
+          "state": "intent",
+          "subs": 1,
+          "amount": "1000",
+          "feeLimit": "100"
+        }
+      },
+      "operations": {
+        "op0": "open"
+      },
+      "opBudgets": {
+        "op0": "B"
+      },
+      "reservations": [
+        {
+          "id": "1",
+          "budget": "B",
+          "hash": "op0/i0",
+          "principal": "1000",
+          "allowance": "100",
+          "state": "held"
+        }
+      ],
+      "ledger": [],
+      "events": {
+        "op0/i0": [
+          "intent-recorded",
+          "submit",
+          "not-initiated"
+        ]
+      },
+      "budgets": {
+        "B": "3200"
+      },
+      "entries": [
+        {
+          "id": "1",
+          "event": "budget-held",
+          "hash": "op0/i0",
+          "op": "op0",
+          "amount": "1100"
+        }
+      ],
+      "outbox": []
+    },
+    "after": {
+      "payments": {
+        "op0/i0": {
+          "op": "op0",
+          "state": "intent",
+          "subs": 1,
+          "amount": "1000",
+          "feeLimit": "100"
+        }
+      },
+      "operations": {
+        "op0": "open"
+      },
+      "opBudgets": {
+        "op0": "B"
+      },
+      "reservations": [
+        {
+          "id": "1",
+          "budget": "B",
+          "hash": "op0/i0",
+          "principal": "1000",
+          "allowance": "100",
+          "state": "held"
+        }
+      ],
+      "ledger": [],
+      "events": {
+        "op0/i0": [
+          "intent-recorded",
+          "submit",
+          "not-initiated"
+        ]
+      },
+      "budgets": {
+        "B": "3200"
+      },
+      "entries": [
+        {
+          "id": "1",
+          "event": "budget-held",
+          "hash": "op0/i0",
+          "op": "op0",
+          "amount": "1100"
+        }
+      ],
+      "outbox": []
+    }
+  },
+  "mutant": "notfound-revert-keeps-live-updates--m5b.cjs"
+}

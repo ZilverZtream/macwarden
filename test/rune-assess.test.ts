@@ -153,7 +153,10 @@ describe('RUNE/assess structure', () => {
   it('RUNE/assess sensitive reads are named with the reason from the table', () => {
     const result = assess('=1&method=listdatastore');
     expect(result).toMatchObject({ grade: 'UNASSESSED', sensitiveMethods: ['listdatastore'], capabilities: ['UNASSESSED'] });
-    expect(assess('=1&method=listconfigs')).toMatchObject({ grade: 'READ', sensitiveMethods: ['listconfigs'] });
+    // Audit 1.4.0: listconfigs returns bitcoind's RPC password, so it is no plain query: UNASSESSED, like listdatastore.
+    expect(assess('=1&method=listconfigs')).toMatchObject({ grade: 'UNASSESSED', sensitiveMethods: ['listconfigs'],
+      capabilities: ['UNASSESSED'] });
+    expect(assess('=1&method=listconfigs|method=getinfo')).toMatchObject({ grade: 'UNASSESSED', capabilities: ['READ', 'UNASSESSED'] });
     expect(assess('=1&method=showrunes').grade).toBe('ADMIN');
   });
 });

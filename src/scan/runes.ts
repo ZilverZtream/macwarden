@@ -32,7 +32,8 @@ function textFingerprint(text: string): string {
  */
 function possiblyTruncated(line: string, candidate: RuneCandidate, next: string | undefined): boolean {
   const after = line[candidate.end];
-  if (candidate.quote !== null) return after !== candidate.quote;
+  // A JSON-escaped closing quote (\") closes a value inside JSON that is itself in a JSON string.
+  if (candidate.quote !== null) return after !== candidate.quote && !(after === '\\' && line[candidate.end + 1] === candidate.quote);
   // A continuation holds only base64 characters, with '=' only as trailing padding: a next line
   // such as `OTHER_KEY=value` is an assignment, not the rest of this value.
   if (after === undefined) return next !== undefined && /^[A-Za-z0-9+/_-]+={0,2}$/.test(next.trim());

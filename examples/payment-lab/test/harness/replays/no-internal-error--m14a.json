@@ -1,0 +1,261 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "no-internal-error",
+  "rule": "Store calls, workflows and the outbox worker on a live process never throw (LND is truthful apart from the injected faults; the only refusal by exception is a FAILED for a payment already succeeded).",
+  "message": "payer markNotInitiated threw: attempts recorded",
+  "seed": 1,
+  "case": 39,
+  "config": {
+    "scale": "small",
+    "budget": true,
+    "limit": "3200"
+  },
+  "failingStep": 7,
+  "originalSteps": 56,
+  "events": [
+    {
+      "t": "intent",
+      "p": "p0",
+      "op": 0,
+      "inv": 2
+    },
+    {
+      "t": "submit",
+      "p": "p1",
+      "op": 0,
+      "inv": 2
+    },
+    {
+      "t": "reconcile",
+      "p": "p0",
+      "op": 0,
+      "inv": 2
+    },
+    {
+      "t": "send.arrive",
+      "pick": 0.5
+    },
+    {
+      "t": "lnd.payment",
+      "pick": 0.5,
+      "what": "succeed",
+      "amount": "exact"
+    },
+    {
+      "t": "send.deliver",
+      "pick": 0.5
+    },
+    {
+      "t": "send.deliver",
+      "pick": 0.5
+    },
+    {
+      "t": "track.deliver",
+      "pick": 0.5
+    }
+  ],
+  "states": {
+    "call": {
+      "proc": "p0",
+      "method": "markNotInitiated",
+      "args": [
+        "op0/i2",
+        "TrackPaymentV2: payment isn't initiated",
+        1
+      ],
+      "error": "attempts recorded"
+    },
+    "before": {
+      "payments": {
+        "op0/i2": {
+          "op": "op0",
+          "state": "succeeded",
+          "subs": 1,
+          "amount": "1000",
+          "feeLimit": "100",
+          "fee": "10",
+          "value": "1000"
+        }
+      },
+      "operations": {
+        "op0": "completed"
+      },
+      "opBudgets": {
+        "op0": "B"
+      },
+      "reservations": [
+        {
+          "id": "1",
+          "budget": "B",
+          "hash": "op0/i2",
+          "principal": "1000",
+          "allowance": "100",
+          "actual": "10",
+          "state": "consumed"
+        }
+      ],
+      "ledger": [
+        {
+          "op": "op0",
+          "hash": "op0/i2",
+          "account": "principal",
+          "amount": "1000"
+        },
+        {
+          "op": "op0",
+          "hash": "op0/i2",
+          "account": "routing-fee",
+          "amount": "10"
+        }
+      ],
+      "events": {
+        "op0/i2": [
+          "intent-recorded",
+          "submit",
+          "in-flight",
+          "succeeded"
+        ]
+      },
+      "budgets": {
+        "B": "3200"
+      },
+      "entries": [
+        {
+          "id": "1",
+          "event": "budget-held",
+          "hash": "op0/i2",
+          "op": "op0",
+          "amount": "1100"
+        },
+        {
+          "id": "2",
+          "event": "payment-succeeded",
+          "hash": "op0/i2",
+          "op": "op0",
+          "amount": "1000"
+        },
+        {
+          "id": "3",
+          "event": "budget-consumed",
+          "hash": "op0/i2",
+          "op": "op0",
+          "amount": "90"
+        }
+      ],
+      "outbox": [
+        {
+          "id": "1",
+          "kind": "confirm-operation",
+          "key": "op0:161532ba270a58a8c116b403d185fdfcf7a81dd3219d357a5e05dfc5c65426e9",
+          "subject": "op0",
+          "payload": {
+            "operationId": "op0",
+            "operationKind": "payout",
+            "paymentHash": "op0/i2",
+            "valueMsat": "1000",
+            "feeMsat": "10",
+            "ledgerEntryId": 2
+          },
+          "state": "pending"
+        }
+      ]
+    },
+    "after": {
+      "payments": {
+        "op0/i2": {
+          "op": "op0",
+          "state": "succeeded",
+          "subs": 1,
+          "amount": "1000",
+          "feeLimit": "100",
+          "fee": "10",
+          "value": "1000"
+        }
+      },
+      "operations": {
+        "op0": "completed"
+      },
+      "opBudgets": {
+        "op0": "B"
+      },
+      "reservations": [
+        {
+          "id": "1",
+          "budget": "B",
+          "hash": "op0/i2",
+          "principal": "1000",
+          "allowance": "100",
+          "actual": "10",
+          "state": "consumed"
+        }
+      ],
+      "ledger": [
+        {
+          "op": "op0",
+          "hash": "op0/i2",
+          "account": "principal",
+          "amount": "1000"
+        },
+        {
+          "op": "op0",
+          "hash": "op0/i2",
+          "account": "routing-fee",
+          "amount": "10"
+        }
+      ],
+      "events": {
+        "op0/i2": [
+          "intent-recorded",
+          "submit",
+          "in-flight",
+          "succeeded"
+        ]
+      },
+      "budgets": {
+        "B": "3200"
+      },
+      "entries": [
+        {
+          "id": "1",
+          "event": "budget-held",
+          "hash": "op0/i2",
+          "op": "op0",
+          "amount": "1100"
+        },
+        {
+          "id": "2",
+          "event": "payment-succeeded",
+          "hash": "op0/i2",
+          "op": "op0",
+          "amount": "1000"
+        },
+        {
+          "id": "3",
+          "event": "budget-consumed",
+          "hash": "op0/i2",
+          "op": "op0",
+          "amount": "90"
+        }
+      ],
+      "outbox": [
+        {
+          "id": "1",
+          "kind": "confirm-operation",
+          "key": "op0:161532ba270a58a8c116b403d185fdfcf7a81dd3219d357a5e05dfc5c65426e9",
+          "subject": "op0",
+          "payload": {
+            "operationId": "op0",
+            "operationKind": "payout",
+            "paymentHash": "op0/i2",
+            "valueMsat": "1000",
+            "feeMsat": "10",
+            "ledgerEntryId": 2
+          },
+          "state": "pending"
+        }
+      ]
+    }
+  },
+  "mutant": "no-internal-error--m14a.cjs"
+}

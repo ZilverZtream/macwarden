@@ -10,7 +10,9 @@
  *   anywhere in a word) becomes `[payment request]`. A run of exactly 64 hex characters that is a
  *   payment hash of the subject or the subject's own ID, or follows `=sha256-` (an outbox effect's
  *   hashed file name), becomes its fingerprint, any other `[redacted]`; a longer run, which may hold
- *   a secret at any offset, becomes `[redacted hex N chars]` whole.
+ *   a secret at any offset, becomes `[redacted hex N chars]` whole. A standalone run of 43 or 44 base64 characters (the
+ *   standard alphabet, with its `=` padding), which is how LND's REST API writes 32 bytes such as a preimage, becomes
+ *   `[redacted base64]` unless it is the subject's own ID; a run of only hex digits is left to the hex rule.
  * - `capString` cuts any one string to 1,024 characters and says how many more there were.
  * - Text output escapes what a terminal or a CI runner would act on, as macwarden's text output does
  *   (docs/spec.md, Output): control characters (C0, DEL, C1) as `\xNN`; Unicode whitespace other than
@@ -24,17 +26,21 @@ export function fingerprint(paymentHash: string): string {
 
 // eslint-disable-next-line no-misleading-character-class
 const INVISIBLE = /[\p{Cf}\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u3164\ufe00-\ufe0f\uffa0\u{e0000}-\u{e0fff}]/u;
-const SECRET_SHAPED = /(ln(?:bcrt|bc|tb|sb)[0-9a-z]{20,})|[0-9a-f]{64,}/gi;
+/** A BOLT 11 string (group 1); a hex run of 64 or more; a standalone base64 run of 43 or 44 characters (group 2), 32 bytes. */
+const SECRET_SHAPED = /(ln(?:bcrt|bc|tb|sb)[0-9a-z]{20,})|[0-9a-f]{64,}|(?<![A-Za-z0-9+/])([A-Za-z0-9+/]{43,44}={0,2})(?![A-Za-z0-9+/=])/gi;
 const HASHED_NAME = '=sha256-';
 
 /** A string with every payment hash fingerprinted and anything else secret-shaped removed (see the header). */
 export function scrub(value: string, known: ReadonlySet<string>): string {
-  const replace = (text: string, invoice: string | undefined, start: number, visible: string): string => (invoice !== undefined ? '[payment request]'
+  const replace = (text: string, invoice: string | undefined, base64: string | undefined, start: number, visible: string): string => (
+    invoice !== undefined ? '[payment request]'
+      : base64 !== undefined ? (known.has(text.toLowerCase()) || /^[0-9a-f]+$/i.test(text) ? text : '[redacted base64]')
     : text.length > 64 ? `[redacted hex ${text.length} chars]`
       : known.has(text.toLowerCase()) || visible.slice(Math.max(0, start - HASHED_NAME.length), start) === HASHED_NAME ? fingerprint(text)
         : '[redacted]');
   if (!INVISIBLE.test(value)) {
-    return value.replace(SECRET_SHAPED, (text: string, invoice: string | undefined, start: number) => replace(text, invoice, start, value));
+    return value.replace(SECRET_SHAPED, (text: string, invoice: string | undefined, base64: string | undefined, start: number) =>
+      replace(text, invoice, base64, start, value));
   }
   // The string without its invisible characters, and the offset in `value` of each of its UTF-16 units.
   let visible = '';
@@ -53,7 +59,7 @@ export function scrub(value: string, known: ReadonlySet<string>): string {
     const text = match[0];
     const start = match.index;
     // Matched characters are ASCII, one unit each; the invisible characters between them go with the match.
-    result += value.slice(copied, origin[start]) + replace(text, match[1], start, visible);
+    result += value.slice(copied, origin[start]) + replace(text, match[1], match[2], start, visible);
     copied = (origin[start + text.length - 1] as number) + 1;
   }
   return result + value.slice(copied);

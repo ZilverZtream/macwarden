@@ -7,6 +7,7 @@ import { createHmac, randomBytes } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { expect, it, vi } from 'vitest';
 import { render } from './helpers/render-adversarial.js';
+import { onRegistryOpen } from './helpers/integration-registry-read.js';
 import { findLeaks } from "./helpers/leak-check.js";
 import { isolateLeakSuite } from './helpers/leak-suite.js';
 import { expectSchemaValid } from './helpers/output-schema.js';
@@ -296,11 +297,9 @@ it('CP-023/B6 unreadable registry exits three before any lock, out or LND call',
   await inScratch(async path => {
     const { calls, deps, args, out, registry } = fixture(path);
     writeFileSync(registry, '{"schema":1,"entries":[]}');
-    const original = deps.fs.readFile;
-    deps.fs.readFile = vi.fn(async (...params: Parameters<typeof fs.readFile>) => {
-      if (params[0] === registry) throw Object.assign(new Error('denied'), { code: 'EACCES' });
-      return original(...params);
-    }) as typeof fs.readFile;
+    deps.fs.open = onRegistryOpen(deps.fs, registry, () => {
+      throw Object.assign(new Error('denied'), { code: 'EACCES' });
+    });
     const result = await invoke(args, deps);
     refusal(result, 3, 'B6');
     expect(calls).toEqual([]);

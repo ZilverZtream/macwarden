@@ -193,9 +193,11 @@ async function runSteps(args: string[], deps: Deps, warnings: OutputWarning[]): 
   // C4 OWN.
   let cert: Buffer;
   try {
-    if (isProtectedPath(request.cert) || isProtectedPath(await deps.fs.realpath(request.cert)))
-      return fail(4, 'C4', 'unreadable TLS certificate', warnings);
-    cert = await readBoundedFile(request.cert, deps.fs);
+    if (isProtectedPath(request.cert)) return fail(4, 'C4', 'unreadable TLS certificate', warnings);
+    // The checked resolved path is the one read: the link cannot be changed between the two.
+    const resolvedCert = await deps.fs.realpath(request.cert);
+    if (isProtectedPath(resolvedCert)) return fail(4, 'C4', 'unreadable TLS certificate', warnings);
+    cert = await readBoundedFile(resolvedCert, deps.fs);
   } catch { return fail(4, 'C4', 'unreadable TLS certificate', warnings); }
   let own: Secret;
   try { own = (await readOnlineCredential(request.own, { stdin: deps.stdin ?? process.stdin, fs: deps.fs })).secret; }

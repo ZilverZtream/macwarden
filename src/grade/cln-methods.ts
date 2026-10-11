@@ -134,7 +134,7 @@ export const CLN_METHODS: Readonly<Record<string, Grade>> = Object.freeze({
   'listchannelmoves': 'READ',
   'listchannels': 'READ',
   'listclosedchannels': 'READ',
-  'listconfigs': 'READ',
+  'listconfigs': 'UNASSESSED',
   'listcurrencyrates': 'READ',
   'listdatastore': 'UNASSESSED',
   'listforwards': 'READ',

@@ -10,9 +10,17 @@ export function parseLndconnect(value: string, { standardBase64 = false } = {}):
     const queryStart = value.indexOf('?');
     if (queryStart < 0 || (fragmentStart >= 0 && fragmentStart < queryStart)) return null;
     const query = value.slice(queryStart + 1, fragmentStart < 0 ? undefined : fragmentStart);
-    const raw = query.split('&').filter(part => part.split('=', 1)[0] === 'macaroon');
+    // A key is compared percent-decoded (`%6Dacaroon` names the macaroon parameter too, as every
+    // URL parser reads it), so exactly one parameter can carry the macaroon. A key that does not
+    // decode cannot read as `macaroon` under any decoder: a malformed escape stays literal.
+    const named = (key: string): boolean => {
+      try { return decodeURIComponent(key) === 'macaroon'; } catch { return false; }
+    };
+    const raw = query.split('&').filter(part => named(part.split('=', 1)[0]));
     if (raw.length !== 1) return null;
-    const encoded = raw[0].slice('macaroon='.length);
+    const separator = raw[0].indexOf('=');
+    if (separator < 0) return null;
+    const encoded = raw[0].slice(separator + 1);
     if (/\s/u.test(encoded)) return null;
     const uri = new URL(value);
     if (uri.protocol.toLowerCase() !== 'lndconnect:' || !uri.hostname) return null;

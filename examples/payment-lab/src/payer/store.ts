@@ -1,9 +1,10 @@
+import { performance } from 'node:perf_hooks';
 import type { DatabaseSync } from 'node:sqlite';
 import type { DecodedPayReq, Payment } from '../lnd/types.ts';
 import { sha256Hex } from '../util/encoding.ts';
 import { saturateInt64 } from '../util/money.ts';
 import { entriesFor, legsFor, post, type JournalEntry } from '../ledger/journal.ts';
-import { migratePayerLedger } from '../ledger/migrate.ts';
+import { migratePayerLedger, upgradePayerLedger } from '../ledger/migrate.ts';
 import { migratePayerOutbox } from '../outbox/migrate.ts';
 import { confirmOperation, enqueue, outboxRows, type OutboxRow } from '../outbox/outbox.ts';
 import { budgetConsumed, budgetHeld, budgetReleased, paymentSucceeded, payerDoublePayment } from '../ledger/postings.ts';
@@ -167,7 +168,42 @@ migratePayerOutbox, `
 -- order, which paymentsForOperation sorts by; (operation_id, created_at) would still need a sort.
 CREATE INDEX IF NOT EXISTS payments_by_operation ON payments (operation_id);
 CREATE INDEX IF NOT EXISTS payment_events_by_payment ON payment_events (payment_hash, event_id);
-`];
+`,
+// 9: the creation times LND reported per submission, and when each claim was made (wall clock, nanoseconds), so a
+// TrackPaymentV2 snapshot without HTLC attempts can be told from one LND took before the live submission's request
+// reached it (PayerStore.applyUpdate). See migrateClaimTime.
+migrateClaimTime,
+// 10: the budget-held and budget-released pair of each reservation the 1.3.0 ledger migration converted released, and the
+// migration watermark (see upgradePayerLedger; nothing to post on a fresh book).
+upgradePayerLedger];
+
+/**
+ * Migration 9: payment_creations (the highest creation_time_ns LND reported in an update read for each submission)
+ * and payments.submitted_at_ns. A step that runs again (a database whose user_version was set back) finds both and
+ * adds nothing. A payment unresolved at the upgrade gets its last change as its claim time: never earlier than the
+ * claim, so a snapshot older than the claim is still judged older.
+ */
+function migrateClaimTime(db: DatabaseSync): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS payment_creations (
+  payment_hash TEXT NOT NULL REFERENCES payments (payment_hash),
+  submission INTEGER NOT NULL,
+  creation_time_ns INTEGER NOT NULL,
+  PRIMARY KEY (payment_hash, submission)
+)`);
+  if (db.prepare(`SELECT 1 FROM pragma_table_info('payments') WHERE name = 'submitted_at_ns'`).get() === undefined) {
+    db.exec('ALTER TABLE payments ADD COLUMN submitted_at_ns INTEGER');
+  }
+  db.exec(`UPDATE payments SET submitted_at_ns = CAST(round((julianday(updated_at) - 2440587.5) * 86400000) AS INTEGER) * 1000000
+    WHERE submitted_at_ns IS NULL AND state IN ('submitting', 'in_flight', 'uncertain')`);
+}
+
+/**
+ * Wall-clock time in nanoseconds, the unit of LND's creation_time_ns: the process's start time plus the monotonic
+ * clock, finer than Date.now()'s millisecond, so a claim and a payment LND created in the same millisecond still order.
+ */
+export function wallClockNs(): bigint {
+  return BigInt(Math.round(performance.timeOrigin * 1e6)) + BigInt(Math.round(performance.now() * 1e6));
+}
 
 export type PaymentState = 'intent' | 'submitting' | 'in_flight' | 'uncertain' | 'succeeded' | 'failed';
 export type OperationKind = 'order-payment' | 'refund' | 'payout';
@@ -186,6 +222,8 @@ export interface PaymentRecord {
   submissions: number;
   /** The highest submission that is over for good (prepareRetry closed it); 0 when none. */
   closedSubmission: number;
+  /** When the current submission was claimed (wallClockNs); undefined before the first claim. */
+  submittedAtNs: bigint | undefined;
   feeMsat: bigint | undefined;
   valueMsat: bigint | undefined;
   preimage: string | undefined;
@@ -245,12 +283,16 @@ export interface PaymentConflict {
   action: 'withdrawn' | 'possible-double-payment' | 'double-payment';
 }
 
-/** What an LND update changed in the record. `completed` is true exactly once per operation. */
+/**
+ * What an LND update changed in the record. `completed` is true exactly once per operation. `stale`: the update was
+ * not about the submission the record speaks for (see PayerStore.applyUpdate) and changed nothing.
+ */
 export interface UpdateResult {
   state: PaymentState;
   completed: boolean;
   failed: boolean;
   conflicts: PaymentConflict[];
+  stale?: true;
 }
 
 function paymentFrom(row: Row): PaymentRecord {
@@ -265,6 +307,7 @@ function paymentFrom(row: Row): PaymentRecord {
     state: text(row, 'state') as PaymentState,
     submissions: Number(int(row, 'submissions')),
     closedSubmission: Number(int(row, 'closed_submission')),
+    submittedAtNs: optionalInt(row, 'submitted_at_ns'),
     feeMsat: optionalInt(row, 'fee_msat'),
     valueMsat: optionalInt(row, 'value_msat'),
     preimage: optionalText(row, 'preimage'),
@@ -489,17 +532,21 @@ export class PayerStore {
   }
 
   /**
-   * Claims the payment for one SendPaymentV2 call: intent → submitting, counted.
-   * Compare-and-set, so two processes can never both submit the same record. Never for a
-   * completed operation (another payment paid it): such an intent is withdrawn instead, in
-   * the same transaction, and the claim fails.
+   * Claims the payment for one SendPaymentV2 call: intent → submitting, counted, with the
+   * time of the claim. Compare-and-set, so two processes can never both submit the same record.
+   * Never for a completed operation (another payment paid it): such an intent is withdrawn
+   * instead, in the same transaction, and the claim fails. `claimed.submission` receives the
+   * submission this claim counted, from the same statement: a read after the commit could
+   * already see another process's later claim.
    */
-  claimForSubmission(paymentHash: string): boolean {
+  claimForSubmission(paymentHash: string, claimed?: { submission?: number }): boolean {
     return immediate(this.db, () => {
-      const result = this.db.prepare(`UPDATE payments SET state = 'submitting', submissions = submissions + 1, uncertain_reason = NULL,
-        updated_at = ? WHERE payment_hash = ? AND state = 'intent' AND NOT EXISTS (SELECT 1 FROM operations
-          WHERE operations.operation_id = payments.operation_id AND operations.state = 'completed')`).run(nowIso(), paymentHash);
-      if (changes(result) === 1) {
+      const row = this.db.prepare(`UPDATE payments SET state = 'submitting', submissions = submissions + 1, uncertain_reason = NULL,
+        submitted_at_ns = ?, updated_at = ? WHERE payment_hash = ? AND state = 'intent' AND NOT EXISTS (SELECT 1 FROM operations
+          WHERE operations.operation_id = payments.operation_id AND operations.state = 'completed') RETURNING submissions`)
+        .get(wallClockNs(), nowIso(), paymentHash);
+      if (row !== undefined) {
+        if (claimed !== undefined) claimed.submission = Number(int(row, 'submissions'));
         this.#event(paymentHash, 'submit', { rpc: 'SendPaymentV2' });
         return true;
       }
@@ -731,6 +778,41 @@ export class PayerStore {
   }
 
   /**
+   * Whether a TrackPaymentV2 snapshot read for the live submission of a payment submitted more than once
+   * shows the payment as LND held it before that submission's request reached it. LND keeps a failed
+   * payment's last state until a new SendPaymentV2 for the hash reaches it, and then initialises the
+   * payment again: the old HTLC attempts are deleted and the creation time is set anew. Until then
+   * TrackPaymentV2 answers with the earlier submission's FAILED, which says nothing about the live one:
+   * the retry may still pay. The snapshot is the live submission's when it carries an HTLC attempt not
+   * recorded under an earlier submission or, carrying none, when LND created the payment later than any
+   * creation time LND reported for an earlier submission: both times are LND's clock, so a skew between
+   * LND and this host does not matter. Only when no creation time was recorded for an earlier submission
+   * (it failed before LND initiated it, or before this record kept creation times) is the snapshot's
+   * creation time compared with the live submission's claim time, which assumes the two clocks agree.
+   */
+  #beforeLiveSubmission(record: PaymentRecord, payment: Payment, submission: number | undefined): boolean {
+    const live = submission ?? record.submissions;
+    if (live <= 1 || live !== record.submissions) return false;
+    if (payment.htlcs.length > 0) {
+      const earlier = new Set(this.db.prepare('SELECT attempt_id FROM htlc_attempts WHERE payment_hash = ? AND submission < ?')
+        .all(payment.paymentHash, live).map(row => text(row, 'attempt_id')));
+      return payment.htlcs.every(attempt => earlier.has(attempt.attemptId));
+    }
+    const row = this.db.prepare('SELECT max(creation_time_ns) AS created FROM payment_creations WHERE payment_hash = ? AND submission < ?')
+      .get(payment.paymentHash, live);
+    const earlierCreated = row === undefined ? undefined : optionalInt(row, 'created');
+    if (earlierCreated !== undefined) return payment.creationTimeNs <= earlierCreated;
+    return record.submittedAtNs === undefined || payment.creationTimeNs < record.submittedAtNs;
+  }
+
+  /** Keeps the highest creation time LND reported in an update read for `submission` (see #beforeLiveSubmission). */
+  #recordCreation(payment: Payment, submission: number): void {
+    this.db.prepare(`INSERT INTO payment_creations (payment_hash, submission, creation_time_ns) VALUES (?, ?, ?)
+      ON CONFLICT (payment_hash, submission) DO UPDATE SET creation_time_ns = max(creation_time_ns, excluded.creation_time_ns)`)
+      .run(payment.paymentHash, submission, payment.creationTimeNs);
+  }
+
+  /**
    * Applies one update from SendPaymentV2 or TrackPaymentV2. LND is the
    * authority on the outcome; this method only refuses an update that
    * contradicts a terminal state already recorded.
@@ -742,16 +824,32 @@ export class PayerStore {
    * (it is logged as `stale-update`). A revert to intent after a NotFound closes nothing:
    * the same submission's own IN_FLIGHT and FAILED still apply. A SUCCEEDED update is
    * always applied, whatever submission it was read for: the money left.
+   *
+   * A TrackPaymentV2 snapshot other than SUCCEEDED that shows the payment as LND held it
+   * before the live submission's request reached it (#beforeLiveSubmission) is stale as well,
+   * although it was read for the live submission: it is logged as `stale-update` and the
+   * payment stays as it is. A SendPaymentV2 stream reports only on its own request, so its
+   * updates are not judged this way.
    */
   applyUpdate(payment: Payment, source: 'SendPaymentV2' | 'TrackPaymentV2', submission?: number): UpdateResult {
     return immediate(this.db, (): UpdateResult => {
       const record = this.payment(payment.paymentHash);
       if (record === undefined) throw new Error(`update for unknown payment ${payment.paymentHash}`);
+      // Judged before this snapshot's attempts are recorded, so they never count as recorded earlier.
+      const earlier = source === 'TrackPaymentV2' && payment.status !== 'SUCCEEDED' && !superseded(record, submission)
+        && this.#beforeLiveSubmission(record, payment, submission);
       this.#upsertAttempts(payment, submission);
+      // Under the submission the update was read for: a later submission judges its snapshots against these.
+      this.#recordCreation(payment, submission ?? record.submissions);
       const now = nowIso();
       if (payment.status !== 'SUCCEEDED' && superseded(record, submission)) {
         this.#stale(record, 'update', submission, { source, status: payment.status });
-        return { state: record.state, completed: false, failed: false, conflicts: [] };
+        return { state: record.state, completed: false, failed: false, conflicts: [], stale: true };
+      }
+      if (earlier) {
+        this.#stale(record, 'update', submission, { source, status: payment.status, takenBefore: 'live-submission',
+          creationTimeNs: payment.creationTimeNs, submittedAtNs: record.submittedAtNs ?? null, htlcAttempts: payment.htlcs.length });
+        return { state: record.state, completed: false, failed: false, conflicts: [], stale: true };
       }
       if (payment.status === 'SUCCEEDED') {
         const preimage = payment.preimage;

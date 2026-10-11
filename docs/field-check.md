@@ -11,8 +11,8 @@ Record only versions, exit codes and fingerprints. Never paste a macaroon, an `l
 - A working directory you can delete afterwards, for example `~/macwarden-field-check`.
 
 ```sh
-npm install -g macwarden@1.2.0
-macwarden --version            # expect 1.2.0
+npm install -g macwarden@1.3.1
+macwarden --version            # expect 1.3.1
 lncli getinfo | grep version   # record the LND version
 ```
 
@@ -21,9 +21,10 @@ lncli getinfo | grep version   # record the LND version
 ```sh
 macwarden inspect ~/.lnd/data/chain/bitcoin/mainnet/readonly.macaroon
 macwarden scan ~/.lnd --fail-on READ
+macwarden scan ~/.lnd --json > lnd-scan.json
 ```
 
-Expect: `inspect` grades `readonly.macaroon` as `READ` on root key ID 0. `scan` finds the default macaroons (`admin.macaroon` as `ADMIN`) and exits 1. It never opens `macaroons.db`, `wallet.db` or the TLS key; check that they appear as skipped `never-open`, not as findings. Adjust `mainnet` for your network.
+Expect: `inspect` grades `readonly.macaroon` as `READ` on root key ID 0. `scan` finds the default macaroons (`admin.macaroon` as `ADMIN`) and exits 1. It never opens `macaroons.db`, `wallet.db` or the TLS key; check in `lnd-scan.json` that they are listed in `result.skipped` with reason `never-open`, not in `result.findings`. The JSON holds fingerprints only, never a macaroon. Adjust `mainnet` for your network.
 
 ## 2. A session credential for macwarden
 

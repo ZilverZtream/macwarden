@@ -266,7 +266,7 @@ describe('payment lab ledger: migration of a 1.2 database', () => {
     store.close();
     const upgraded = payerStore(file);
     expect(upgraded.db.prepare(`SELECT name FROM sqlite_master WHERE name = 'ledger_entries'`).all()).toHaveLength(0);
-    expect(upgraded.db.prepare('PRAGMA user_version').all()[0]?.user_version).toBe(8n); // 6 is the ledger migration; 7 (the outbox) and 8 (lookup indexes) run after it
+    expect(upgraded.db.prepare('PRAGMA user_version').all()[0]?.user_version).toBe(10n); // 6 is the ledger migration; 7 (the outbox), 8 (lookup indexes), 9 (claim times) and 10 (ledger upgrade) run after it
     const result = await lab.verifyLedger(upgraded);
     expectBalanced(result);
     expect(balances(result)).toEqual({ 'customer-receivable': VALUE, 'refunds-payable': VALUE, 'lnd-wallet-outgoing': -2n * (VALUE + FEE),

@@ -2,7 +2,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { getEventListeners } from 'node:events';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { join, resolve } from 'node:path';
 import { UsageStore, writeUsage } from '../src/watch/usage.js';
@@ -87,9 +87,13 @@ function call(kind: MiddlewareCall['kind'], requestId: number, method: string, m
   return { kind, requestId: BigInt(requestId), method, isError: false, customCaveatCondition: '', macaroon: mac ? new Secret(mac) : null, ...extra };
 }
 
-const settle = () => new Promise(resolve => setTimeout(resolve, 20));
+// Waits for observable state (an emitted line, a registration, an alert) instead of a fixed
+// delay (audit 1.4.0): a loaded runner can take longer than any fixed window.
+const until = (check: () => void) => vi.waitFor(check, { timeout: 10_000, interval: 5 });
+const watching = (lines: string[]) => lines.filter(line => line.includes('watching (read-only middleware registered')
+  || line.includes('"status":"registered"')).length;
 
-async function watchUntil(args: string[], register: Register, drive: (stop: () => void) => Promise<void>,
+async function watchUntil(args: string[], register: Register, drive: (stop: () => void, lines: string[]) => Promise<void>,
   extra: { alerts?: WatchEvent[]; sleeps?: number[]; deps?: Partial<Parameters<typeof run>[1]> } = {}) {
   const lines: string[] = [];
   const controller = new AbortController();
@@ -99,7 +103,7 @@ async function watchUntil(args: string[], register: Register, drive: (stop: () =
     alert: async (_command, event) => { extra.alerts?.push(event); }, sleep: async ms => { extra.sleeps?.push(ms); },
     hostname: () => hostname(), pid: process.pid, ...extra.deps,
   }));
-  await drive(() => controller.abort());
+  await drive(() => controller.abort(), lines);
   const settled = await result;
   // Every run's final document, and every --json event line, matches the shipped schemas.
   expectSchemaValid(settled);
@@ -115,7 +119,7 @@ it('WATCH/attribution calls are attributed per baked credential; client caveats 
   const second = addFirstPartyCaveat(new Secret(app), 'time-before 2026-10-08T12:01:05Z');
   const s = setup([entry('app1', '4294967341')]);
   const script = { registrations: [], decide: [], end: [] } as unknown as Script;
-  const { result, lines } = await watchUntil([...s.args, '--json'], fakeRegister(script), async stop => {
+  const { result, lines } = await watchUntil([...s.args, '--json'], fakeRegister(script), async (stop, emitted) => {
     await script.ready;
     const observe = script.decide[0];
     expect(observe(call('request', 1, '/lnrpc.Lightning/GetInfo', null, { macaroon: first }))).toBe('');
@@ -126,7 +130,11 @@ it('WATCH/attribution calls are attributed per baked credential; client caveats 
     // An error response is attributed to its request.
     observe(call('request', 4, '/lnrpc.Lightning/ListChannels', admin));
     observe(call('response', 4, '/lnrpc.Lightning/ListChannels', admin, { isError: true }));
-    await settle();
+    // Attributed: four call events and the error event are out.
+    await until(() => {
+      const kinds = emitted.map(line => (JSON.parse(line) as { event: string }).event);
+      expect([kinds.filter(kind => kind === 'call').length, kinds.filter(kind => kind === 'error').length]).toEqual([4, 1]);
+    });
     stop();
   });
   expect(script.registrations).toEqual([{ name: 'macwarden-watch', readOnly: true }]);
@@ -158,10 +166,10 @@ it('WATCH/attribution calls are attributed per baked credential; client caveats 
 it('WATCH/labels a registered non-zero root key is attributed to its label', async () => {
   const s = setup([entry('app1', '18446744073709551615')]);
   const script = { registrations: [], decide: [], end: [] } as unknown as Script;
-  const { lines } = await watchUntil(s.args, fakeRegister(script), async stop => {
+  const { lines } = await watchUntil(s.args, fakeRegister(script), async (stop, emitted) => {
     await script.ready;
     script.decide[0](call('request', 1, '/lnrpc.Lightning/AddInvoice', vector('root-max')));
-    await settle();
+    await until(() => expect(emitted.some(line => line.includes('AddInvoice'))).toBe(true));
     stop();
   });
   expect(lines.find(line => line.includes('AddInvoice'))).toBe(
@@ -175,16 +183,16 @@ it('WATCH/canary a canary caveat is guarded: the call is denied, alerted once an
   const alerts: WatchEvent[] = [];
   const decoy = vector('preset-read-only');
   const { result, lines } = await watchUntil([...s.args, '--alert-command', alertFile(s.dir)],
-    fakeRegister(script), async stop => {
+    fakeRegister(script), async (stop, emitted) => {
       await script.ready;
-      await settle();
+      await until(() => expect(script.registrations).toHaveLength(2));
       expect(script.registrations).toEqual([{ name: 'macwarden-watch', readOnly: true },
         { name: 'macwarden-watch-guard', readOnly: false, caveatName: 'region-a1a2f213' }]);
       expect(script.decide[1](call('request', 9, '/lnrpc.Lightning/GetInfo', decoy, { customCaveatCondition: '3a1e61423be44eaf' })))
         .toBe('permission denied');
       // Responses to an already denied call are not re-denied.
       expect(script.decide[1](call('response', 9, '/lnrpc.Lightning/GetInfo', decoy))).toBe('');
-      await settle();
+      await until(() => { expect(alerts).toHaveLength(1); expect(emitted.some(line => line.includes('ALERT'))).toBe(true); });
       stop();
     }, { alerts });
   expect(result).toMatchObject({ ok: true, result: { canaryAlerts: 1, canaries: 1 } });
@@ -211,13 +219,12 @@ it('WATCH/canary-flood thousands of canary uses are all denied but alert at most
   const { result, lines } = await watchUntil([...s.args, '--alert-command', alertFile(s.dir)],
     fakeRegister(script), async stop => {
       await script.ready;
-      await settle();
+      await until(() => expect(script.registrations).toHaveLength(2));
       for (let n = 0; n < 5_000; n++)
         if (script.decide[1](call('request', 10 + n, '/lnrpc.Lightning/GetInfo', decoy, { customCaveatCondition: '3a1e61423be44eaf' })) === 'permission denied') denied += 1;
-      await settle();
       // Stop once the first alert command finished: the shutdown flush then runs the summary
       // (a summary still waiting behind a running command at shutdown is discarded, MW102-05).
-      for (let i = 0; i < 100 && (running || runs.length === 0); i++) await settle();
+      await until(() => { expect(runs.length).toBeGreaterThan(0); expect(running).toBe(0); });
       stop();
     }, { deps: { alert: slowAlert } });
   expect(denied).toBe(5_000);
@@ -238,12 +245,13 @@ it('WATCH/canary-churn conditions an attacker invents share one alert bucket: th
   let denied = 0;
   const { result } = await watchUntil([...s.args, '--alert-command', alertFile(s.dir)], fakeRegister(script), async stop => {
     await script.ready;
-    await settle();
+    await until(() => expect(script.registrations).toHaveLength(2));
     for (let n = 0; n < 5_000; n++) {
       const condition = n.toString(16).padStart(16, 'f');
       if (script.decide[1](call('request', 10 + n, '/lnrpc.Lightning/GetInfo', decoy, { customCaveatCondition: condition })) === 'permission denied') denied += 1;
     }
-    await settle();
+    // The first use has alerted; the rest wait in the window for the shutdown flush.
+    await until(() => expect(alerts).toHaveLength(1));
     stop();
   }, { alerts });
   expect(denied).toBe(5_000);
@@ -260,14 +268,15 @@ it('WATCH/credential-cap a node sending ever more distinct credentials cannot gr
   let at = 1, idStart = -1;
   const varint = (pos: number): [number, number] => { let value = 0, shift = 0; for (;;) { const b = base[pos++]; value += (b & 0x7f) * 2 ** shift; if (!(b & 0x80)) return [value, pos]; shift += 7; } };
   for (;;) { const [type, afterType] = varint(at); const [length, start] = varint(afterType); if (type === 2) { idStart = start; break; } at = start + length; }
-  const { result } = await watchUntil(s.args, fakeRegister(script), async stop => {
+  const { result } = await watchUntil(s.args, fakeRegister(script), async (stop, emitted) => {
     await script.ready;
     for (let n = 0; n < 10_050; n++) {
       const mac = Buffer.from(base);
       mac.writeUInt32BE(n, idStart + 3);
       script.decide[0](call('request', n, '/lnrpc.Lightning/GetInfo', mac));
     }
-    await settle();
+    // Every call attributed (one line each) before the summary is taken.
+    await until(() => expect(emitted.filter(line => line.includes('/lnrpc.Lightning/GetInfo')).length).toBe(10_050));
     stop();
   });
   expect(result).toMatchObject({ ok: true, result: { calls: 10_050, credentials: 10_000 } });
@@ -311,17 +320,17 @@ it('WATCH/canary-reload a canary baked while watch runs is guarded without a res
   const script = { registrations: [], decide: [], end: [] } as unknown as Script;
   const decoy = vector('preset-read-only');
   let verdict = '';
-  const { result } = await watchUntil(s.args, fakeRegister(script), async stop => {
+  const { result } = await watchUntil(s.args, fakeRegister(script), async (stop, emitted) => {
     await script.ready;
     expect(script.registrations).toEqual([{ name: 'macwarden-watch', readOnly: true }]);
     // bake --canary runs now: sidecar and registry entry appear.
     writeFileSync(`${s.registry}.canary.json`, JSON.stringify({ schema: 1, caveatName: 'region-a1a2f213' }));
     writeFileSync(s.registry, JSON.stringify({ schema: 1, entries: [entry('decoy', '4294967342', [{ type: 'lnd-custom', value: 'region-a1a2f213 3a1e61423be44eaf' }])] }));
-    for (let i = 0; i < 100 && script.registrations.length < 3; i++) await settle();
+    await until(() => expect(script.registrations).toHaveLength(3));
     expect(script.registrations.slice(1)).toEqual([{ name: 'macwarden-watch', readOnly: true },
       { name: 'macwarden-watch-guard', readOnly: false, caveatName: 'region-a1a2f213' }]);
     verdict = script.decide[2](call('request', 7, '/lnrpc.Lightning/GetInfo', decoy, { customCaveatCondition: '3a1e61423be44eaf' }));
-    await settle();
+    await until(() => expect(emitted.some(line => line.includes('ALERT canary decoy'))).toBe(true));
     stop();
   }, { deps: { canaryReloadMs: 30 } });
   expect(verdict).toBe('permission denied');
@@ -335,18 +344,20 @@ it('WATCH/shutdown an alert command that never finishes cannot hold the lock, th
   const decoy = vector('preset-read-only');
   const lock = `${s.registry}.watch.lock`;
   let releasedWhileAlertPending = false;
+  let alertStarted = false;
   const started = performance.now();
-  const { result } = await watchUntil([...s.args, '--alert-command', alertFile(s.dir)], fakeRegister(script), async stop => {
+  const { result } = await watchUntil([...s.args, '--alert-command', alertFile(s.dir)], fakeRegister(script), async (stop, emitted) => {
     await script.ready;
-    await settle();
+    await until(() => expect(script.registrations).toHaveLength(2));
     // One ordinary call, so there is usage to persist, then a canary use whose alert never finishes.
     script.decide[0](call('request', 8, '/lnrpc.Lightning/GetInfo', decoy));
     script.decide[1](call('request', 9, '/lnrpc.Lightning/GetInfo', decoy, { customCaveatCondition: '3a1e61423be44eaf' }));
-    await settle();
+    await until(() => { expect(alertStarted).toBe(true); expect(emitted.some(line => line.includes('  /lnrpc.Lightning/GetInfo  '))).toBe(true); });
     stop();
-    for (let i = 0; i < 100 && existsSync(lock); i++) await settle();
+    // The lock is released while the alert command is still pending; a failed wait leaves the flag false.
+    await until(() => expect(existsSync(lock)).toBe(false)).catch(() => undefined);
     releasedWhileAlertPending = !existsSync(lock) && existsSync(`${s.registry}.usage.json`);
-  }, { deps: { alert: () => new Promise<void>(() => undefined) } });
+  }, { deps: { alert: () => { alertStarted = true; return new Promise<void>(() => undefined); } } });
   expect(releasedWhileAlertPending).toBe(true);
   expect(result.ok).toBe(true);
   // Bounded by the alert command's kill deadline plus a second.
@@ -402,7 +413,7 @@ it('WATCH/backoff a session that registers and drops at once does not reset the 
     message: 'LND transport failure', disabled: false }), 1);
   await watchUntil(s.args, fakeRegister(script, flap), async stop => {
     await script.ready;
-    for (let i = 0; i < 500 && sleeps.length < 6; i++) await settle();
+    await until(() => expect(sleeps.length).toBeGreaterThanOrEqual(6));
     stop();
   }, { sleeps });
   expect(sleeps.slice(0, 6)).toEqual([1_000, 2_000, 4_000, 8_000, 16_000, 30_000]);
@@ -520,7 +531,7 @@ it('WATCH/stream-once a bidirectional stream counts once however many messages i
   const admin = vector('default-admin');
   const s = setup();
   const script = { registrations: [], decide: [], end: [] } as unknown as Script;
-  const { result } = await watchUntil(s.args, fakeRegister(script), async stop => {
+  const { result } = await watchUntil(s.args, fakeRegister(script), async (stop, emitted) => {
     await script.ready;
     const observe = script.decide[0];
     // LND intercepts every message on a stream with the same request ID (ChannelAcceptor style).
@@ -530,7 +541,7 @@ it('WATCH/stream-once a bidirectional stream counts once however many messages i
       observe(call('response', 5, '/lnrpc.Lightning/ChannelAcceptor', admin));
     }
     observe(call('response', 5, '/lnrpc.Lightning/ChannelAcceptor', admin, { isError: true }));
-    await settle();
+    await until(() => expect(emitted.some(line => line.includes('error /lnrpc.Lightning/ChannelAcceptor'))).toBe(true));
     stop();
   });
   expect(result).toMatchObject({ ok: true, result: { calls: 1, errors: 1 } });
@@ -543,16 +554,16 @@ it('WATCH/session-keys request IDs restart with LND, so keys from a lost session
   const app = vector('preset-read-only');
   const s = setup();
   const script = { registrations: [], decide: [], end: [] } as unknown as Script;
-  const { result, lines } = await watchUntil([...s.args, '--json'], fakeRegister(script), async stop => {
+  const { result, lines } = await watchUntil([...s.args, '--json'], fakeRegister(script), async (stop, emitted) => {
     await script.ready;
     script.decide[0](call('stream_auth', 2, '/lnrpc.Lightning/SubscribeChannelEvents', admin));
-    await settle();
+    await until(() => expect(emitted.some(line => line.includes('SubscribeChannelEvents'))).toBe(true));
     script.end[0]({ registered: true, code: 4, stage: 'middleware-stream', message: 'LND transport failure', disabled: false });
-    await settle();
+    await until(() => expect(watching(emitted)).toBe(2));
     // After LND restarted, request ID 2 is a different call by a different credential.
     script.decide[1](call('request', 2, '/lnrpc.Lightning/WalletBalance', app));
     script.decide[1](call('response', 2, '/lnrpc.Lightning/WalletBalance', app, { isError: true }));
-    await settle();
+    await until(() => expect(emitted.some(line => line.includes('"event":"error"') && line.includes('WalletBalance'))).toBe(true));
     stop();
   });
   expect(result).toMatchObject({ ok: true, result: { calls: 2, errors: 1, reconnects: 1 } });
@@ -579,9 +590,9 @@ it('WATCH/stale-registration "already registered" after an earlier successful se
     else queueMicrotask(() => onRegistered());
     return { ended, close: () => settleEnd({ registered: true, code: 4, stage: 'middleware-stream', message: 'closed', disabled: false }) };
   }) as Register;
-  const { result } = await watchUntil(s.args, register, async stop => {
-    for (let wait = 0; wait < 100 && sessions < 3; wait++) await settle();
-    await settle();
+  const { result } = await watchUntil(s.args, register, async (stop, emitted) => {
+    // Sessions 1 and 3 registered (session 2 was refused).
+    await until(() => { expect(sessions).toBe(3); expect(watching(emitted)).toBe(2); });
     stop();
   }, { sleeps });
   expect(sessions).toBe(3);
@@ -592,18 +603,20 @@ it('WATCH/stale-registration "already registered" after an earlier successful se
 it('WATCH/usage-validation an error for a call without a valid credential is not recorded and the usage file stays readable', async () => {
   const s = setup();
   const script = { registrations: [], decide: [], end: [] } as unknown as Script;
-  const { result } = await watchUntil(s.args, fakeRegister(script), async stop => {
+  const { result } = await watchUntil(s.args, fakeRegister(script), async (stop, emitted) => {
     await script.ready;
     script.decide[0](call('request', 7, '/lnrpc.Lightning/GetInfo', null));
     script.decide[0](call('response', 7, '/lnrpc.Lightning/GetInfo', null, { isError: true }));
-    await settle();
+    await until(() => expect(emitted.some(line => line.includes('error /lnrpc.Lightning/GetInfo'))).toBe(true));
     stop();
   });
   expect(result).toMatchObject({ ok: true, result: { calls: 1, errors: 1 } });
   // A second watch reads the file it left behind.
   // Stopped once registered: a stop while GetInfo still waits is an interrupt (WATCH/interrupted).
   const second = { registrations: [], decide: [], end: [] } as unknown as Script;
-  const again = await watchUntil(s.args, fakeRegister(second), async stop => { await second.ready; await settle(); stop(); });
+  const again = await watchUntil(s.args, fakeRegister(second), async (stop, emitted) => {
+    await second.ready; await until(() => expect(watching(emitted)).toBe(1)); stop();
+  });
   expect(again.result).toMatchObject({ ok: true });
   expect(again.result.warnings).not.toContainEqual(expect.objectContaining({ code: 'usage-file-quarantined' }));
   const store = new UsageStore();
@@ -616,7 +629,9 @@ it('WATCH/corrupt-usage a corrupt usage file is moved aside (never deleted) and 
   const s = setup();
   writeFileSync(`${s.registry}.usage.json`, '{"schema":1,"dropped":0,"entries":[{"credential":"id:none"}]}');
   const script = { registrations: [], decide: [], end: [] } as unknown as Script;
-  const { result } = await watchUntil(s.args, fakeRegister(script), async stop => { await script.ready; await settle(); stop(); });
+  const { result } = await watchUntil(s.args, fakeRegister(script), async (stop, emitted) => {
+    await script.ready; await until(() => expect(watching(emitted)).toBe(1)); stop();
+  });
   expect(result).toMatchObject({ ok: true });
   expect(result.warnings).toContainEqual(expect.objectContaining({ code: 'usage-file-quarantined' }));
   const aside = (await fs.readdir(s.dir)).filter(name => name.startsWith('registry.json.usage.json.corrupt-'));
@@ -627,7 +642,8 @@ it('WATCH/corrupt-usage a corrupt usage file is moved aside (never deleted) and 
 it('WATCH/alert-validation an alert command that cannot run without a shell is refused before anything starts', async () => {
   const s = setup();
   const run1 = async (path: string, platform: NodeJS.Platform) => (await watchUntil([...s.args, '--alert-command', path],
-    fakeRegister({ registrations: [], decide: [], end: [] } as unknown as Script), async stop => { await settle(); stop(); },
+    // Refused at W1 on its own: never stopped, so a command that was not refused would run until the test timeout.
+    fakeRegister({ registrations: [], decide: [], end: [] } as unknown as Script), async () => undefined,
     { deps: { platform } })).result;
   const script = join(s.dir, 'page.cmd');
   writeFileSync(script, '@echo paged');
@@ -642,10 +658,11 @@ it('WATCH/alert-validation an alert command that cannot run without a shell is r
 it('WATCH/alert-failed a failing alert command is reported as a warning, a status event and a count', async () => {
   const s = setup([entry('decoy', '4294967342', [{ type: 'lnd-custom', value: 'region-a1a2f213 3a1e61423be44eaf' }])], 'region-a1a2f213');
   const script = { registrations: [], decide: [], end: [] } as unknown as Script;
-  const { result, lines } = await watchUntil([...s.args, '--alert-command', alertFile(s.dir)], fakeRegister(script), async stop => {
+  const { result, lines } = await watchUntil([...s.args, '--alert-command', alertFile(s.dir)], fakeRegister(script), async (stop, emitted) => {
     await script.ready;
+    await until(() => expect(script.registrations).toHaveLength(2));
     script.decide[1](call('request', 9, '/lnrpc.Lightning/GetInfo', vector('preset-read-only'), { customCaveatCondition: '3a1e61423be44eaf' }));
-    await settle(); await settle();
+    await until(() => expect(emitted.some(line => line.includes('ALERT COMMAND FAILED'))).toBe(true));
     stop();
   }, { deps: { alert: async () => { throw new Error('alert command failed'); } } });
   expect(result).toMatchObject({ ok: true, result: { canaryAlerts: 1, alertFailures: 1 } });
@@ -658,8 +675,9 @@ it('WATCH/output-dropped lines the output could not keep up with are reported an
   const priority: boolean[] = [];
   const lines: string[] = [];
   const script = { registrations: [], decide: [], end: [] } as unknown as Script;
-  const { result } = await watchUntil(s.args, fakeRegister(script), async stop => { await script.ready; await settle(); stop(); },
-    { deps: { emit: (line, important) => { lines.push(line); priority.push(important === true); }, dropped: () => 5 } });
+  const { result } = await watchUntil(s.args, fakeRegister(script), async stop => {
+    await script.ready; await until(() => expect(watching(lines)).toBe(1)); stop();
+  }, { deps: { emit: (line, important) => { lines.push(line); priority.push(important === true); }, dropped: () => 5 } });
   expect(result).toMatchObject({ ok: true, result: { droppedEvents: 5 } });
   const notice = lines.findIndex(line => line.includes('output fell behind: 5 event lines dropped'));
   expect(notice).toBeGreaterThanOrEqual(0);
@@ -696,13 +714,13 @@ it('WATCH/canary-burst a canary used in the same turn as 25,000 ordinary calls s
   const decoy = vector('preset-read-only');
   const { result } = await watchUntil([...s.args, '--alert-command', alertFile(s.dir)], fakeRegister(script), async stop => {
     await script.ready;
-    await settle();
+    await until(() => expect(script.registrations).toHaveLength(2));
     const shared = new Secret(caller);
     for (let n = 0; n < 25_000; n++)
       script.decide[0]({ ...call('request', n, '/lnrpc.Lightning/AddInvoice', null), macaroon: shared, macaroonBytes: caller.length });
     expect(script.decide[1](call('request', 99_999, '/lnrpc.Lightning/GetInfo', decoy, { customCaveatCondition: '3a1e61423be44eaf' })))
       .toBe('permission denied');
-    await settle();
+    await until(() => expect(alerts).toHaveLength(1));
     stop();
   }, { alerts });
   const summary = result.result as { canaryAlerts: number; canaryUses: number; droppedAttributions: number; calls: number };
@@ -723,10 +741,17 @@ it('WATCH/reload-debounce reconnects re-read the registry at most once per RECON
   const s = setup();
   const script = { registrations: [], decide: [], end: [] } as unknown as Script;
   let reads = 0;
+  // The registry is read through one bounded descriptor (open) or, before that, readFile: count
+  // either, by the path as given or as resolved.
+  const registryPaths = new Set([resolve(s.registry), resolve(realpathSync(s.registry))]);
+  const isRegistry = (path: unknown) => registryPaths.has(resolve(String(path)));
   const counting = { ...fs, readFile: ((...args: Parameters<typeof fs.readFile>) => {
-    if (String(args[0]) === s.registry) reads += 1;
+    if (isRegistry(args[0])) reads += 1;
     return fs.readFile(...args);
-  }) as typeof fs.readFile };
+  }) as typeof fs.readFile, open: ((...args: Parameters<typeof fs.open>) => {
+    if (isRegistry(args[0]) && args[1] !== 'wx') reads += 1;
+    return fs.open(...args);
+  }) as typeof fs.open };
   const sleeps: number[] = [];
   const drop = (index: number) => script.end[index]({ registered: true, code: 4, stage: 'middleware-stream',
     message: 'LND transport failure', disabled: false });
@@ -751,7 +776,8 @@ it('WATCH/unreachable a gRPC endpoint that never registers fails with exit 4 aft
     return { ended: Promise.resolve({ registered: false, code: 4, stage: 'middleware-stream', message: 'LND transport failure', disabled: false }),
       close: () => undefined };
   }) as Register;
-  const { result } = await watchUntil(s.args, refused, async () => { await new Promise(resolve => setTimeout(resolve, 50)); }, { sleeps });
+  // Never stopped: watch gives up after its attempts on its own.
+  const { result } = await watchUntil(s.args, refused, async () => undefined, { sleeps });
   expect(result).toMatchObject({ ok: false, error: { code: 4, step: 'W7' } });
   expect(result.error!.message).toContain('localhost:10009');
   expect(result.error!.message).toContain('the default port 10009 on the --lnd-rest host');
@@ -772,8 +798,9 @@ it('WATCH/unreachable a run stopped before any session registered does not repor
     opened();
     return { ended, close: () => end({ registered: false, code: 4, stage: 'middleware-stream', message: 'closed', disabled: false }) };
   }) as Register;
+  // `registering` resolves inside the registration call: watch is waiting on it when stop() comes.
   const { result } = await watchUntil([...s.args, '--lnd-grpc', 'localhost:10001'], silent, async stop => {
-    await registering; await settle(); stop();
+    await registering; stop();
   });
   // Stopped by an interrupt before any session registered: interrupted (6), naming the endpoint it waited for (1.2.1).
   expect(result).toMatchObject({ ok: false, error: { code: 6, step: 'cancelled' } });
@@ -796,11 +823,11 @@ it('WATCH/canary-usage denied canary uses and the registered time are written to
   const script = { registrations: [], decide: [], end: [] } as unknown as Script;
   const decoy = vector('preset-read-only');
   let now = Date.parse('2026-10-08T12:00:00Z');
-  await watchUntil([...s.args, '--alert-command', alertFile(s.dir)], fakeRegister(script), async stop => {
+  await watchUntil([...s.args, '--alert-command', alertFile(s.dir)], fakeRegister(script), async (stop, emitted) => {
     await script.ready;
-    await settle();
+    await until(() => expect(script.registrations).toHaveLength(2));
     for (const id of [9, 10, 11]) script.decide[1](call('request', id, '/lnrpc.Lightning/GetInfo', decoy, { customCaveatCondition: '3a1e61423be44eaf' }));
-    await settle();
+    await until(() => expect(emitted.some(line => line.includes('ALERT canary decoy'))).toBe(true));
     now += 90_000;
     stop();
   }, { deps: { clock: () => new Date(now) } });
@@ -827,12 +854,11 @@ it('WATCH/alert-shutdown an alert waiting behind the running one at shutdown nev
   const use = (n: number) => script.decide[1](call('request', n, '/lnrpc.Lightning/GetInfo', decoy, { customCaveatCondition: '3a1e61423be44eaf' }));
   const { result, lines } = await watchUntil([...s.args, '--alert-command', alertFile(s.dir)], fakeRegister(script), async stop => {
     await script.ready;
-    await settle();
-    use(10);
-    await settle();
-    // Folded into the window; the shutdown flush turns it into a summary that would wait.
-    use(11);
-    await settle();
+    await until(() => expect(script.registrations).toHaveLength(2));
+    expect(use(10)).toBe('permission denied');
+    await until(() => expect(started).toBe(1));
+    // Folded into the window (counted when denied); the shutdown flush turns it into a summary that would wait.
+    expect(use(11)).toBe('permission denied');
     stoppedAt = performance.now();
     stop();
   }, { deps: { alert } });
@@ -843,6 +869,9 @@ it('WATCH/alert-shutdown an alert waiting behind the running one at shutdown nev
   // The summary is still printed, and the alert command it did not get is reported.
   expect(lines.find(line => line.includes('+1 more denied uses since the last alert'))).toBeDefined();
   expect(result).toMatchObject({ ok: true, result: { canaryAlerts: 2, canaryUses: 2, alertFailures: 1 } });
+  // After watch returned nothing may start any more. There is no event to wait for when nothing
+  // happens, so this one window stays a wall-clock wait (it can only miss a late start, never fail
+  // a correct run).
   await new Promise(resolve => setTimeout(resolve, 400));
   expect(started).toBe(1);
 }, 30_000);
@@ -886,19 +915,29 @@ it('WATCH/until-long durations beyond the 32-bit timer limit do not expire early
 it('WATCH/until-long `watch --until 25d` keeps watching instead of stopping at once', async () => {
   const s = setup();
   let registered = false, closed = false, closedBeforeStop = true;
+  let onRegistration!: () => void;
+  const registration = new Promise<void>(resolve => { onRegistration = resolve; });
   const register = ((_target, _registration, _decide, onRegistered) => {
     let settle!: (value: MiddlewareEnd) => void;
     const ended = new Promise<MiddlewareEnd>(resolve => { settle = resolve; });
-    queueMicrotask(() => { registered = true; onRegistered(); });
+    queueMicrotask(() => { registered = true; onRegistered(); onRegistration(); });
     return { ended, close: () => { closed = true; settle({ registered: true, code: 4, stage: 'middleware-stream', message: 'closed', disabled: false }); } };
   }) as Register;
-  const { result } = await watchUntil([...s.args, '--until', '25d'], register, async stop => {
-    for (let i = 0; i < 100 && !registered; i++) await settle();
-    await new Promise(resolve => setTimeout(resolve, 500));
-    // Still registered half a second later: the deadline did not fire early.
-    closedBeforeStop = closed;
-    stop();
-  });
+  // The --until deadline is a setTimeout: with that timer faked, an hour passes at once. A
+  // deadline clamped to 1 ms (MW102-09) would fire and close the session.
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  let result: Awaited<ReturnType<typeof watchUntil>>['result'];
+  try {
+    ({ result } = await watchUntil([...s.args, '--until', '25d'], register, async stop => {
+      await registration;
+      vi.advanceTimersByTime(3_600_000);
+      await Promise.resolve();
+      // Still registered an hour later: the deadline did not fire early.
+      closedBeforeStop = closed;
+      vi.useRealTimers();
+      stop();
+    }));
+  } finally { vi.useRealTimers(); }
   expect(registered).toBe(true);
   expect(closedBeforeStop).toBe(false);
   expect(result.ok).toBe(true);
@@ -923,9 +962,14 @@ it('WATCH/schema every --json event type and the final document validate against
       observe(call('response', 3, '/lnrpc.Lightning/AddInvoice', null, { isError: true }));
       // Two uses in one window: an alert, then a summary alert with repeats at stop.
       script.decide[1](call('request', 9, '/lnrpc.Lightning/GetInfo', app, { customCaveatCondition: '3a1e61423be44eaf' }));
-      await settle();
-      script.decide[1](call('request', 10, '/lnrpc.Lightning/GetInfo', app, { customCaveatCondition: '3a1e61423be44eaf' }));
-      await settle(); await settle();
+      await until(() => expect(lines.some(line => line.includes('"event":"canary"'))).toBe(true));
+      expect(script.decide[1](call('request', 10, '/lnrpc.Lightning/GetInfo', app, { customCaveatCondition: '3a1e61423be44eaf' })))
+        .toBe('permission denied');
+      // The first alert command failed and was reported; the calls before it are attributed.
+      await until(() => {
+        expect(lines.some(line => line.includes('"status":"alert-failed"'))).toBe(true);
+        expect(lines.some(line => line.includes('"event":"error"'))).toBe(true);
+      });
       script.end[0]({ registered: true, code: 4, stage: 'middleware-stream', message: 'LND transport failure', disabled: false });
       await reRegistered;
       stop();
@@ -954,7 +998,7 @@ it('WATCH/grpc-port an explicit gRPC port 443 is kept', async () => {
     opened();
     return { ended, close: () => end({ registered: false, code: 4, stage: 'middleware-stream', message: 'closed', disabled: false }) };
   }) as Register;
-  const { result } = await watchUntil([...s.args, '--lnd-grpc', 'localhost:443'], silent, async stop => { await registering; await settle(); stop(); });
+  const { result } = await watchUntil([...s.args, '--lnd-grpc', 'localhost:443'], silent, async stop => { await registering; stop(); });
   expect(result.error!.message).toContain('localhost:443 (from --lnd-grpc)');
   expect(result.error!.message).not.toContain('localhost:0');
 });

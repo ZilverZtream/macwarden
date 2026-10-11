@@ -149,7 +149,7 @@
         "warnings": { "type": "array", "items": { "$ref": "#/$defs/macaroonWarning" }, "uniqueItems": true },
         "unassessed": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
         "commit": {
-          "description": "Only with --git-history: full hash of the oldest commit that added this credential at this path. Absent on work-tree findings.",
+          "description": "Only with --git-history: full hash of the oldest commit that added this credential at this path, or, for a tree or blob named only by a ref or tag, that ref's object. Absent on work-tree findings.",
           "type": "string",
           "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"
         },

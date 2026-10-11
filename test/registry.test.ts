@@ -41,15 +41,15 @@ const failing = async (action: () => unknown | Promise<unknown>) => {
   try { await action(); } catch (error) { return error as Error & { code?: number; exitCode?: number }; }
   throw new Error('Expected registry rejection');
 };
+// The exit code is required: an error without one (code or exitCode) fails (audit 1.4.0: an
+// absent property used to skip the check).
 function inputError(error: Error & { code?: number; exitCode?: number }): void {
   expect(error.name).toBe('RegistryInputError');
-  if (typeof error.code === 'number') expect(error.code).toBe(3);
-  if (typeof error.exitCode === 'number') expect(error.exitCode).toBe(3);
+  expect(error.code ?? error.exitCode).toBe(3);
 }
 function usageError(error: Error & { code?: number; exitCode?: number }): void {
   expect(error.name).toBe('RegistryUsageError');
-  if (typeof error.code === 'number') expect(error.code).toBe(2);
-  if (typeof error.exitCode === 'number') expect(error.exitCode).toBe(2);
+  expect(error.code ?? error.exitCode).toBe(2);
 }
 async function temp<T>(work: (dir: string) => Promise<T>): Promise<T> {
   mkdirSync(base, { recursive: true });

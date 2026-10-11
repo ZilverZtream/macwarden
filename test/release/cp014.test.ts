@@ -52,6 +52,9 @@ function checkPinnedUses(text: string): void {
   expect(uses.every(value => [
     'actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd',
     'actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444',
+    // The release workflow hands the verified tarball from its verify job to its publish job.
+    'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a', // v7.0.1
+    'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c', // v8.0.1
   ].includes(value))).toBe(true);
 }
 
@@ -84,7 +87,7 @@ it('CP-014/B1 dry-run and extracted tarball have exactly the offline allow-list'
 it('CP-014/B2 installed tarball runs version inspect scan and dormant inventory', () => {
   const version = installedCommand(['--version']);
   expect(version.status).toBe(0);
-  expect(version.stdout.trim()).toBe('1.3.0');
+  expect(version.stdout.trim()).toBe('1.3.1');
 
   const addInvoice = vector('grade-uri-add-invoice');
   expect(addInvoice.expectedGrade).toBe('RECEIVE');
@@ -132,9 +135,9 @@ it('CP-014/B3 package metadata fixes version dependencies allow-list and future 
   const lock = JSON.parse(readFileSync(join(repo, 'package-lock.json'), 'utf8')) as {
     version: string; packages: Record<string, { version: string; dependencies?: Record<string, string> }> };
   expect(pkg.name).toBe('macwarden');
-  expect(pkg.version).toBe('1.3.0');
-  expect(lock.version).toBe('1.3.0');
-  expect(lock.packages[''].version).toBe('1.3.0');
+  expect(pkg.version).toBe('1.3.1');
+  expect(lock.version).toBe('1.3.1');
+  expect(lock.packages[''].version).toBe('1.3.1');
   expect(pkg.license).toBe('MIT');
   expect(pkg.engines.node).toBe('^22.23.2 || ^24.18.1 || >=26.5.1');
   expect(Object.keys(pkg.dependencies ?? {})).toHaveLength(0);
@@ -231,6 +234,30 @@ it('CP-014/B6 release documents give runnable offline examples and accurate loca
     expect(result.status, `${verb} README example must not exit 2`).not.toBe(2);
   }
 }, ARTIFACT_TIMEOUT_MS);
+
+it('CP-014/B6 every pinned macwarden version in the README and docs is the package version', () => {
+  const version = packageJson().version;
+  const docs = ['README.md', 'docs/ci-integration.md', 'docs/field-check.md', 'docs/security-model.md',
+    'docs/replacing-default-macaroons.md', 'docs/incident-playbook.md'];
+  let pins = 0;
+  for (const file of docs) {
+    const text = readFileSync(join(repo, file), 'utf8');
+    for (const [, pinned] of text.matchAll(/macwarden@(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)/g)) {
+      pins += 1;
+      expect(pinned, `${file}: macwarden@${pinned}`).toBe(version);
+    }
+    for (const [, pinned] of text.matchAll(/^\s*rev: v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)\s*$/gm)) {
+      pins += 1;
+      expect(pinned, `${file}: rev: v${pinned}`).toBe(version);
+    }
+    for (const [, expected] of text.matchAll(/--version\s+#\s*expect (\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)/g)) {
+      pins += 1;
+      expect(expected, `${file}: expect ${expected}`).toBe(version);
+    }
+  }
+  // README install line, the two CI workflow pins, the hook pin and its install line, and the field check.
+  expect(pins).toBeGreaterThanOrEqual(7);
+});
 
 it('CP-014/B16 prepack replaces stale dist with bytes from an independent clean build', () => {
   const a = artifact();

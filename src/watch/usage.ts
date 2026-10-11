@@ -54,6 +54,13 @@ export const COVERAGE_LIMIT = 64;
  * from `coverage`, whose records 1.0.1 reads with exactly their original keys.
  */
 export const SPAN_LIMIT = 256;
+/**
+ * With a monotonic source, a wall clock that moved more than this much apart from it between
+ * two coverage updates stepped (NTP correcting a Pi without a real-time clock, a restored VM
+ * snapshot, a suspended host): the step is never counted as covered time, and the current span
+ * ends so the next one starts at the corrected time. Slewing and timer jitter stay far below.
+ */
+export const CLOCK_STEP_TOLERANCE_MS = 2_000;
 export type CoverageSpans = { nodePubkey: string; spans: [string, string][] };
 
 /**
@@ -151,8 +158,13 @@ export class UsageStore {
 
   private readonly canaryUses = new Map<string, CanaryUse>();
   private readonly coverages = new Map<string, Coverage>();
-  /** Per node: the instant up to which the current registration was already counted. */
-  private readonly covering = new Map<string, number>();
+  /**
+   * Per node, while registered: `from` is the instant up to which the current registration was
+   * already counted (wall clock only). With a monotonic source (`mono` set), covered seconds
+   * are counted from monotonic time: `wall` and `mono` are both clocks at the last update
+   * and `carry` the monotonic milliseconds not yet counted as a whole second.
+   */
+  private readonly covering = new Map<string, { from: number; wall: number; mono: number | null; carry: number }>();
   /** Per node with a coverage record: its registered spans in ms (see SPAN_LIMIT). */
   private readonly spans = new Map<string, [number, number][]>();
 
@@ -178,10 +190,15 @@ export class UsageStore {
     return this.canaryUses.get(`${nodePubkey.toLowerCase()}\0${rootKeyId}`) ?? null;
   }
 
-  /** A registration with this node began: coverage counts from here. */
-  beginCoverage(nodePubkey: string, at: Date): void {
+  /**
+   * A registration with this node began: coverage counts from here. `mono` is a monotonic
+   * clock in ms (performance.now()); given here and to every extendCoverage and endCoverage
+   * of this registration, covered seconds are measured on it, so a wall clock stepping forward
+   * is never counted as observed time. The wall clock (`at`) then only places spans.
+   */
+  beginCoverage(nodePubkey: string, at: Date, mono?: number): void {
     if (!NODE.test(nodePubkey)) return;
-    this.extendCoverage(nodePubkey, at);
+    this.extendCoverage(nodePubkey, at, mono);
     const now = at.toISOString();
     const existing = this.coverages.get(nodePubkey);
     this.coverages.delete(nodePubkey);
@@ -199,7 +216,7 @@ export class UsageStore {
     const spans = existing ? this.spans.get(nodePubkey) ?? [] : [];
     const last = spans.at(-1);
     const from = Math.max(at.getTime(), last?.[1] ?? -Infinity);
-    this.covering.set(nodePubkey, from);
+    this.covering.set(nodePubkey, { from, wall: at.getTime(), mono: mono ?? null, carry: 0 });
     if (!last || from > last[1]) {
       spans.push([from, from]);
       if (spans.length > SPAN_LIMIT) spans.shift();
@@ -209,27 +226,59 @@ export class UsageStore {
   }
 
   /** Counts the time since the last call as covered, while a registration is current. */
-  extendCoverage(nodePubkey: string, at: Date): void {
-    const from = this.covering.get(nodePubkey);
+  extendCoverage(nodePubkey: string, at: Date, mono?: number): void {
+    const state = this.covering.get(nodePubkey);
     const record = this.coverages.get(nodePubkey);
-    if (from === undefined || !record) return;
+    if (state === undefined || !record) return;
     const until = at.getTime();
+    if (state.mono !== null && mono !== undefined) { this.extendMonotonic(nodePubkey, record, state, until, mono); return; }
+    const from = state.from;
     if (until <= from) return;
     // Whole seconds only; the remainder is carried to the next call.
     const seconds = Math.floor((until - from) / 1_000);
     if (seconds > 0) {
       record.coveredSeconds += seconds;
-      this.covering.set(nodePubkey, from + seconds * 1_000);
+      state.from = from + seconds * 1_000;
     }
+    state.wall = until;
     const span = this.spans.get(nodePubkey)?.at(-1);
     if (span && until > span[1]) span[1] = until;
     record.lastEnd = later(record.lastEnd, at.toISOString());
     this.touch();
   }
 
+  /**
+   * The monotonic variant of extendCoverage: seconds come from the monotonic clock. When the
+   * wall clock moved apart from it by more than CLOCK_STEP_TOLERANCE_MS, the current span is
+   * not stretched over the step; a new span starts at the corrected time (never before the
+   * last span ends, so spans stay disjoint and only ever undercount).
+   */
+  private extendMonotonic(nodePubkey: string, record: Coverage, state: { from: number; wall: number; mono: number | null; carry: number },
+    until: number, mono: number): void {
+    const elapsed = Math.max(0, mono - (state.mono as number));
+    const total = state.carry + elapsed;
+    const seconds = Math.floor(total / 1_000);
+    record.coveredSeconds += seconds;
+    state.carry = total - seconds * 1_000;
+    const stepped = Math.abs((until - state.wall) - elapsed) > CLOCK_STEP_TOLERANCE_MS;
+    state.mono = mono;
+    state.wall = until;
+    const spans = this.spans.get(nodePubkey);
+    const span = spans?.at(-1);
+    if (spans && span) {
+      if (!stepped) { if (until > span[1]) span[1] = until; }
+      else if (until > span[1]) {
+        spans.push([until, until]);
+        if (spans.length > SPAN_LIMIT) spans.shift();
+      }
+    }
+    record.lastEnd = later(record.lastEnd, new Date(until).toISOString());
+    this.touch();
+  }
+
   /** The registration ended (stream lost, run stopped). */
-  endCoverage(nodePubkey: string, at: Date): void {
-    this.extendCoverage(nodePubkey, at);
+  endCoverage(nodePubkey: string, at: Date, mono?: number): void {
+    this.extendCoverage(nodePubkey, at, mono);
     this.covering.delete(nodePubkey);
   }
 
@@ -398,7 +447,8 @@ export class UsageStore {
     }
     // Oldest first, so the most recently seen records are kept when a file holds more
     // than this store's limit (for example one written before the limit was lowered).
-    const ordered = [...(value.entries as UsageRecord[])].sort((a, b) => a.lastSeen < b.lastSeen ? -1 : a.lastSeen > b.lastSeen ? 1 : 0);
+    // Compared as instants (audit 1.4.0): as text, `…:00Z` sorts after the later `…:00.900Z`.
+    const ordered = [...(value.entries as UsageRecord[])].sort((a, b) => Date.parse(a.lastSeen) - Date.parse(b.lastSeen));
     for (const record of ordered) {
       const key = store.key(record.nodePubkey, record.credential, record.rootKeyId, record.method);
       if (store.records.has(key)) throw new UsageFileError('invalid usage file');

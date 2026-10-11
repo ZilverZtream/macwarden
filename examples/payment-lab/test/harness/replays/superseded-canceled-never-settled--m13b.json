@@ -1,0 +1,160 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "superseded-canceled-never-settled",
+  "rule": "SettleInvoice is never called for an invoice of an order fulfilled by another invoice; after reconciliation every superseded or late invoice is canceled in LND, so no order has two payable invoices.",
+  "message": "p1 called SettleInvoice for o0#2 although order o0 was fulfilled by o0#1",
+  "seed": 1,
+  "case": 6,
+  "config": {
+    "scale": "small",
+    "budget": true,
+    "limit": "2200"
+  },
+  "failingStep": 13,
+  "originalSteps": 19,
+  "events": [
+    {
+      "t": "create",
+      "p": "p1",
+      "order": 0,
+      "hold": false
+    },
+    {
+      "t": "answer",
+      "kind": "create",
+      "pick": 0.5,
+      "mode": "in-transit"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "answer",
+      "kind": "lookup",
+      "pick": 0.5,
+      "mode": "ok"
+    },
+    {
+      "t": "create",
+      "p": "p1",
+      "order": 0,
+      "hold": true
+    },
+    {
+      "t": "answer",
+      "kind": "create",
+      "pick": 0.5,
+      "mode": "ok"
+    },
+    {
+      "t": "create.arrive",
+      "pick": 0.5
+    },
+    {
+      "t": "invoice",
+      "what": "pay",
+      "pick": 0.25,
+      "amount": "exact"
+    },
+    {
+      "t": "invoice",
+      "what": "pay",
+      "pick": 0.5,
+      "amount": "exact"
+    },
+    {
+      "t": "rreconcile",
+      "p": "p0",
+      "order": null,
+      "cli": false
+    },
+    {
+      "t": "answer",
+      "kind": "lookup",
+      "pick": 0.5,
+      "mode": "ok"
+    },
+    {
+      "t": "answer",
+      "kind": "lookup",
+      "pick": 0.5,
+      "mode": "ok"
+    },
+    {
+      "t": "settle",
+      "p": "p1",
+      "order": 0
+    },
+    {
+      "t": "answer",
+      "kind": "lookup",
+      "pick": 0.5,
+      "mode": "ok"
+    }
+  ],
+  "states": {
+    "after": {
+      "invoices": {
+        "o0#1": {
+          "order": "o0",
+          "state": "not-created",
+          "late": "SETTLED",
+          "amount": "5000"
+        },
+        "o0#2": {
+          "order": "o0",
+          "state": "accepted",
+          "amount": "5000",
+          "amtPaid": "5000"
+        }
+      },
+      "orders": {
+        "o0": "fulfilled"
+      },
+      "fulfillments": [
+        {
+          "hash": "o0#1",
+          "order": "o0"
+        }
+      ],
+      "ledger": [
+        {
+          "hash": "o0#1",
+          "order": "o0",
+          "amount": "5000"
+        }
+      ],
+      "cursor": {
+        "settle": "0",
+        "add": "0"
+      },
+      "entries": [
+        {
+          "id": "1",
+          "event": "invoice-settled",
+          "hash": "o0#1",
+          "op": "o0",
+          "amount": "5000"
+        }
+      ],
+      "outbox": [
+        {
+          "id": "1",
+          "kind": "fulfill-order",
+          "key": "o0:b7389b801d74e9a8058ee76fa5c694bdd83e5a9c28db625be2c47a366fdde401",
+          "subject": "o0",
+          "payload": {
+            "orderId": "o0",
+            "paymentHash": "o0#1",
+            "amountMsat": "5000",
+            "settleIndex": "1",
+            "ledgerEntryId": 1
+          },
+          "state": "pending"
+        }
+      ]
+    }
+  },
+  "mutant": "superseded-canceled-never-settled--m13b.cjs"
+}

@@ -1,0 +1,241 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "cursor-moves-only-from-subscription",
+  "rule": "The subscription cursor moves only with subscription deliveries or an explicit cursor-set. Its add index moves to the highest seen; its settle index only contiguously: from c to c + 1 when the subscription delivered settlement c + 1, then on over c + 2, ... while the subscription delivered each (from 0, the first settle index the subscription delivers becomes the cursor: LND replays nothing for 0), so a restarted listener never skips a settlement it did not receive; lookups never move it.",
+  "message": "after applyInvoice via subscription (settle index 3, add index 3) the cursor is settle 3 / add 3, expected settle 1 / add 3 (it was settle 1; settlements the subscription delivered: 3)",
+  "seed": null,
+  "case": null,
+  "config": {
+    "scale": "small",
+    "budget": false,
+    "limit": "10000"
+  },
+  "failingStep": 14,
+  "originalSteps": 20,
+  "events": [
+    {
+      "t": "create",
+      "p": "p0",
+      "order": 0,
+      "hold": false
+    },
+    {
+      "t": "answer",
+      "kind": "create",
+      "pick": 0,
+      "mode": "ok"
+    },
+    {
+      "t": "create",
+      "p": "p0",
+      "order": 1,
+      "hold": false
+    },
+    {
+      "t": "answer",
+      "kind": "create",
+      "pick": 0,
+      "mode": "ok"
+    },
+    {
+      "t": "create",
+      "p": "p0",
+      "order": 2,
+      "hold": false
+    },
+    {
+      "t": "answer",
+      "kind": "create",
+      "pick": 0,
+      "mode": "ok"
+    },
+    {
+      "t": "invoice",
+      "what": "pay",
+      "pick": 0,
+      "amount": "exact"
+    },
+    {
+      "t": "invoice",
+      "what": "misreport",
+      "pick": 0.25
+    },
+    {
+      "t": "rreconcile",
+      "p": "p1",
+      "order": 1,
+      "cli": false
+    },
+    {
+      "t": "answer",
+      "kind": "lookup",
+      "pick": 0,
+      "mode": "ok"
+    },
+    {
+      "t": "invoice",
+      "what": "pay",
+      "pick": 0.25,
+      "amount": "exact"
+    },
+    {
+      "t": "invoice",
+      "what": "pay",
+      "pick": 0.25,
+      "amount": "exact"
+    },
+    {
+      "t": "cursor-set",
+      "p": "p0",
+      "pick": 0.375,
+      "add": 0.625
+    },
+    {
+      "t": "listen",
+      "p": "p0"
+    },
+    {
+      "t": "sub.deliver",
+      "pick": 0
+    },
+    {
+      "t": "kill",
+      "p": "p0"
+    },
+    {
+      "t": "listen",
+      "p": "p0"
+    },
+    {
+      "t": "sub.deliver",
+      "pick": 0
+    },
+    {
+      "t": "sub.deliver",
+      "pick": 0
+    },
+    {
+      "t": "sub.deliver",
+      "pick": 0
+    }
+  ],
+  "states": {
+    "call": {
+      "proc": "p0",
+      "method": "applyInvoice",
+      "args": [
+        {
+          "paymentHash": "o2#1",
+          "state": "SETTLED",
+          "settleIndex": "3",
+          "amtPaidMsat": "7000",
+          "htlcs": 0
+        },
+        "subscription"
+      ]
+    },
+    "before": {
+      "invoices": {
+        "o0#1": {
+          "order": "o0",
+          "state": "open",
+          "amount": "5000"
+        },
+        "o1#1": {
+          "order": "o1",
+          "state": "canceled",
+          "amount": "6000",
+          "amtPaid": "0"
+        },
+        "o2#1": {
+          "order": "o2",
+          "state": "open",
+          "amount": "7000"
+        }
+      },
+      "orders": {
+        "o0": "awaiting-payment",
+        "o1": "canceled",
+        "o2": "awaiting-payment"
+      },
+      "fulfillments": [],
+      "ledger": [],
+      "cursor": {
+        "settle": "1",
+        "add": "2"
+      },
+      "entries": [],
+      "outbox": []
+    },
+    "after": {
+      "invoices": {
+        "o0#1": {
+          "order": "o0",
+          "state": "open",
+          "amount": "5000"
+        },
+        "o1#1": {
+          "order": "o1",
+          "state": "canceled",
+          "amount": "6000",
+          "amtPaid": "0"
+        },
+        "o2#1": {
+          "order": "o2",
+          "state": "settled",
+          "amount": "7000",
+          "amtPaid": "7000"
+        }
+      },
+      "orders": {
+        "o0": "awaiting-payment",
+        "o1": "canceled",
+        "o2": "fulfilled"
+      },
+      "fulfillments": [
+        {
+          "hash": "o2#1",
+          "order": "o2"
+        }
+      ],
+      "ledger": [
+        {
+          "hash": "o2#1",
+          "order": "o2",
+          "amount": "7000"
+        }
+      ],
+      "cursor": {
+        "settle": "3",
+        "add": "3"
+      },
+      "entries": [
+        {
+          "id": "1",
+          "event": "invoice-settled",
+          "hash": "o2#1",
+          "op": "o2",
+          "amount": "7000"
+        }
+      ],
+      "outbox": [
+        {
+          "id": "1",
+          "kind": "fulfill-order",
+          "key": "o2:ffef811ee8929709825a39249ccabce4b380165632017f5a02598314b71548ad",
+          "subject": "o2",
+          "payload": {
+            "orderId": "o2",
+            "paymentHash": "o2#1",
+            "amountMsat": "7000",
+            "settleIndex": "3",
+            "ledgerEntryId": 1
+          },
+          "state": "pending"
+        }
+      ]
+    }
+  },
+  "note": "LABHARNESS-01 (pre-1.4 audit): SubscribeInvoices sends the add backlog before the settle backlog, so the first message is o2#1 SETTLED at settle index 3 while settlements 1 (o0#1, cursor-set past it) and 2 (o1#1, recorded canceled after a misreport, paid since) are still to come. A cursor moved to the highest index seen passes settle 2; killed there, the restarted listener subscribes from 3 and o1#1 stays canceled while LND holds it SETTLED. The settle cursor must move contiguously."
+}

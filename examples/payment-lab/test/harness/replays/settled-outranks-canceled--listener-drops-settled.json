@@ -1,0 +1,91 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "settled-outranks-canceled",
+  "rule": "",
+  "message": "hand-written scenario (no violation recorded)",
+  "seed": null,
+  "case": null,
+  "config": {
+    "scale": "small",
+    "budget": false,
+    "limit": "10000"
+  },
+  "failingStep": -1,
+  "originalSteps": 14,
+  "events": [
+    {
+      "t": "listen",
+      "p": "p0"
+    },
+    {
+      "t": "create",
+      "p": "p0",
+      "order": 0,
+      "hold": false
+    },
+    {
+      "t": "answer",
+      "kind": "create",
+      "pick": 0,
+      "mode": "ok"
+    },
+    {
+      "t": "invoice",
+      "what": "pay",
+      "pick": 0
+    },
+    {
+      "t": "sub.deliver",
+      "pick": 0
+    },
+    {
+      "t": "sub.deliver",
+      "pick": 0
+    },
+    {
+      "t": "create",
+      "p": "p0",
+      "order": 1,
+      "hold": false
+    },
+    {
+      "t": "answer",
+      "kind": "create",
+      "pick": 0,
+      "mode": "ok"
+    },
+    {
+      "t": "sub.deliver",
+      "pick": 0
+    },
+    {
+      "t": "invoice",
+      "what": "misreport",
+      "pick": 0
+    },
+    {
+      "t": "rreconcile",
+      "p": "p1",
+      "order": 1,
+      "cli": false
+    },
+    {
+      "t": "answer",
+      "kind": "lookup",
+      "pick": 0,
+      "mode": "ok"
+    },
+    {
+      "t": "invoice",
+      "what": "pay",
+      "pick": 0
+    },
+    {
+      "t": "sub.deliver",
+      "pick": 0
+    }
+  ],
+  "states": {},
+  "note": "hand-written scenario (no violation recorded). The listener delivers o0#1 settled (the cursor moves to 1); o1#1 is misreported canceled and recorded so by a lookup, then paid: LND pushes its SETTLED to the listener. A listener that drops it never calls applyInvoice, so no per-call check sees it; the end-of-case check does (after the catch-up from cursor 1, LND holds o1#1 SETTLED and the record is canceled)."
+}

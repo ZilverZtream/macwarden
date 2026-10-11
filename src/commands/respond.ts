@@ -172,9 +172,11 @@ async function runSteps(args: string[], deps: Deps): Promise<RespondOutput> {
   let own: Secret;
   let ownFacts: MacaroonFacts;
   try {
-    if (isProtectedPath(request.cert) || isProtectedPath(await deps.fs.realpath(request.cert)))
-      return fail(4, 'P2', 'unreadable TLS certificate');
-    cert = await readBoundedFile(request.cert, deps.fs);
+    if (isProtectedPath(request.cert)) return fail(4, 'P2', 'unreadable TLS certificate');
+    // The checked resolved path is the one read: the link cannot be changed between the two.
+    const resolvedCert = await deps.fs.realpath(request.cert);
+    if (isProtectedPath(resolvedCert)) return fail(4, 'P2', 'unreadable TLS certificate');
+    cert = await readBoundedFile(resolvedCert, deps.fs);
   } catch { return fail(4, 'P2', 'unreadable TLS certificate'); }
   try { own = (await readOnlineCredential(request.own, { stdin: deps.stdin ?? process.stdin, fs: deps.fs })).secret; }
   catch { return fail(4, 'P2', 'unreadable own macaroon'); }
@@ -270,7 +272,8 @@ async function runSteps(args: string[], deps: Deps): Promise<RespondOutput> {
         note: `absent from LND while the registry says active: run macwarden revoke ${target(entry)} to record it` });
     else items.push({ ...base, action: 'stage', status: 'planned', note: null });
   }
-  const uncovered = ids.map(id => id.toString()).filter(id => id !== '0' && id !== ownId && !active.has(id));
+  // Each root key ID once, even if LND lists one twice.
+  const uncovered = [...inLnd].filter(id => id !== '0' && id !== ownId && !active.has(id));
   const unknown = uncovered.filter(id => !revokedIds.has(id)).sort(byId);
   const revokedButPresent = uncovered.filter(id => revokedIds.has(id)).sort(byId);
   if (revokedButPresent.length) warnings.push({ code: 'revoked-but-present',

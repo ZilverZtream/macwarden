@@ -30,7 +30,7 @@ const help = [
 describe('CP-001 CLI', () => {
   it('CP-001/B1 prints the package version', async () => {
     const actual = await captureMain(main, ['--version']);
-    expect(actual).toMatchObject({ code: 0, stdout: '1.3.0\n', stderr: '' });
+    expect(actual).toMatchObject({ code: 0, stdout: '1.3.1\n', stderr: '' });
   });
 
   it('CP-001/B2 prints help on stdout', async () => {

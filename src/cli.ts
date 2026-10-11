@@ -84,12 +84,14 @@ export async function writeChunks(stream: Sink, chunks: Iterable<string>): Promi
   }
 }
 
-// Set once an interrupt result (exit 6 or 7, step `cancelled`) is written: the command has
-// stopped and run its cleanup (lock release, unwritten --out removal), but a file system call it
-// abandoned (a stalled mount) may still be pending and keep the process alive (1.2.1).
+// Set once an interrupt result (exit 6 or 7, step `cancelled`) is written, or any other result of
+// a command other than watch after an interrupt (respond reports its interrupted batch as its own
+// result, exit 6 or 7): the command has stopped and run its cleanup (lock release, unwritten --out
+// removal), but a file system call it abandoned (a stalled mount) may still be pending and keep
+// the process alive (1.2.1).
 let interruptWritten = false;
 
-/** Whether this process wrote an interrupt result (exit 6 or 7, step `cancelled`). */
+/** Whether this process wrote an interrupt result, or a command's result after an interrupt (not watch). */
 export function interruptedCompletion(): boolean { return interruptWritten; }
 
 /**
@@ -99,16 +101,47 @@ export function interruptedCompletion(): boolean { return interruptWritten; }
  * queue length rather than by waiting for an event.
  */
 export async function flushStandardStreams(): Promise<void> {
-  const deadline = Date.now() + FLUSH_LIMIT_MS;
+  // Monotonic: a wall clock stepped back would extend the wait past the limit.
+  const deadline = performance.now() + FLUSH_LIMIT_MS;
   const pending = (stream: NodeJS.WriteStream) => !closedStreams.has(stream) && !stream.destroyed && stream.writableLength > 0;
-  while ([process.stdout, process.stderr].some(pending) && Date.now() < deadline) {
+  while ([process.stdout, process.stderr].some(pending) && performance.now() < deadline) {
     await new Promise<void>(resolve => setTimeout(resolve, 5));
   }
 }
 
 const FLUSH_LIMIT_MS = 2_000;
 
+const MUTATION_INTERRUPTED = 'operation interrupted after mutation; completed state retained; run macwarden inventory to inspect state';
+
+// The invocation main is running: its output mode, command and error context, and whether its one
+// document has been written. A second signal and the beforeExit fallback write a document only
+// when main has not; once they have, main writes nothing more (`closed`).
+type ActiveRun = { mode: Mode; command: string | null; context: ProcessErrorContext; written: boolean; closed: boolean };
+let activeRun: ActiveRun | undefined;
+
 async function write(result: OutputResult, mode: Mode): Promise<void> {
+  if (activeRun?.closed) return;
+  if (activeRun) activeRun.written = true;
+  return writeDocument(result, mode);
+}
+
+/**
+ * A second SIGINT, SIGTERM or SIGHUP while the command is still blocked (a call that does not
+ * observe cancellation, such as a file system call on a stalled mount): the interrupt result is
+ * written, exit 6, or 7 once a change may have reached LND, and the process ends without waiting
+ * for the command.
+ */
+async function forceInterrupt(run: ActiveRun): Promise<void> {
+  if (run.written) return;
+  run.written = run.closed = true;
+  const code = run.context.mutationSent ? 7 : 6;
+  await writeDocument(failure(code, 'cancelled', code === 7 ? MUTATION_INTERRUPTED : 'interrupted', run.command), run.mode)
+    .catch(() => undefined);
+  await flushStandardStreams();
+  process.exit(completionStatus(code));
+}
+
+async function writeDocument(result: OutputResult, mode: Mode): Promise<void> {
   if (result.error?.step === 'cancelled' && (result.error.code === 6 || result.error.code === 7)) interruptWritten = true;
   // The first chunk is produced before anything is written: assertPlain and the
   // secret collection run first, so a rendering failure emits no partial output.
@@ -162,6 +195,17 @@ function installProcessHandlers(): void {
   };
   process.on('uncaughtException', report);
   process.on('unhandledRejection', report);
+  // The event loop emptied while a command's promise never settled (after an uncaught exception
+  // in a callback, say): main will not resume to write its result, so the internal error is
+  // written here, once, in the run's output mode.
+  process.on('beforeExit', () => {
+    const run = activeRun;
+    if (!run || run.written) return;
+    internalFailure = true;
+    process.exitCode = 8;
+    run.written = run.closed = true;
+    void writeDocument(failure(8, 'internal', internalErrorMessage(run.context), run.command), run.mode).catch(() => undefined);
+  });
   for (const stream of [process.stdout, process.stderr]) {
     stream.on('error', (failure: NodeJS.ErrnoException) => {
       if (failure.code === 'EPIPE') closedStreams.add(stream);
@@ -174,7 +218,10 @@ function installProcessHandlers(): void {
 
 installProcessHandlers();
 
-export async function main(argv: string[], runtime: { execArgv?: readonly string[]; nodeVersion?: string } = {}): Promise<number> {
+export async function main(rawArgv: string[], runtime: { execArgv?: readonly string[]; nodeVersion?: string } = {}): Promise<number> {
+  // `macwarden --json <command> …` is `macwarden <command> --json …`.
+  const argv = rawArgv[0] === '--json' && rawArgv.length > 1 && Object.hasOwn(handlers, rawArgv[1])
+    ? [rawArgv[1], '--json', ...rawArgv.slice(2)] : rawArgv;
   const boundary = argv.indexOf('--');
   const flagsEnd = boundary < 0 ? argv.length : boundary;
   const flags = argv.slice(0, flagsEnd);
@@ -185,16 +232,29 @@ export async function main(argv: string[], runtime: { execArgv?: readonly string
   if (internalFailure) return 8;
   mainActive = true;
   const context: ProcessErrorContext = { mutationSent: false };
+  const command = argv[0] && Object.hasOwn(handlers, argv[0]) ? argv[0] as keyof typeof handlers : null;
+  const handler = command ? handlers[command] : undefined;
+  const run: ActiveRun = { mode, command, context, written: false, closed: false };
+  activeRun = run;
   const controller = new AbortController();
-  const cancel = () => controller.abort();
+  let received = 0;
+  const cancel = () => {
+    controller.abort();
+    // watch stops on a signal and then ends its alert commands (bin.ts); it is never cut short.
+    if (++received >= 2 && command !== 'watch') void forceInterrupt(run);
+  };
   const signals: NodeJS.Signals[] = ['SIGINT', 'SIGTERM', 'SIGHUP'];
   for (const signal of signals) process.on(signal, cancel);
   activeContext = context;
-  const command = argv[0] && Object.hasOwn(handlers, argv[0]) ? argv[0] as keyof typeof handlers : null;
-  const handler = command ? handlers[command] : undefined;
   try {
     if (argv.length === 1 && argv[0] === '--version') {
       process.stdout.write(render({ command: null, ok: true, warnings: [], result: { text: packageVersion() }, error: null }, 'text'));
+      return 0;
+    }
+    if (argv.length === 2 && argv.includes('--version') && argv.includes('--json')) {
+      // The version as one JSON document, `result: {"version"}`; schemas/output/macwarden.schema.json.
+      const version = { command: null, ok: true, warnings: [], result: { version: packageVersion() }, error: null };
+      await write(version as unknown as OutputResult, 'json');
       return 0;
     }
     if (argv.length === 2 && argv.includes('--help') && argv.includes('--json')) {
@@ -248,9 +308,9 @@ export async function main(argv: string[], runtime: { execArgv?: readonly string
         const copied = command === 'attenuate' && (result.result as { dryRun?: unknown; out?: unknown } | null)?.dryRun === false &&
           typeof (result.result as { out?: unknown }).out === 'string';
         const interrupted = failure(context.mutationSent ? 7 : 6, 'cancelled',
-          context.mutationSent ? 'operation interrupted after mutation; completed state retained; run macwarden inventory to inspect state'
+          context.mutationSent ? MUTATION_INTERRUPTED
             : copied ? 'operation interrupted after the output file was written; the written copy is complete and kept'
-              : 'operation interrupted before mutation', command);
+              : 'interrupted', command);
         await write(interrupted, mode);
         return interrupted.error!.code;
       }
@@ -258,12 +318,19 @@ export async function main(argv: string[], runtime: { execArgv?: readonly string
         result.display.toolVersion = packageVersion();
       // watch runs unattended; its summary goes to a reader that may never read again,
       // so the write is bounded. Everything else waits for its output as before.
-      if (command === 'watch') await writeUnattended(result, mode, WATCH_SUMMARY_WRITE_MS);
-      else await write(result, mode);
+      if (command === 'watch') {
+        run.written = true;
+        await writeUnattended(result, mode, WATCH_SUMMARY_WRITE_MS);
+      } else {
+        await write(result, mode);
+        // A result written after an interrupt (respond's interrupted batch, exit 6 or 7) ends the
+        // run like an interrupt result: bin.ts then exits without waiting for abandoned calls.
+        if (controller.signal.aborted) interruptWritten = true;
+      }
       return result.error?.code ?? result.exitCode ?? 0;
     }
     // Fixed reasons only: the argument itself is never echoed (it may be a credential).
-    await write(failure(2, null, argv.length === 0 ? 'missing command'
+    await write(failure(2, null, argv.length === 0 || argv.every(arg => arg === '--json') ? 'missing command'
       : argv[0].startsWith('-') ? 'unknown flag' : 'unknown command'), mode);
     if (mode === 'text') process.stderr.write(render(textResult(usage), 'text'));
     return 2;
@@ -271,9 +338,7 @@ export async function main(argv: string[], runtime: { execArgv?: readonly string
     // An interrupt that a command did not turn into its own result (one that landed in its first LND
     // calls) is still an interrupt, not an internal failure: exit 6, or 7 once a change may have reached LND.
     if (error instanceof Cancelled) {
-      const interrupted = failure(context.mutationSent ? 7 : 6, 'cancelled', context.mutationSent
-        ? 'operation interrupted after mutation; completed state retained; run macwarden inventory to inspect state'
-        : 'interrupted', command);
+      const interrupted = failure(context.mutationSent ? 7 : 6, 'cancelled', context.mutationSent ? MUTATION_INTERRUPTED : 'interrupted', command);
       await write(interrupted, mode);
       return interrupted.error!.code;
     }
@@ -281,6 +346,7 @@ export async function main(argv: string[], runtime: { execArgv?: readonly string
     return 8;
   } finally {
     for (const signal of signals) process.off(signal, cancel);
+    if (activeRun === run) activeRun = undefined;
     mainActive = false;
   }
 }

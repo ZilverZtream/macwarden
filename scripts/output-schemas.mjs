@@ -234,7 +234,9 @@ const schemas = {
         { type: 'object', additionalProperties: false, required: ['dryRun', 'label', 'permissions', 'grade', 'caveats'],
           properties: { dryRun: { const: true }, label: registryEntry.properties.label, grade: { $ref: '#/$defs/grade' },
             permissions: { type: 'array', items: { type: 'string' } },
-            caveats: { type: 'array', items: { type: 'object', required: ['type', 'value'] } } } },
+            caveats: { type: 'array', items: { type: 'object', required: ['type', 'value'] } },
+            // Present only on a canary plan (bake --canary --dry-run).
+            canary: { const: true } } },
         { $ref: '#/$defs/registryEntry' },
       ] }),
   revoke: envelope('revoke', 'macwarden revoke --json output',
@@ -390,7 +392,7 @@ const schemas = {
   reconcile: envelope('reconcile', 'macwarden reconcile --json output',
     'Normative source: docs/spec.md, Commands > 12. reconcile. Observation (the payment journal) and settlement (LND) are separate '
       + 'evidence. Exit 1 (ok: true) when the reconciliation is incomplete: a coverage gap, an unattributed LND payment, a journaled '
-      + 'payment without a final outcome, a request without a hash, an ambiguous attribution, a journaled deletion or a limited lookup.', {
+      + 'payment without a final outcome, a request without a hash, an ambiguous, historical or unidentified attribution, a journaled deletion or a limited lookup.', {
       type: 'object', additionalProperties: false,
       required: ['node', 'journal', 'window', 'coverage', 'credentials', 'payments', 'unmatched', 'unattributed', 'deletions', 'lookups'],
       properties: {
@@ -417,7 +419,7 @@ const schemas = {
         payments: { type: 'array', items: { type: 'object', additionalProperties: false,
           required: ['paymentHash', 'attribution', 'credentials', 'observation', 'settlement', 'deletedBy'],
           properties: {
-            paymentHash, attribution: { enum: ['single', 'ambiguous', 'historical'] },
+            paymentHash, attribution: { enum: ['single', 'ambiguous', 'historical', 'unidentified'] },
             credentials: { type: 'array', minItems: 1, uniqueItems: true, items: journalCredential },
             observation: { type: 'object', additionalProperties: false,
               required: ['first', 'last', 'calls', 'requestedMsat', 'routeAttemptsMsat', 'feeLimitMsat', 'observations'],
@@ -471,8 +473,14 @@ const topLevel = envelope('macwarden', 'macwarden --json output without a comman
         properties: { name: { type: 'string', pattern: '^[a-z]+$' }, summary: { type: 'string', minLength: 1 } } } },
     } });
 topLevel.properties.command = { const: null };
-topLevel.properties.result = { oneOf: [{ type: 'null' }, { $ref: '#/$defs/result' }] };
-topLevel.allOf[0].then.properties.result = { $ref: '#/$defs/result' };
+// `macwarden --version --json` (audit 1.4.0): the package.json version.
+topLevel.$defs.version = { type: 'object', additionalProperties: false, required: ['version'],
+  properties: { version: { type: 'string', pattern: '^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$' } } };
+topLevel.description = topLevel.description.replace('`macwarden --help --json` (ok: true, the general usage lines and every '
+  + 'command with its summary), ', '`macwarden --help --json` (ok: true, the general usage lines and every command with its summary), '
+  + '`macwarden --version --json` (ok: true, `{"version"}`), ');
+topLevel.properties.result = { oneOf: [{ type: 'null' }, { $ref: '#/$defs/result' }, { $ref: '#/$defs/version' }] };
+topLevel.allOf[0].then.properties.result = { oneOf: [{ $ref: '#/$defs/result' }, { $ref: '#/$defs/version' }] };
 delete topLevel.$defs.help;
 schemas.macwarden = topLevel;
 

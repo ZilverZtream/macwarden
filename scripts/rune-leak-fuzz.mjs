@@ -109,15 +109,24 @@ export async function leakCampaign(api, { seed, cases, batch = 25, start = 0, sc
           ...(format === 'sarif' || format === 'github' ? { display: { format, scanRoot: files } } : {}) };
         outputs.push({ where: `scan ${format}`, text: [...api.renderChunks(result, format === 'json' ? 'json' : 'text')].join('') });
       }
+      // The batch's sentinels are runtime ones; the registered list is empty (a missing list fails the check).
+      writeFileSync(join(dir, 'none.json'), '[]');
       const check = commandOutput => findLeaks({ sentinels: join(dir, 'none.json'), sentinelDir: sentinels, root: dir, commandOutput });
       const timer = performance.now();
       const commandOutput = outputs.map(item => item.text).join('\n');
       report.outputBytes += commandOutput.length;
       if (check(commandOutput)) {
         // Name each output that leaks (where, and the encoding found), never the value.
+        let named = false;
         for (const item of outputs) {
           const leak = check(item.text);
+          if (leak) named = true;
           if (leak && report.leaks.length < 50) report.leaks.push({ seed, batch: first, where: item.where, encoding: leak.encoding });
+        }
+        // A leak only the outputs together carry (a value split across two of them) still counts.
+        if (!named) {
+          const leak = check(commandOutput);
+          report.leaks.push({ seed, batch: first, where: 'joined outputs', encoding: leak?.encoding ?? 'joined outputs' });
         }
       }
       report.checkSeconds += (performance.now() - timer) / 1000;
@@ -142,13 +151,23 @@ export async function builtLeakApi(distRoot = resolve('dist')) {
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const args = process.argv.slice(2);
-  const option = (name, fallback) => { const at = args.indexOf(name); return at < 0 ? fallback : Number(args[at + 1]); };
+  // A flag needs a whole number of at least its minimum: a typo or a missing value is an error,
+  // never NaN (zero cases, a null seed) or a batch of 0 (no progress).
+  const option = (name, fallback, minimum = 0) => {
+    const at = args.indexOf(name);
+    if (at < 0) return fallback;
+    const value = args[at + 1];
+    if (value === undefined || !/^[0-9]+$/.test(value) || Number(value) < minimum || !Number.isSafeInteger(Number(value)))
+      throw new Error(`${name} must be an integer of at least ${minimum}`);
+    return Number(value);
+  };
   const seed = option('--seed', randomInt(2 ** 31));
-  const cases = option('--cases', 20_000);
+  const cases = option('--cases', 20_000, 1);
+  const start = option('--start', 0), batch = option('--batch', 25, 1);
   process.stdout.write(`rune leak fuzz: seed ${seed}, ${cases} cases\n`);
   const began = performance.now();
-  const report = await leakCampaign(await builtLeakApi(), { seed, cases, start: option("--start", 0), batch: option('--batch', 25),
+  const report = await leakCampaign(await builtLeakApi(), { seed, cases, start, batch,
     onProgress: partial => { if (partial.batches % 80 === 0) process.stdout.write(`  ${partial.cases} cases, ${partial.leaks.length} leaks, ${((performance.now() - began) / 1000).toFixed(0)} s\n`); } });
   process.stdout.write(`${JSON.stringify({ ...report, seconds: Number(((performance.now() - began) / 1000).toFixed(1)) }, null, 2)}\n`);
-  process.exitCode = report.leaks.length ? 1 : 0;
+  process.exitCode = report.leaks.length || report.cases === 0 ? 1 : 0;
 }

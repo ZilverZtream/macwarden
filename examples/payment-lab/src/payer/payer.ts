@@ -16,6 +16,8 @@ import type { IntentResult, OperationKind, PayerStore, PaymentState, UpdateResul
  * 5. Every update, and every outcome of a call (an error, a stream that ended), is
  *    applied with the submission it was made for, so a late answer about an earlier
  *    submission never decides the current one; that call reports its own outcome.
+ *    A TrackPaymentV2 snapshot of a retried payment that LND took before the retry's
+ *    request reached it (the earlier submission's FAILED) is such an answer too.
  */
 
 export type Emit = (event: Record<string, unknown>) => void;
@@ -104,14 +106,15 @@ export async function submit(deps: PayerDeps, paymentHash: string, options: { ti
   const record = deps.store.payment(paymentHash);
   if (record === undefined) return { kind: 'refused', reason: `no payment ${paymentHash}` };
   if (record.state === 'succeeded') return { kind: 'succeeded', paymentHash, feeMsat: record.feeMsat ?? 0n };
-  if (!deps.store.claimForSubmission(paymentHash)) {
+  // The submission this call is: the claim counted it and returns it from the same statement.
+  const claimed: { submission?: number } = {};
+  if (!deps.store.claimForSubmission(paymentHash, claimed)) {
     // The claim withdraws an intent whose operation another payment completed: report what the record says now.
     const now = deps.store.payment(paymentHash);
     if (now?.state === 'failed') return { kind: 'failed', paymentHash, reason: now.failureReason ?? 'unknown' };
     return { kind: 'refused', paymentHash, reason: `payment is ${now?.state ?? record.state}, not intent; it is reconciled, never submitted again` };
   }
-  // The submission this call is: the claim counted it.
-  const submission = deps.store.payment(paymentHash)?.submissions;
+  const submission = claimed.submission;
   deps.emit({ event: 'submitted', paymentHash, rpc: 'SendPaymentV2' });
   let updates = 0;
   let lastState: PaymentState = 'submitting';
@@ -219,8 +222,9 @@ async function afterSubmitError(deps: PayerDeps, paymentHash: string, error: unk
     const settled = await trackOnce(deps, paymentHash, submission, signal);
     // The lookup is asynchronous: another tracker may have recorded a terminal state
     // meanwhile. markRejected leaves a terminal record alone, and a record a later submission
-    // speaks for; the record below answers.
-    if (settled === 'not-found' && definite && deps.store.markRejected(paymentHash, error.message, submission)) {
+    // speaks for; the record below answers. A retry LND refused while it still shows the earlier
+    // submission's FAILED was not initiated either: LND holds nothing in flight for the hash.
+    if ((settled === 'not-found' || settled === 'earlier-failed') && definite && deps.store.markRejected(paymentHash, error.message, submission)) {
       deps.emit({ event: 'failed', paymentHash, reason: `rejected before initiation: ${error.message}` });
       return { kind: 'failed', paymentHash, reason: `rejected before initiation: ${error.message}` };
     }
@@ -231,17 +235,22 @@ async function afterSubmitError(deps: PayerDeps, paymentHash: string, error: unk
   return markUncertain(deps, paymentHash, submission, `SendPaymentV2 ended without a terminal state: ${describeError(error)}`);
 }
 
-/** One TrackPaymentV2 read of the current state, without waiting for a terminal one. */
+/**
+ * One TrackPaymentV2 read of the current state, without waiting for a terminal one. A snapshot the store
+ * judged stale (taken before this submission's request reached LND, or about a superseded submission) decides
+ * nothing: `earlier-failed` when it is a FAILED, else `unknown`.
+ */
 async function trackOnce(deps: PayerDeps, paymentHash: string, submission: number | undefined,
-  signal: AbortSignal | undefined): Promise<'not-found' | 'found' | 'unknown'> {
+  signal: AbortSignal | undefined): Promise<'not-found' | 'found' | 'earlier-failed' | 'unknown'> {
   try {
-    let found = false;
+    let answer: 'found' | 'earlier-failed' | 'unknown' = 'unknown';
     await deps.api.trackPaymentV2(paymentHash, payment => {
-      found = true;
-      reportConflicts(deps, paymentHash, deps.store.applyUpdate(payment, 'TrackPaymentV2', submission));
+      const result = deps.store.applyUpdate(payment, 'TrackPaymentV2', submission);
+      reportConflicts(deps, paymentHash, result);
+      answer = result.stale !== true ? 'found' : payment.status === 'FAILED' ? 'earlier-failed' : 'unknown';
       return 'stop';
     }, signal);
-    return found ? 'found' : 'unknown';
+    return answer;
   } catch (error) {
     if (error instanceof LndError && error.notFound) return 'not-found';
     return 'unknown';
@@ -250,6 +259,12 @@ async function trackOnce(deps: PayerDeps, paymentHash: string, submission: numbe
 
 const BACKOFF_START_MS = 1_000;
 const BACKOFF_MAX_MS = 15_000;
+/**
+ * A TrackPaymentV2 stream that stayed open this long counts as a working connection: the backoff starts
+ * again from BACKOFF_START_MS after it ends, as after a stream that changed the record. A stream that
+ * ends early without changing anything keeps doubling it.
+ */
+const BACKOFF_RESET_OPEN_MS = BACKOFF_MAX_MS;
 
 function delay(ms: number, signal: AbortSignal | undefined): Promise<void> {
   return new Promise(resolve => {
@@ -257,6 +272,29 @@ function delay(ms: number, signal: AbortSignal | undefined): Promise<void> {
     function done(): void { clearTimeout(timer); signal?.removeEventListener('abort', done); resolve(); }
     signal?.addEventListener('abort', done, { once: true });
   });
+}
+
+/**
+ * LND holds no payment for `submission` (NotFound, or only an earlier submission's FAILED): the record goes back to
+ * intent when it never saw LND acknowledge this submission (PayerStore.markNotInitiated). Undefined: track the record
+ * as it is now (a later submission was claimed, or another tracker recorded an outcome or a revert meanwhile).
+ */
+function notInitiated(deps: PayerDeps, paymentHash: string, wasState: PaymentState, submission: number, evidence: string): PayOutcome | undefined {
+  const reverted = deps.store.markNotInitiated(paymentHash, evidence, submission);
+  if (reverted === 'superseded') return undefined;
+  if (reverted === 'withdrawn') return withdrawn(deps, paymentHash);
+  deps.emit({ event: reverted === 'reverted' ? 'not-initiated' : 'not-found-kept-unresolved', paymentHash, message: evidence });
+  if (reverted === 'reverted') return { kind: 'not-submitted', paymentHash, reason: 'LND has no payment for this submission; it may be submitted with the same hash' };
+  // The lookup ran while other trackers could write: answer from the record as it is now. A record that is terminal
+  // or back in intent by now is reported by the top of the loop.
+  const now = deps.store.payment(paymentHash)?.state ?? wasState;
+  if (now === 'succeeded' || now === 'failed' || now === 'intent') return undefined;
+  if (reverted === 'attempts-recorded') {
+    return { kind: 'unresolved', paymentHash, state: now, reason: 'LND reports no payment although attempts were recorded; operator review needed' };
+  }
+  // 'unchanged': no attempt of this submission is recorded, but the record is not one a NotFound sends back to
+  // intent (in flight without attempts).
+  return { kind: 'unresolved', paymentHash, state: now, reason: `LND reports no payment; the record is ${now} and was left unchanged; operator review needed` };
 }
 
 /**
@@ -275,37 +313,53 @@ export async function reconcile(deps: PayerDeps, paymentHash: string, signal?: A
     if (signal?.aborted) return { kind: 'unresolved', paymentHash, state: record.state, reason: 'reconciliation deadline reached' };
     deps.emit({ event: 'track-started', paymentHash, recordState: record.state });
     let terminal = false;
+    let earlierFailed = false;
     // This stream reads for the submission the record is at now; a retry started meanwhile is not its business.
     const submission = record.submissions;
+    const opened = Date.now();
+    let seen: PaymentState = record.state;
+    let progressed = false;
+    // The backoff starts again only after a stream that changed the record or stayed open: a node that answers
+    // every stream with one snapshot and ends it is asked again less and less often, not every second.
+    const settleBackoff = (): void => {
+      if (progressed || Date.now() - opened >= BACKOFF_RESET_OPEN_MS) backoff = BACKOFF_START_MS;
+    };
     try {
       await deps.api.trackPaymentV2(paymentHash, payment => {
         const result = deps.store.applyUpdate(payment, 'TrackPaymentV2', submission);
         reportConflicts(deps, paymentHash, result);
         deps.emit({ event: 'payment-update', source: 'TrackPaymentV2', ...summary(payment), recordState: result.state,
-          operationCompleted: result.completed });
-        backoff = BACKOFF_START_MS;
-        terminal = isTerminal(payment.status);
-        return terminal ? 'stop' : 'continue';
+          operationCompleted: result.completed, ...(result.stale === true ? { stale: true } : {}) });
+        if (result.state !== seen) { progressed = true; seen = result.state; }
+        // A terminal state the store judged stale (an earlier submission's FAILED, shown until the retry reaches
+        // LND) ends this stream, but not the reconciliation: the payment is tracked again after a pause.
+        terminal = isTerminal(payment.status) && result.stale !== true;
+        if (result.stale === true && payment.status === 'FAILED') earlierFailed = true;
+        return isTerminal(payment.status) ? 'stop' : 'continue';
       }, signal);
       if (terminal) continue;
+      if (earlierFailed) {
+        // LND answers with an earlier submission's FAILED: it holds no payment for this submission now, as a NotFound
+        // says for a first submission (a crash between the claim and the send, or a request that never reached LND).
+        const outcome = notInitiated(deps, paymentHash, record.state, submission, 'TrackPaymentV2 shows only an earlier submission\'s FAILED');
+        if (outcome === undefined) continue;
+        return outcome;
+      }
+      settleBackoff();
       // LND ended the stream while the payment is still open: track again after a pause.
       deps.emit({ event: 'track-ended-early', paymentHash, retryInMs: backoff });
       await delay(backoff, signal);
       backoff = Math.min(backoff * 2, BACKOFF_MAX_MS);
     } catch (error) {
       if (error instanceof LndError && error.notFound) {
-        const reverted = deps.store.markNotInitiated(paymentHash, `TrackPaymentV2: ${error.message}`, submission);
-        // A submission claimed since this stream opened: this NotFound is not about it. Track the record as it is now.
-        if (reverted === 'superseded') continue;
-        if (reverted === 'withdrawn') return withdrawn(deps, paymentHash);
-        deps.emit({ event: reverted === 'reverted' ? 'not-initiated' : 'not-found-kept-unresolved', paymentHash, message: error.message });
-        if (reverted === 'reverted') return { kind: 'not-submitted', paymentHash, reason: 'LND has no payment for this hash; it may be submitted with the same hash' };
-        return { kind: 'unresolved', paymentHash, state: record.state, reason: 'LND reports no payment although attempts were recorded; operator review needed' };
+        const outcome = notInitiated(deps, paymentHash, record.state, submission, `TrackPaymentV2: ${error.message}`);
+        if (outcome === undefined) continue;
+        return outcome;
       }
-      if (signal?.aborted) {
-        const current = deps.store.payment(paymentHash);
-        return { kind: 'unresolved', paymentHash, state: current?.state ?? record.state, reason: 'reconciliation deadline reached' };
-      }
+      // The deadline: the top of the loop answers from the record as it is now (an outcome another tracker recorded
+      // meanwhile, else unresolved).
+      if (signal?.aborted) continue;
+      settleBackoff();
       deps.store.event(paymentHash, 'track-interrupted', { error: describeError(error) });
       deps.emit({ event: 'track-interrupted', paymentHash, error: describeError(error), retryInMs: backoff });
       await delay(backoff, signal);

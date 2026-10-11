@@ -4,7 +4,7 @@
 // LND requires for it (ListPermissions), and prints the narrower credential to bake.
 // Recommendation only: nothing is baked, revoked or written.
 import * as nodeFs from 'node:fs/promises';
-import { decodeMacaroon, macaroonId } from '../decode/index.js';
+import { decodeMacaroon, macaroonId, parseTimeBefore } from '../decode/index.js';
 import { unsafeNodeDiagnostics } from '../environment.js';
 import { createLndAdapter, type LndAdapter } from '../lnd/index.js';
 import { credentialText, endpoint, failureDetails, nodeInfo, onlineAdapter, readBoundedFile,
@@ -14,6 +14,7 @@ import { isProtectedPath } from '../protected-path.js';
 import { openRegistry, type RegistryEntry } from '../registry/index.js';
 import type { Secret } from '../secret.js';
 import { isRootKeyId } from '../root-key-id.js';
+import { laterInstant } from '../instant.js';
 import { readUsage, usagePath } from '../watch/usage.js';
 
 export type Deps = {
@@ -21,6 +22,8 @@ export type Deps = {
   createAdapter?: (config: { restUrl: string; tlsCert: Buffer; macaroon: Secret }) => LndAdapter;
   fs: typeof nodeFs;
   env: Record<string, string | undefined>;
+  /** The time the original's remaining lifetime is measured from; defaults to now. */
+  clock?: () => Date;
 };
 
 type RecommendOutput = OutputResult & { schema: 1 };
@@ -127,6 +130,9 @@ async function runSteps(args: string[], deps: Deps): Promise<RecommendOutput> {
   // guard also applies to a credential with no registry entry (a default macaroon).
   let filePermissions: string[] | null = null;
   let fileRootKeyId: string | null = null;
+  // The file's caveats (with --target-file), checked like the entry's before a command is printed.
+  let fileCaveats: { type: string; value: string }[] = [];
+  let fileOmitsCaveats = false;
   if (targetFile !== undefined) {
     // The credential ID and permissions come from the identifier only; the file's bytes are not kept.
     let identity;
@@ -134,7 +140,10 @@ async function runSteps(args: string[], deps: Deps): Promise<RecommendOutput> {
       if (isProtectedPath(targetFile)) return fail(3, 'R6', 'protected target file', warnings);
       const secret = (await readOnlineCredential(targetFile, { stdin: process.stdin, fs: deps.fs })).secret;
       identity = macaroonId(secret);
-      filePermissions = decodeMacaroon(secret).permissions;
+      const decoded = decodeMacaroon(secret);
+      filePermissions = decoded.permissions;
+      fileCaveats = decoded.caveats;
+      fileOmitsCaveats = decoded.warnings.includes('caveats-exceed-bounds');
     } catch { return fail(3, 'R6', 'unreadable or undecodable target file', warnings); }
     select = { credential: identity.id };
     label = identity.id;
@@ -167,29 +176,39 @@ async function runSteps(args: string[], deps: Deps): Promise<RecommendOutput> {
   for (const record of records) {
     const current = byMethod.get(record.method);
     byMethod.set(record.method, { calls: (current?.calls ?? 0) + record.calls,
-      lastUsed: current && current.lastUsed > record.lastSeen ? current.lastUsed : record.lastSeen });
+      lastUsed: current ? laterInstant(current.lastUsed, record.lastSeen) : record.lastSeen });
   }
+  const current = entry ? sortUnique(entry.permissions) : null;
+  // Every permission set the credential is known to hold must already cover each observed
+  // method: the registry entry's and, for --target-file, the file's own.
+  const held = [current, filePermissions].filter((item): item is string[] => item !== null);
+  const covers = (permissions: string[], method: string) => permissions.includes(`uri:${method}`)
+    || (methodPermissions[method] ?? []).every(permission => permissions.includes(permission));
+  // A method with no successful call that the held permissions do not cover was only ever
+  // refused: the app tried it without the authority to call it. It is evidence of neither a
+  // need nor poisoned data, so it is left out of the narrowed set and named in a warning.
+  const denied = [...byMethod].filter(([method, item]) => item.calls === 0 && Object.hasOwn(methodPermissions, method)
+    && held.some(permissions => !covers(permissions, method))).map(([method]) => method).sort();
+  for (const method of denied) byMethod.delete(method);
+  if (denied.length) warnings.push({ code: 'recommendation-denied', message: `methods only ever refused for this credential `
+    + `(no successful call, not covered by its permissions) are left out of the recommendation: ${denied.join(', ')}` });
   const methods = [...byMethod.keys()].sort();
   const unmapped = methods.filter(method => !Object.hasOwn(methodPermissions, method));
   const observed = methods.map(method => ({ method, ...byMethod.get(method)!,
     permissions: sortUnique(methodPermissions[method] ?? []) }));
   const recommended = sortUnique(observed.flatMap(item => item.permissions));
   const recommendedUris = methods.filter(method => !unmapped.includes(method)).map(method => `uri:${method}`);
-  const current = entry ? sortUnique(entry.permissions) : null;
   // Entity permissions the credential holds that no observed method needed.
   const unneeded = current ? current.filter(permission => !permission.startsWith('uri:') && !recommended.includes(permission)) : [];
   // A narrowing command is only printed when the evidence is complete and consistent:
   // following one built from partial or poisoned usage would break the app (missing
-  // methods) or widen the credential (methods it never held).
-  const incomplete = records.length > 0 && usage.maybeIncomplete();
-  if (incomplete) warnings.push({ code: 'usage-incomplete', message: 'the usage data may be missing calls (records were evicted, or watch '
-    + 'was overloaded and did not attribute some calls), and any credential could be affected; no narrowing command is printed. '
+  // methods) or widen the credential (methods it never held). Incomplete data is reported
+  // even when no record remains for this credential: its records may be the evicted ones.
+  const incomplete = usage.maybeIncomplete();
+  if (incomplete) warnings.push({ code: 'usage-incomplete', message: `the usage data may be missing calls (records were evicted, or watch `
+    + `was overloaded and did not attribute some calls), and any credential could be affected${records.length ? ''
+      : ', so "no observed calls" does not show that this credential was unused'}; no narrowing command is printed. `
     + 'For a complete observation, stop watch, move the usage file aside and run watch again' });
-  // Every permission set the credential is known to hold must already cover each observed
-  // method: the registry entry's and, for --target-file, the file's own.
-  const held = [current, filePermissions].filter((item): item is string[] => item !== null);
-  const covers = (permissions: string[], method: string) => permissions.includes(`uri:${method}`)
-    || (methodPermissions[method] ?? []).every(permission => permissions.includes(permission));
   const beyond = methods.filter(method => !unmapped.includes(method) && held.some(permissions => !covers(permissions, method)));
   // Without any known permission set, narrowing cannot be told from widening.
   const unverified = observed.length > 0 && held.length === 0;
@@ -233,36 +252,121 @@ async function runSteps(args: string[], deps: Deps): Promise<RecommendOutput> {
     + 'methods the app calls rarely (such as payments) may be missing, and a credential narrowed to this list would fail on them. '
     + (acceptShort ? 'The narrowing command is printed because --accept-short-observation was given'
       : 'Keep watch running longer, or pass --accept-short-observation to print the narrowing command anyway') });
+  // The narrowed credential must keep every restriction the original has. A canary is never
+  // narrowed: it exists to be found, not used. An expiry is carried as --expires with the
+  // duration it was baked with (as rotate S11 does); any other caveat (an IP lock, a
+  // third-party or unknown caveat) or an expiry without a recorded duration cannot be
+  // reproduced by bake, so no command is printed.
+  const rootKeyId = entry?.rootKeyId ?? (byId ? selector : identity);
+  const caveats = [...(entry?.caveats ?? []), ...fileCaveats];
+  const canary = caveats.some(caveat => caveat.type === 'lnd-custom')
+    || (rootKeyId !== null && usage.canaryUsesFor(pubkey, rootKeyId) !== null);
+  if (canary && observed.length) warnings.push({ code: 'canary-not-narrowed', message: 'this credential is a canary (a custom caveat '
+    + "only watch's guard accepts, or denied uses recorded for its root key ID); a canary is never narrowed or revoked from usage, "
+    + 'so no narrowing command is printed' });
+  const timeBefore = (entry?.caveats ?? []).filter(caveat => caveat.type === 'time-before');
+  const requested = new Set(timeBefore.map(caveat => caveat.requested));
+  const recorded = timeBefore.length && requested.size === 1 && !requested.has(undefined) ? [...requested][0] as string : null;
+  const entryExpiries = new Set(timeBefore.map(caveat => caveat.value));
+  // The narrowed credential must not outlive the original: its earliest time-before (the
+  // entry's and, with --target-file, the file's) is measured against now. An expired
+  // original gets no command; otherwise --expires is the smaller of the recorded duration
+  // and the remaining lifetime, rounded down to a whole unit bake accepts.
+  const instants = caveats.filter(caveat => caveat.type === 'time-before').map(caveat => parseTimeBefore(caveat.value));
+  const unparsed = instants.some(instant => instant === undefined);
+  const parsed = instants.filter((instant): instant is bigint => instant !== undefined);
+  const earliest = parsed.length ? parsed.reduce((first, instant) => instant < first ? instant : first) : null;
+  const remaining = earliest === null ? null : earliest - BigInt((deps.clock ?? (() => new Date()))().getTime()) * 1_000_000n;
+  const lifetime = remaining === null ? null : remainingDuration(remaining);
+  const expired = remaining !== null && lifetime === null;
+  if (expired && observed.length) warnings.push({ code: 'recommendation-expired', message: "the credential's expiry (time-before) "
+    + 'has passed, or is less than a minute away; a narrowed credential would outlive it, so no narrowing command is printed. '
+    + 'To keep the app working, replace it with macwarden rotate; otherwise remove it with macwarden revoke' });
+  const expires = recorded === null || lifetime === null ? recorded : shorterDuration(recorded, lifetime);
+  const unreproducible = sortUnique([
+    ...caveats.filter(caveat => caveat.type !== 'time-before' && caveat.type !== 'lnd-custom').map(caveat => caveat.type),
+    ...(timeBefore.length && expires === null ? ['time-before'] : []),
+    // A file's expiry must be one the entry records with its duration.
+    ...(fileCaveats.some(caveat => caveat.type === 'time-before' && (expires === null || !entryExpiries.has(caveat.value)))
+      ? ['time-before'] : []),
+    ...(fileOmitsCaveats ? ['caveats-exceed-bounds'] : []),
+    // An expiry that cannot be read cannot be bounded.
+    ...(unparsed ? ['time-before'] : []),
+  ]);
+  if (unreproducible.length && !canary && observed.length) warnings.push({ code: 'recommendation-caveats', message: 'the credential has '
+    + `caveats a narrowing bake cannot reproduce (${unreproducible.join(', ')}); the narrowed credential would lose them, so no `
+    + 'narrowing command is printed. An expiry is carried only when the registry recorded the duration it was baked with' });
   const commands: string[] = [];
   if (observed.length && !unmapped.length && !incomplete && !unverified && !beyond.length && !invalid
-    && (!short || acceptShort)) {
-    const label = entry?.label ? narrowLabel(entry.label) : 'narrowed';
+    && !canary && !expired && !unreproducible.length && (!short || acceptShort)) {
+    const activeLabels = new Set(ownEntries.filter(item => item.status === 'active' && item.label !== null)
+      .map(item => item.label as string));
+    const label = entry?.label ? narrowLabel(entry.label, activeLabels) : 'narrowed';
     const connection = `--lnd-rest ${quote(host)} --tls-cert ${quote(recoveryPath(certPath))} --macaroon ${quote(recoveryPath(ownPath))}` +
       (registryPath ? ` --registry ${quote(recoveryPath(registryPath))}` : '');
     // The method list is quoted like the paths: unquoted, PowerShell (a function or npm's .ps1 shim)
     // splits a,b into an array. <file> is a placeholder the operator replaces with the new path.
-    commands.push(`macwarden bake --label ${label} --uri ${quote(methods.join(','))} --out <file> ${connection}`);
+    commands.push(`macwarden bake --label ${label} --uri ${quote(methods.join(','))}`
+      + `${expires === null ? '' : ` --expires ${quote(expires)}`} --out <file> ${connection}`);
     // Revoking deletes the whole root key ID: only suggested when the selection covered every
     // credential observed on it (a label or root key ID), never from one credential's usage.
     // Each entry is a command that runs as printed; the precondition is a trailing comment,
     // which POSIX sh and PowerShell both ignore.
-    if (entry?.label && select.credential === undefined)
-      commands.push(`macwarden revoke ${entry.label} ${connection}  # after switching the app to the new file`);
+    // revoke resolves a label only when it names exactly one active entry on the node (V6):
+    // while a rotation is staged the original and its replacement share it, so the root key
+    // ID is printed instead.
+    if (entry?.label && select.credential === undefined) {
+      const entryLabel = entry.label;
+      const target = ownEntries.filter(item => item.status === 'active' && item.label === entryLabel).length === 1
+        ? entryLabel : entry.rootKeyId;
+      commands.push(`macwarden revoke ${quote(target)} ${connection}  # after switching the app to the new file`);
+    }
   }
   const result: RecommendResult = { node: pubkey, selector: label, label: entry?.label ?? null,
-    rootKeyId: entry?.rootKeyId ?? (byId ? selector : identity), credentials: sortUnique(records.map(record => record.credential)),
+    rootKeyId, credentials: sortUnique(records.map(record => record.credential)),
     observed, unmapped, recommended, recommendedUris, current, unneeded, observation, commands };
   return { schema: 1, command: 'recommend', ok: true, warnings, result, error: null };
 }
 
-/** The suggested label: the original plus "-narrow", truncated so it still fits bake's 64-character label rule. */
-export function narrowLabel(label: string): string {
-  const suffix = '-narrow';
-  return `${label.slice(0, 64 - suffix.length)}${suffix}`;
+const UNIT_MS = { d: 86_400_000n, h: 3_600_000n, m: 60_000n } as const;
+/** bake --expires takes 1 to 99999 of a unit. */
+const MAX_COUNT = 99_999n;
+
+/**
+ * A remaining lifetime in nanoseconds as the largest whole duration bake --expires accepts
+ * that does not exceed it (days, then hours, then minutes), or null when less than a minute
+ * remains (or none): the original is expired for this purpose.
+ */
+export function remainingDuration(nanoseconds: bigint): string | null {
+  const milliseconds = nanoseconds / 1_000_000n;
+  for (const unit of ['d', 'h', 'm'] as const) {
+    const count = milliseconds / UNIT_MS[unit];
+    if (count >= 1n) return `${count > MAX_COUNT ? MAX_COUNT : count}${unit}`;
+  }
+  return null;
+}
+
+/** The shorter of two bake --expires durations. */
+function shorterDuration(left: string, right: string): string {
+  const length = (value: string) => BigInt(value.slice(0, -1)) * UNIT_MS[value.at(-1) as keyof typeof UNIT_MS];
+  return length(right) < length(left) ? right : left;
+}
+
+/**
+ * The suggested label: the original plus "-narrow", truncated so it still fits bake's
+ * 64-character label rule. When that gives back the original, or a label already active in
+ * `taken`, a number is added ("-narrow2", "-narrow3", ...).
+ */
+export function narrowLabel(label: string, taken: ReadonlySet<string> = new Set()): string {
+  for (let n = 1; ; n++) {
+    const suffix = n === 1 ? '-narrow' : `-narrow${n}`;
+    const candidate = `${label.slice(0, 64 - suffix.length)}${suffix}`;
+    if (candidate !== label && !taken.has(candidate)) return candidate;
+  }
 }
 
 export async function run(args: string[], deps: Deps): Promise<RecommendOutput> { return runSteps(args, deps); }
 
 export async function recommend(args: string[]): Promise<OutputResult> {
-  return run(args, { createAdapter: createLndAdapter, fs: nodeFs, env: { ...process.env } });
+  return run(args, { createAdapter: createLndAdapter, fs: nodeFs, env: { ...process.env }, clock: () => new Date() });
 }

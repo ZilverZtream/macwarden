@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "terminal-states-final",
+  "rule": "",
+  "message": "hand-written scenario (no violation recorded)",
+  "seed": null,
+  "case": null,
+  "config": {
+    "scale": "small",
+    "budget": false,
+    "limit": "10000"
+  },
+  "failingStep": -1,
+  "originalSteps": 8,
+  "events": [
+    {
+      "t": "intent",
+      "p": "p0",
+      "op": 0,
+      "inv": 0
+    },
+    {
+      "t": "submit",
+      "p": "p0",
+      "op": 0,
+      "inv": 0
+    },
+    {
+      "t": "send.arrive",
+      "pick": 0
+    },
+    {
+      "t": "reconcile",
+      "p": "p1",
+      "op": 0,
+      "inv": 0
+    },
+    {
+      "t": "track.deliver",
+      "pick": 0
+    },
+    {
+      "t": "lnd.payment",
+      "pick": 0,
+      "what": "fail"
+    },
+    {
+      "t": "preempt",
+      "p": "p0",
+      "method": "markUncertain",
+      "pick": 0
+    },
+    {
+      "t": "send.end",
+      "pick": 0,
+      "mode": "transport"
+    }
+  ],
+  "states": {},
+  "note": "hand-written scenario (no violation recorded). p0 submits op0/i0 and LND has it in flight; p1 tracks it (in_flight), and LND fails it. A preempt arms p0: right before its next markUncertain, p1's queued FAILED is delivered, as when p1 commits between p0's read of the record and its transaction. p0's SendPaymentV2 then breaks (ambiguous): it reads the record, still in flight, and calls markUncertain, which must leave the payment p1 recorded failed alone (mutant m6b moves it to uncertain)."
+}

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import type { DatabaseSync } from 'node:sqlite';
 import { text } from '../store/sqlite.ts';
-import { EffectError, effectFields, publish, type EffectHooks, type EffectTarget } from './effects.ts';
+import { EffectError, effectFields, publish, temporaryFileLister, type EffectHooks, type EffectTarget } from './effects.ts';
 import { acknowledge, claim, notDoneCount, retryLater, type OutboxRow } from './outbox.ts';
 
 /**
@@ -86,6 +86,8 @@ export function runPass(db: DatabaseSync, target: EffectTarget, options: WorkerO
   const leaseMs = options.leaseMs ?? DEFAULT_LEASE_MS;
   const hooks = options.hooks ?? {};
   const result: PassResult = { performed: 0, alreadyPresent: 0, failed: 0, leaseLost: 0, remaining: 0 };
+  // The effect directory's temporary files, listed once for the pass (not once per row).
+  const temporaries = temporaryFileLister();
   for (let index = 0; index < (options.maxRows ?? 1000); index += 1) {
     const row = claim(db, owner, clock(), leaseMs);
     if (row === undefined) break;
@@ -94,7 +96,7 @@ export function runPass(db: DatabaseSync, target: EffectTarget, options: WorkerO
     try {
       checkLedgerEntry(db, row);
       outcome = publish(target, row.subject, effectFields(row), hooks,
-        { owner, expiresAtMs: Date.parse(row.leaseExpiresAt ?? ''), nowMs: clock() });
+        { owner, expiresAtMs: Date.parse(row.leaseExpiresAt ?? ''), nowMs: clock() }, temporaries);
     } catch (error) {
       const reason = error instanceof EffectError ? error.reason : 'error';
       const message = `${reason}: ${error instanceof Error ? error.message : String(error)}`;
@@ -117,9 +119,10 @@ export function runPass(db: DatabaseSync, target: EffectTarget, options: WorkerO
   return result;
 }
 
-/** Passes until `signal` aborts, one every intervalMs (or once). */
+/** Passes until `signal` aborts, one every intervalMs (or once). A signal already aborted runs no pass. */
 export async function runOutbox(db: DatabaseSync, target: EffectTarget, options: WorkerOptions & { once: boolean; intervalMs: number;
   signal: AbortSignal }): Promise<PassResult> {
+  if (options.signal.aborted) return { performed: 0, alreadyPresent: 0, failed: 0, leaseLost: 0, remaining: notDoneCount(db) };
   const owner = options.owner ?? workerId();
   let last = runPass(db, target, { ...options, owner });
   options.emit({ event: 'outbox-pass', ...last });

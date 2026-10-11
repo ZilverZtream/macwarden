@@ -104,9 +104,12 @@ it('CP-020/B1 adapter never reads a missing root key or a signature mismatch out
 // Audit 1.2.1: the classifier's wildcard regex was quadratic; a hostile 1 MiB error body stalled every call for 65 s.
 it('CP-020/B1 adapter classifies a hostile 1 MiB error body in bounded time', async () => {
   const body = { message: 'macaroon'.repeat(130_000) };
-  const started = performance.now();
+  let elapsed = Infinity;
   await respond(500, body, async adapter => {
+    // Timed from here: the certificate generation and server start in respond() are setup.
+    const started = performance.now();
     await expect(adapter.checkMacaroon(credential(), ['info:read'])).rejects.toMatchObject({ code: 5 });
+    elapsed = performance.now() - started;
   });
-  expect(performance.now() - started).toBeLessThan(5_000);
+  expect(elapsed).toBeLessThan(5_000);
 }, 30_000);

@@ -302,6 +302,17 @@ async function finishSteps(request: Request, deps: Deps, state: RunState): Promi
         return fail(3, 'F9', 'old or replacement entry changed since F3; nothing sent to LND', warnings);
       registry.reload(current.entries);
     } catch { return fail(3, 'F9', 'unreadable or invalid registry on reread; nothing sent to LND', warnings); }
+    // The F7 local check is as old as the prompt as well: the operator just confirmed that the app
+    // uses N's file, so N's file must still hold the credential F7 read (same canonical fingerprint,
+    // root key ID and decoded facts). A file removed or overwritten meanwhile must not let O be
+    // deleted. This is a local read only: it adds no LND call to the finish sequence.
+    let reread: Target | undefined;
+    try { reread = await readTarget(next.outPath, deps); } catch { /* reported below */ }
+    if (!reread || reread.facts.fingerprint !== replacement.facts.fingerprint
+      || reread.facts.rootKeyId !== replacement.facts.rootKeyId || !isDeepStrictEqual(reread.facts, replacement.facts))
+      return fail(3, 'F7', 'staged replacement file was removed or changed while waiting for confirmation; ' +
+        'nothing changed; restore the replacement the app uses and rerun, ' +
+        `or abandon it with macwarden revoke ${next.rootKeyId}`, warnings);
     // The F7 proof is as old as the confirmation prompt: a replacement whose time-before caveat
     // passed while the prompt was open must not let O be deleted (or recorded revoked).
     if (!usable(replacement, deps.clock()))

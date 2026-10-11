@@ -1,0 +1,126 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "no-internal-error",
+  "rule": "Store calls, workflows and the outbox worker on a live process never throw (LND is truthful apart from the injected faults; the only refusal by exception is a FAILED for a payment already succeeded).",
+  "message": "receiver markCreated threw: canceled",
+  "seed": 1,
+  "case": 69,
+  "config": {
+    "scale": "small",
+    "budget": false,
+    "limit": "3200"
+  },
+  "failingStep": 8,
+  "originalSteps": 31,
+  "events": [
+    {
+      "t": "create",
+      "p": "p0",
+      "order": 2,
+      "hold": false
+    },
+    {
+      "t": "rreconcile",
+      "p": "p0",
+      "order": null,
+      "cli": false
+    },
+    {
+      "t": "answer",
+      "kind": "create",
+      "pick": 0.5,
+      "mode": "ok"
+    },
+    {
+      "t": "rreconcile",
+      "p": "p1",
+      "order": null,
+      "cli": true
+    },
+    {
+      "t": "rreconcile",
+      "p": "p1",
+      "order": null,
+      "cli": false
+    },
+    {
+      "t": "answer",
+      "kind": "lookup",
+      "pick": 0.8333,
+      "mode": "ok"
+    },
+    {
+      "t": "invoice",
+      "what": "expire",
+      "pick": 0.5
+    },
+    {
+      "t": "answer",
+      "kind": "lookup",
+      "pick": 0.5,
+      "mode": "ok"
+    },
+    {
+      "t": "answer",
+      "kind": "lookup",
+      "pick": 0.8333,
+      "mode": "ok"
+    }
+  ],
+  "states": {
+    "call": {
+      "proc": "p0",
+      "method": "markCreated",
+      "args": [
+        "o2#1",
+        "lnbcrt-invoice-o2#1",
+        "1"
+      ],
+      "error": "canceled"
+    },
+    "before": {
+      "invoices": {
+        "o2#1": {
+          "order": "o2",
+          "state": "canceled",
+          "amount": "7000",
+          "amtPaid": "0"
+        }
+      },
+      "orders": {
+        "o2": "canceled"
+      },
+      "fulfillments": [],
+      "ledger": [],
+      "cursor": {
+        "settle": "0",
+        "add": "0"
+      },
+      "entries": [],
+      "outbox": []
+    },
+    "after": {
+      "invoices": {
+        "o2#1": {
+          "order": "o2",
+          "state": "canceled",
+          "amount": "7000",
+          "amtPaid": "0"
+        }
+      },
+      "orders": {
+        "o2": "canceled"
+      },
+      "fulfillments": [],
+      "ledger": [],
+      "cursor": {
+        "settle": "0",
+        "add": "0"
+      },
+      "entries": [],
+      "outbox": []
+    }
+  },
+  "mutant": "no-internal-error--m14b.cjs"
+}

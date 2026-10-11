@@ -102,9 +102,10 @@ async function reserveWindows(path: string, fs: PrivateFs): Promise<OwnerOnlyFil
   let handle: nodeFs.FileHandle;
   try { handle = await fs.open(path, constants.O_RDWR | UV_FS_O_EXLOCK); }
   catch {
-    // Another handle exists (EBUSY) or the file is gone. Nothing has been written.
+    // Another handle exists (EBUSY) or the file is gone. Nothing has been written: only the empty
+    // file the helper made is removed; one that holds data is someone else's and is kept.
     creation.end();
-    await fs.unlink(path).catch(() => undefined);
+    await removeEmptyLeftover(path, fs);
     throw new PrivateFileError('the file was opened or replaced by another process before it was written', 'share');
   }
   // FAT and exFAT keep no owner and no ACL, so there is nothing to verify.

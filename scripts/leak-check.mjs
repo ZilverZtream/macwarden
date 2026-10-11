@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFileSync, readdirSync, lstatSync, existsSync } from 'node:fs';
+import { readFileSync, readdirSync, lstatSync, statSync, existsSync } from 'node:fs';
 import { resolve, relative, dirname, basename, join, sep, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -226,6 +226,8 @@ function preparedSource(source) {
     base64.replace(/\+/g, '-').replace(/\//g, '_'), base64url])];
   return {
     source, hex, latin1, base64, base64url, base64Forms,
+    // Text encodings as bytes, for a second layer: base64 or hex of this text.
+    textForms: [...new Set([hex, hex.toUpperCase(), ...base64Forms])].map(form => Buffer.from(form)),
     utf16le, utf16be: Buffer.from(utf16le).swap16(),
     percentBytes: hex.replace(/../g, byte => `%${byte}`),
     escapedBytes: hex.replace(/../g, byte => `\\x${byte}`),
@@ -238,7 +240,21 @@ function preparedData(data) {
   const recovered = [data.toString('utf8'), utf16.toString('utf16le'),
     Buffer.from(utf16).swap16().toString('utf16le')].map(recoveredText);
   const text = recovered.join('\n');
-  const compact = text.replace(/\s/g, '');
+  // Zero-width characters split a value as invisibly as whitespace does.
+  const compact = text.replace(/[\s\u200b-\u200d\u2060\ufeff]/g, '');
+  // Two more views of split values, each one linear pass: adjacent string literals
+  // joined ("ab" + "cd", ["ab", "cd"]), and the last token of every line joined
+  // (wrapped output behind a per-line log prefix such as a timestamp).
+  const joined = text.replace(/(["'`])(?=([\s\u200b-\u200d\u2060\ufeff]*))\2[,+]?(?=([\s\u200b-\u200d\u2060\ufeff]*))\3\1/g, '')
+    .replace(/[\s\u200b-\u200d\u2060\ufeff]/g, '');
+  const lastToken = line => {
+    let end = line.length;
+    while (end > 0 && /\s/.test(line[end - 1])) end--;
+    let start = end;
+    while (start > 0 && !/\s/.test(line[start - 1])) start--;
+    return line.slice(start, end);
+  };
+  const tails = text.split('\n').map(lastToken).join('');
   const percent = text.replace(/%([0-9a-f]{2})/gi, (_, digits) => String.fromCharCode(parseInt(digits, 16)));
   let separated, decimal;
   // Native byte searches retain exact UTF-8 representations of the recovered
@@ -248,10 +264,11 @@ function preparedData(data) {
     lower: Buffer.from(text.toLowerCase()), compact: Buffer.from(compact),
     compactLower: Buffer.from(compact.toLowerCase()),
     percent: Buffer.from(percent), percentLower: Buffer.from(percent.toLowerCase()),
+    splitViews: [Buffer.from(joined), Buffer.from(tails)],
     hexStreams: () => separated ??= hexStreams(text),
     decimalStream: () => decimal ??= decimalStream(text),
     base64Runs: [
-      ...(text.match(/[A-Za-z0-9+/_-]{16,}={0,2}/g) ?? []),
+      ...[text, joined, tails].flatMap(view => view.match(/[A-Za-z0-9+/_-]{16,}={0,2}/g) ?? []),
       ...groupedBase64Runs(text, 'dash').map(run => run.replaceAll('-', '')),
       ...groupedBase64Runs(text, 'underscore').map(run => run.replaceAll('_', '')),
       ...groupedBase64Runs(text, 'other').filter(run => {
@@ -281,6 +298,11 @@ function alternateEncoding(data, source, state = preparedSource(source), input =
   if (data.includes(state.utf16le) || data.includes(state.utf16be)) return 'utf-16 bytes';
   // Decode each maximal base64 run once, preserving offset recognition.
   if (base64Runs.some(run => run.includes(source))) return 'offset base64';
+  if (input.splitViews.some(view => state.textForms.some(form => view.includes(form)))) return 'split literals';
+  // A second layer: base64 of the hex or base64 text, or hex of the base64 text.
+  if (base64Runs.some(run => state.textForms.some(form => run.includes(form)))) return 'base64 of a text encoding';
+  if (text.length >= source.length * 2 && state.textForms.some(form => streamIncludes(input.hexStreams(), form)))
+    return 'hex of a text encoding';
   return null;
 }
 
@@ -301,10 +323,10 @@ function preparedMatcherGroup(states) {
     // checks below still enforce all boundaries and choose the encoding.
     if (raw(input.data) || encoded(input.data)) return true;
     if ([...input.recovered, input.lower, input.compact, input.compactLower,
-      input.percent, input.percentLower].some(encoded)) return true;
-    if (input.hexStreams().some(stream => raw(stream.bytes)) ||
+      input.percent, input.percentLower, ...input.splitViews].some(encoded)) return true;
+    if (input.hexStreams().some(stream => raw(stream.bytes) || encoded(stream.bytes)) ||
         input.decimalStream().some(stream => raw(stream.bytes))) return true;
-    return input.base64Runs.some(raw);
+    return input.base64Runs.some(run => raw(run) || encoded(run));
   };
 }
 
@@ -424,20 +446,70 @@ function preparedSnapshot(sources) {
  * @property {string} [root] Project root for registered source globs.
  */
 
+// Fewer distinct byte values than this in 32 bytes is not a random signature
+// (a uniform random one falls below 16 with negligible probability).
+const SIGNATURE_MIN_DISTINCT_BYTES = 16;
+
+// Another test worker's bake or rotate holds a freshly staged runtime sentinel open exclusively
+// while it sets its permissions (Windows reports EBUSY, EPERM or EACCES). Such a file is retried
+// with backoff for up to this long, then the check fails; it is never skipped.
+const BUSY_RETRY_MS = 5_000;
+const BUSY_CODES = new Set(['EBUSY', 'EPERM', 'EACCES']);
+const pause = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+// Sentinel bytes by file identity (resolved path, size, mtime in ns, inode), so an unchanged
+// runtime file is not re-read by every check; a changed or new file always is. The bytes are
+// cached only when the identity is the same before and after the read. Bounded by entries and bytes.
+const SOURCE_CACHE_ENTRIES = 8192;
+const SOURCE_CACHE_BYTES = 64 * 1_048_576;
+const sourceCache = new Map();
+let sourceCacheBytes = 0;
+function identity(path) {
+  const stat = statSync(path, { bigint: true });
+  return `${resolve(path)}\0${stat.size}\0${stat.mtimeNs}\0${stat.ino}`;
+}
+function cachedRead(path) {
+  const before = identity(path);
+  const found = sourceCache.get(before);
+  if (found) return found;
+  const bytes = readFileSync(path);
+  if (identity(path) === before && bytes.length <= SOURCE_CACHE_BYTES) {
+    while (sourceCache.size >= SOURCE_CACHE_ENTRIES || sourceCacheBytes + bytes.length > SOURCE_CACHE_BYTES) {
+      const oldest = sourceCache.keys().next().value;
+      sourceCacheBytes -= sourceCache.get(oldest).length;
+      sourceCache.delete(oldest);
+    }
+    sourceCache.set(before, bytes);
+    sourceCacheBytes += bytes.length;
+  }
+  return bytes;
+}
+function readRuntimeSource(path) {
+  const deadline = Date.now() + BUSY_RETRY_MS;
+  for (let delay = 25; ; delay = Math.min(delay * 2, 1_000)) {
+    try { return cachedRead(path); }
+    catch (error) {
+      if (!BUSY_CODES.has(error?.code) || Date.now() >= deadline) throw error;
+      pause(Math.min(delay, Math.max(1, deadline - Date.now())));
+    }
+  }
+}
+
 /** @param {SentinelOptions} options */
 function sentinelSources({ sentinels, sentinelDir, root }) {
   const projectRoot = root ? resolve(root) : resolve(dirname(sentinels), '..');
-  let globs = [];
-  if (existsSync(sentinels)) {
-    globs = JSON.parse(readFileSync(sentinels, 'utf8'));
-    if (!Array.isArray(globs) || !globs.every(item => typeof item === 'string')) throw new Error('invalid sentinels list');
-  }
+  // The registered list fails closed: a missing or invalid list, a glob outside the
+  // project or a glob that matches no file is an error, never an empty population.
+  const globs = JSON.parse(readFileSync(sentinels, 'utf8'));
+  if (!Array.isArray(globs) || !globs.every(item => typeof item === 'string')) throw new Error('invalid sentinels list');
   const sourcePaths = globs.flatMap(glob => {
     const prefix = glob.split(/[?*]/, 1)[0];
     const base = resolve(projectRoot, prefix.endsWith('/') ? prefix : dirname(prefix));
-    if (base !== projectRoot && !base.startsWith(projectRoot + sep)) return [];
+    if (base !== projectRoot && !base.startsWith(projectRoot + sep)) throw new Error('sentinel glob outside the project');
     const pattern = globPattern(glob);
-    return filesUnder(base).filter(path => pattern.test(relative(projectRoot, path).split(sep).join('/')));
+    const matched = filesUnder(base).filter(path => pattern.test(relative(projectRoot, path).split(sep).join('/')));
+    if (!matched.length) throw new Error('sentinel glob matches no file');
+    return matched;
   });
   // Runtime sentinels are written and removed by tests in other workers while this check runs.
   // filesUnder already skips one removed while the directory is listed; one removed between the
@@ -451,12 +523,24 @@ function sentinelSources({ sentinels, sentinelDir, root }) {
   const distinct = new Map();
   for (const path of sourcePaths) {
     let bytes;
-    try { bytes = readFileSync(path); }
+    try { bytes = runtime.has(path) ? readRuntimeSource(path) : readFileSync(path); }
     catch (error) {
       if (error?.code === 'ENOENT' && runtime.has(path)) continue;
       throw error;
     }
     if (bytes.length) distinct.set(bytes.toString('hex'), bytes);
+    // A v2 macaroon sentinel also registers what is equivalent to it: everything after
+    // the constant version byte, and its 32-byte signature (the field after the caveats'
+    // end marker: 00 06 20), which with the identifier is the credential.
+    if (bytes[0] === 0x02 && bytes.length > 35) {
+      const rest = bytes.subarray(1);
+      distinct.set(rest.toString('hex'), rest);
+      const field = bytes.lastIndexOf(Buffer.from([0x00, 0x06, 0x20]));
+      const signature = field >= 0 && field + 35 <= bytes.length ? bytes.subarray(field + 3, field + 35) : null;
+      // A real HMAC-SHA256 signature has about 30 distinct byte values; a synthetic
+      // placeholder (all zero bytes) would match ordinary data, so it is not registered.
+      if (signature && new Set(signature).size >= SIGNATURE_MIN_DISTINCT_BYTES) distinct.set(signature.toString('hex'), signature);
+    }
     // An NWC URI sentinel also registers its 32-byte connection secret, so the
     // secret is found in every encoding even when it leaks without the URI.
     for (const match of bytes.toString('latin1').matchAll(/(?:nostr\+walletconnect|nostrwalletconnect):[^\s"'<>]*?[?&]secret=([0-9a-f]{64})(?![0-9a-f])/gi)) {
@@ -512,6 +596,8 @@ export function findLeaks({ sentinels, sentinelDir, paths = [], commandOutput = 
 
   // Reject links before reading any artifact, including the output manifest.
   // Source enumeration keeps its separate, existing traversal policy.
+  // A named candidate path must exist: a mistyped or removed path is an error, not a pass.
+  for (const scanPath of paths) lstatSync(scanPath);
   const candidates = paths.flatMap(scanPath => filesUnder(scanPath, true).map(path => ({
     path, name: lstatSync(scanPath).isDirectory() ? relative(scanPath, path) : basename(path),
   })));

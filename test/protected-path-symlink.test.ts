@@ -7,7 +7,10 @@ import { openRegistry } from '../src/registry/index.js';
 import { directory } from './helpers/cp026-revoke-support.mjs';
 
 // SAFE-02: a path whose own name is harmless must still be refused when it resolves
-// through a symlink to a protected name. Real symlinks on the real file system.
+// through a symlink to a protected name. Real symlinks on the real file system: creating them is
+// a requirement of every platform this suite runs on (Linux; Windows runners are elevated, and a
+// Windows workstation needs Developer Mode or an elevated shell), so a missing capability fails
+// here instead of skipping (audit 1.4.0).
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 function scratch() {
@@ -15,14 +18,7 @@ function scratch() {
   dirs.push(dir);
   return dir;
 }
-const canLink = (() => {
-  const dir = mkdtempSync(join(directory('MACWARDEN_TEST_TMP'), 'link-probe-'));
-  try { writeFileSync(join(dir, 't'), ''); symlinkSync(join(dir, 't'), join(dir, 'l'), 'file'); return true; }
-  catch { return false; }
-  finally { rmSync(dir, { recursive: true, force: true }); }
-})();
-
-it.skipIf(!canLink)('PROTECTED/symlink a registry symlink to wallet.db is refused without reading wallet.db', async () => {
+it('PROTECTED/symlink a registry symlink to wallet.db is refused without reading wallet.db', async () => {
   const dir = scratch();
   const wallet = join(dir, 'wallet.db');
   writeFileSync(wallet, JSON.stringify({ schema: 1, entries: [] }));
@@ -37,7 +33,7 @@ it.skipIf(!canLink)('PROTECTED/symlink a registry symlink to wallet.db is refuse
   expect(reads).toEqual([]);
 });
 
-it.skipIf(!canLink)('PROTECTED/symlink an output path through a directory symlink to a protected name is refused', async () => {
+it('PROTECTED/symlink an output path through a directory symlink to a protected name is refused', async () => {
   const dir = scratch();
   const protectedDir = join(dir, 'node.key');
   mkdirSync(protectedDir);
@@ -52,7 +48,7 @@ it.skipIf(!canLink)('PROTECTED/symlink an output path through a directory symlin
   expect(await resolveUnprotectedPath(join(plainLink, 'new.macaroon'), fs)).toBe(join(await fs.realpath(plain), 'new.macaroon'));
 });
 
-it.skipIf(!canLink)('PROTECTED/symlink a dangling output symlink is refused instead of becoming a creation path', async () => {
+it('PROTECTED/symlink a dangling output symlink is refused instead of becoming a creation path', async () => {
   const dir = scratch();
   const link = join(dir, 'new.macaroon');
   symlinkSync(join(dir, 'elsewhere', 'target.macaroon'), link, 'file');

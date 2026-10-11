@@ -1,4 +1,4 @@
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import type { WatchEvent } from '../src/output/index.js';
 import { createAlertRunner, createAlertThrottle } from '../src/watch/alert-throttle.js';
 
@@ -121,15 +121,22 @@ it('WATCH/alert-shutdown stop discards the waiting event, refuses new ones and c
   }, e => failures.push(e));
   runner.submit(event(0));
   runner.submit(event(1));
-  const started = performance.now();
-  await runner.stop(100, 1_000);
-  const elapsed = performance.now() - started;
+  // Fake timers: the deadlines are checked to the millisecond instead of against the wall clock.
+  vi.useFakeTimers();
+  let stopped = false;
+  try {
+    const stopping = runner.stop(100, 1_000).then(() => { stopped = true; });
+    await vi.advanceTimersByTimeAsync(99);
+    // Within the grace period the command keeps running.
+    expect({ stopped, aborted: signals[0].aborted }).toEqual({ stopped: false, aborted: false });
+    await vi.advanceTimersByTimeAsync(1);
+    // At the grace deadline it is cancelled, and stop returns as soon as it settles, not at the 1 s settle deadline.
+    expect({ stopped, aborted: signals[0].aborted }).toEqual({ stopped: true, aborted: true });
+    await stopping;
+  } finally { vi.useRealTimers(); }
   // The waiting event never starts; it is reported, because no command ran for it.
   expect(ran).toEqual([event(0)]);
-  expect(signals[0].aborted).toBe(true);
   expect(failures).toEqual([event(1), event(0)]);
-  expect(elapsed).toBeGreaterThanOrEqual(90);
-  expect(elapsed).toBeLessThan(1_000);
   // After stop nothing new starts.
   runner.submit(event(2));
   await new Promise(resolve => setImmediate(resolve));
@@ -140,9 +147,17 @@ it('WATCH/alert-shutdown stop discards the waiting event, refuses new ones and c
 it('WATCH/alert-shutdown stop returns by its deadline even when a run ignores cancellation', async () => {
   const runner = createAlertRunner(() => new Promise<void>(() => undefined), () => undefined);
   runner.submit(event(0));
-  const started = performance.now();
-  await runner.stop(50, 100);
-  expect(performance.now() - started).toBeLessThan(1_000);
+  vi.useFakeTimers();
+  try {
+    let stopped = false;
+    const stopping = runner.stop(50, 100).then(() => { stopped = true; });
+    // Grace 50 ms, then the settle deadline 100 ms later: returns exactly then, though the run never ends.
+    await vi.advanceTimersByTimeAsync(149);
+    expect(stopped).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(stopped).toBe(true);
+    await stopping;
+  } finally { vi.useRealTimers(); }
 });
 
 it('WATCH/alert-shutdown stop does not wait or cancel when the running command finishes first', async () => {
@@ -151,9 +166,17 @@ it('WATCH/alert-shutdown stop does not wait or cancel when the running command f
   const runner = createAlertRunner((_e, signal) => { signals.push(signal); return new Promise<void>(resolve => { release = resolve; }); },
     () => undefined);
   runner.submit(event(0));
-  setTimeout(() => release(), 20);
-  const started = performance.now();
-  await runner.stop(10_000, 1_000);
-  expect(performance.now() - started).toBeLessThan(2_000);
+  vi.useFakeTimers();
+  try {
+    let stopped = false;
+    const stopping = runner.stop(10_000, 1_000).then(() => { stopped = true; });
+    await vi.advanceTimersByTimeAsync(20);
+    expect(stopped).toBe(false);
+    // The command finishes 20 ms in: stop returns then, without waiting for its 10 s grace.
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(stopped).toBe(true);
+    await stopping;
+  } finally { vi.useRealTimers(); }
   expect(signals[0].aborted).toBe(false);
 });

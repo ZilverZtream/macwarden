@@ -74,7 +74,9 @@ export interface DecodedPayReq {
   description: string;
 }
 
-export interface PaymentRecord { paymentHash: string; state: string; submissions: number; failureReason: string | undefined }
+export interface PaymentRecord { paymentHash: string; state: string; submissions: number; failureReason: string | undefined;
+  /** When the current submission was claimed (wall-clock ns); undefined before the first claim. */
+  submittedAtNs?: bigint }
 
 /** The raw database handle the tests use to corrupt or rewind a store (node:sqlite's DatabaseSync, narrowed). */
 export interface RawDb {
@@ -184,9 +186,10 @@ export interface PayerStore {
   events(paymentHash: string): { kind: string; detail: string }[];
   recordIntent(input: { operationId: string; kind: string; paymentRequest: string; invoice: DecodedPayReq; feeLimitMsat: bigint;
     maxParts: number; budgetId?: string }): IntentResult;
-  claimForSubmission(paymentHash: string): boolean;
+  claimForSubmission(paymentHash: string, claimed?: { submission?: number }): boolean;
   markUncertain(paymentHash: string, reason: string, submission?: number): string;
   markNotInitiated(paymentHash: string, evidence: string, submission?: number): string;
+  markRejected(paymentHash: string, reason: string, submission?: number): boolean;
   applyUpdate(payment: Payment, source: 'SendPaymentV2' | 'TrackPaymentV2', submission?: number): { state: string };
   prepareRetry(operationId: string): IntentResult;
 }
@@ -255,10 +258,11 @@ export interface Lab {
     Promise<{ kind: string; paymentHash?: string; reason?: string }>;
   reconcileInvoices(deps: ReceiverDeps, onlyOrder?: string, signal?: AbortSignal): Promise<{ resolved: number; open: number; unknown: number }>;
   listen(deps: ReceiverDeps, options: { reconcileIntervalMs: number; signal: AbortSignal; afterReconcile?: () => void }): Promise<void>;
-  main(argv: string[], services: { payer(labDir: string | undefined, profile: string): PayerDeps;
-    receiver(labDir: string | undefined, profile: string): ReceiverDeps;
+  /** `access` is 'read' for a command that only reads (src/cli.ts, Access): its store is to be opened read-only. */
+  main(argv: string[], services: { payer(labDir: string | undefined, profile: string, access?: 'read' | 'write'): PayerDeps;
+    receiver(labDir: string | undefined, profile: string, access?: 'read' | 'write'): ReceiverDeps;
     ledgerSource?(labDir: string | undefined, component: 'payer' | 'receiver', profile: string): LndLedgerSource | undefined;
-    outbox?(labDir: string | undefined, component: 'payer' | 'receiver'): EffectTarget | undefined }): Promise<number>;
+    outbox?(labDir: string | undefined, component: 'payer' | 'receiver', profile: string, db: RawDb): EffectTarget | undefined }): Promise<number>;
   /** src/ledger/verify.ts */
   verifyLedger(store: PayerStore | ReceiverStore, api?: LndLedgerSource): Promise<LedgerVerification>;
   /** src/outbox/ */
@@ -343,6 +347,14 @@ export async function loadHarnessRunner(): Promise<HarnessRunner> {
   const harness = await import(/* @vite-ignore */ `${harnessDir}harness.ts`) as Pick<HarnessRunner, 'Run' | 'PREDICATES'>;
   const labModule = await import(/* @vite-ignore */ `${harnessDir}lab.ts`) as { loadLab(): Promise<unknown> };
   return { Run: harness.Run, PREDICATES: harness.PREDICATES, loadHarnessLab: () => labModule.loadLab() };
+}
+
+/**
+ * A lab module by its path under examples/payment-lab/src, for a test that needs one the declarations above do not cover
+ * (the caller declares the shape it uses).
+ */
+export async function loadLabModule<T>(relative: string): Promise<T> {
+  return await load<T>(relative);
 }
 
 /** The file URL of a lab module, for a child process that imports it (the restart tests). */

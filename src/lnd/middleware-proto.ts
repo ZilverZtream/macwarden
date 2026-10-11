@@ -17,7 +17,16 @@ export type MiddlewareRequest = {
   kind: InterceptKind;
   method: string;
   isError: boolean;
-  /** The call carried a macaroon larger than MAX_MACAROON_BYTES; it was not copied. */
+  /**
+   * RPCMessage.stream_rpc (field 2): the intercepted call is a streaming RPC. Always true for
+   * stream_auth, which LND sends only when a stream opens.
+   */
+  streamRpc: boolean;
+  /**
+   * The call carried a macaroon larger than MAX_MACAROON_BYTES; only a prefix is passed on (as
+   * rawMacaroon), for the header-derived identity: OVERSIZED_MACAROON_PREFIX_BYTES, or the whole
+   * v2 header when it ends later but within OVERSIZED_HEADER_SCAN_BYTES (a padded location).
+   */
   oversizedMacaroon: boolean;
   /**
    * A view of the serialized request message (RPCMessage.serialized) of a `request` intercept
@@ -33,6 +42,14 @@ const MAX_UINT64 = (1n << 64n) - 1n;
 // a real macaroon is a few KiB and a gRPC method name well under 100 bytes. Larger values
 // are never copied, so a hostile peer cannot make watch amplify a huge field.
 export const MAX_MACAROON_BYTES = 64 * 1024;
+// Of an oversized macaroon, only this prefix is passed on: the identifier packet (root key ID and
+// nonce) is at the start and well under 1 KiB, so the call can still be attributed to the credential
+// LND accepted without copying a caller-sized field (audit 1.4.0: it was journaled id:undecodable).
+export const OVERSIZED_MACAROON_PREFIX_BYTES = 4 * 1024;
+// The location packet is not covered by the signature, so a holder can pad it to push the
+// identifier past that prefix. A v2 header (location, identifier, end of section) ending within
+// this bound is kept whole instead; it is the same bound as a macaroon that is passed on whole.
+export const OVERSIZED_HEADER_SCAN_BYTES = MAX_MACAROON_BYTES;
 export const MAX_METHOD_BYTES = 256;
 export const MAX_CONDITION_BYTES = 256;
 export const UNKNOWN_METHOD = '/unknown/Unknown';
@@ -44,6 +61,37 @@ function protocolError(): never {
 }
 
 const EMPTY = Buffer.alloc(0);
+
+/**
+ * The end of a v2 macaroon's header section (version byte, at most a location and an identifier
+ * packet, then the end-of-section byte), or null when it is not a v2 header ending within
+ * OVERSIZED_HEADER_SCAN_BYTES. Reads only packet types and lengths; copies nothing.
+ */
+function v2HeaderEnd(mac: Buffer): number | null {
+  const limit = Math.min(mac.length, OVERSIZED_HEADER_SCAN_BYTES);
+  if (mac[0] !== 2) return null;
+  const small = (at: number): [number, number] | null => {
+    let value = 0;
+    let scale = 1;
+    for (let position = at; position < limit && position < at + 4; position++) {
+      value += (mac[position] & 0x7f) * scale;
+      if ((mac[position] & 0x80) === 0) return [value, position + 1];
+      scale *= 128;
+    }
+    return null;
+  };
+  let position = 1;
+  for (let packets = 0; packets <= 2; packets++) {
+    const type = small(position);
+    if (!type) return null;
+    if (type[0] === 0) return type[1];
+    if (type[0] !== 1 && type[0] !== 2) return null;
+    const length = small(type[1]);
+    if (!length || length[0] > limit - length[1]) return null;
+    position = length[1] + length[0];
+  }
+  return null;
+}
 
 // Every intercepted call is decoded here before its feedback is sent, so this path avoids
 // BigInt arithmetic, generators and copies; it accepts and rejects exactly what the exact
@@ -119,18 +167,20 @@ function text(bytes: Buffer | null): string {
 const exact = (value: number | bigint): bigint => (typeof value === 'bigint' ? value : BigInt(value));
 
 /**
- * RPCMessage (fields 5 and 6) and StreamAuth (field 4): method URI and error flag, and the
+ * RPCMessage (fields 5 and 6) and StreamAuth (field 4): method URI, stream flag and error flag, and the
  * serialized payload (field 4 of RPCMessage) as a view, returned only to the caller that
  * asked for it (a request of a selected method).
  */
 function rpcMessage(bytes: Buffer, result: MiddlewareRequest): Buffer | null {
   result.method = '';
   result.isError = false;
+  result.streamRpc = false;
   let serialized: Buffer | null = null;
   eachField(bytes, (number, wire, value, field) => {
     if (number === 1 && wire === 2)
       result.method = field!.length > MAX_METHOD_BYTES ? UNKNOWN_METHOD : text(field);
     else if (number === 5 && wire === 0) result.isError = value !== 0 && value !== 0n;
+    else if (number === 2 && wire === 0) result.streamRpc = value !== 0 && value !== 0n;
     else if (number === 4 && wire === 2) serialized = field;
   });
   return serialized;
@@ -143,7 +193,7 @@ function rpcMessage(bytes: Buffer, result: MiddlewareRequest): Buffer | null {
  */
 export function decodeMiddlewareRequest(data: Buffer, payloadMethods?: ReadonlySet<string>): MiddlewareRequest {
   const result: MiddlewareRequest = { requestId: 0n, msgId: 0n, rawMacaroon: EMPTY,
-    customCaveatCondition: '', kind: 'none', method: '', isError: false, oversizedMacaroon: false,
+    customCaveatCondition: '', kind: 'none', method: '', isError: false, streamRpc: false, oversizedMacaroon: false,
     payload: EMPTY, oversizedPayload: false };
   eachField(data, (number, wire, value, bytes) => {
     switch (number) {
@@ -153,12 +203,15 @@ export function decodeMiddlewareRequest(data: Buffer, payloadMethods?: ReadonlyS
       // it, before the frame is wiped.
       case 2:
         if (wire !== 2) break;
-        if (bytes!.length > MAX_MACAROON_BYTES) { result.oversizedMacaroon = true; result.rawMacaroon = EMPTY; }
+        if (bytes!.length > MAX_MACAROON_BYTES) {
+          result.oversizedMacaroon = true;
+          result.rawMacaroon = bytes!.subarray(0, Math.max(OVERSIZED_MACAROON_PREFIX_BYTES, v2HeaderEnd(bytes!) ?? 0));
+        }
         else result.rawMacaroon = bytes!;
         break;
       // A longer condition cannot belong to a canary (16 hex characters): it is ignored.
       case 3: if (wire === 2 && bytes!.length <= MAX_CONDITION_BYTES) result.customCaveatCondition = text(bytes); break;
-      case 4: if (wire === 2) { result.kind = 'stream_auth'; const isError = result.isError; rpcMessage(bytes!, result); result.isError = isError; result.payload = EMPTY; result.oversizedPayload = false; } break;
+      case 4: if (wire === 2) { result.kind = 'stream_auth'; const isError = result.isError; rpcMessage(bytes!, result); result.isError = isError; result.streamRpc = true; result.payload = EMPTY; result.oversizedPayload = false; } break;
       case 5:
         if (wire !== 2) break;
         result.kind = 'request';

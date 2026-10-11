@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createPrivateDirectory } from './private-scratch.mjs';
 import { findLeaks, sentinelRedactor } from './leak-check.mjs';
@@ -35,6 +35,12 @@ async function validate(args) {
   if (timeout === null || oracleTimeout === null) return refuse('invalid MACWARDEN_VALIDATION_TIMEOUT_MS');
   if (!['win32', 'linux'].includes(process.platform)) return refuse(`unsupported platform ${process.platform} (Linux and Windows only)`);
   if (process.platform === 'linux' && process.getuid() === 0) return refuse('refusing to run as root');
+  // Evidence inside the work tree must be git-ignored: otherwise its untracked files would be
+  // excused by the cleanliness check while a later commit could pick them up.
+  const evidencePath = relative(root, evidence);
+  if (!evidencePath.startsWith('..') && !isAbsolute(evidencePath)
+    && spawnSync('git', ['check-ignore', '-q', '--', evidencePath || '.'], { cwd: root, timeout: 30_000, windowsHide: true }).status !== 0)
+    return refuse('the evidence directory is inside the work tree and not ignored by git');
   let candidate;
   let inputs;
   try {
@@ -46,7 +52,11 @@ async function validate(args) {
   // New attempt directories retain every previous failed or invalid run.
   mkdirSync(evidence, { recursive: true });
   const attempt = await createPrivateDirectory(evidence, 'attempt-');
-  const result = { level: 'full', platform: process.platform, candidate, inputs, status: 'FAIL',
+  // The toolchain that produced this evidence: Node, npm and the exact dependency lockfile.
+  const npmVersion = run('npm', ['--version'], root, process.env, undefined, 60_000);
+  const toolchain = { node: process.version, npm: npmVersion.exitCode === 0 ? npmVersion.output.trim() : null,
+    lockfileSha256: existsSync(join(root, 'package-lock.json')) ? hash(readFileSync(join(root, 'package-lock.json'))) : null };
+  const result = { level: 'full', platform: process.platform, candidate, toolchain, inputs, status: 'FAIL',
     startedAt: new Date().toISOString(), commands: [], checks: [], reports: [], inventories: [] };
   const runtimeParent = join(root, '.ratchet', 'packets');
   mkdirSync(runtimeParent, { recursive: true });
@@ -238,7 +248,7 @@ async function validate(args) {
       } catch {
         result.status = 'FAIL';
         // Only generated identities survive if textual safety cannot be verified.
-        safeResult = { level: 'full', platform: process.platform, candidate, status: 'FAIL',
+        safeResult = { level: 'full', platform: process.platform, candidate, toolchain, status: 'FAIL',
           startedAt: result.startedAt, finishedAt: result.finishedAt, commands: [],
           inputs: inputs.map(item => ({ sha256: item.sha256 })),
           reports: result.reports.map(item => ({ originalSha256: item.originalSha256,
@@ -249,7 +259,9 @@ async function validate(args) {
       }
     }
     safeResult.status = result.status;
-    writeFileSync(join(attempt, 'full-validation.json'), `${JSON.stringify(safeResult, null, 2)}\n`);
+    // Written whole or not at all: an interrupted write never leaves a truncated record.
+    writeFileSync(join(attempt, 'full-validation.json.partial'), `${JSON.stringify(safeResult, null, 2)}\n`);
+    renameSync(join(attempt, 'full-validation.json.partial'), join(attempt, 'full-validation.json'));
   }
   if (result.status !== 'PASS') {
     // Check names only: the evidence file holds the details.

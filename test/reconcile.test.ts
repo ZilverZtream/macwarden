@@ -169,10 +169,11 @@ it('RECONCILE/classification settlement, attribution, gaps and unattributed paym
   expect(result.unattributed.map(item => [item.paymentHash, item.coverage, item.status, item.settledMsat])).toEqual([
     [H('u1'), 'gap', 'succeeded', '9000'], [H('u3'), 'boundary', 'failed', '0'], [H('u2'), 'covered', 'succeeded', '8000']]);
   expect(result.deletions).toEqual([expect.objectContaining({ credential: C2, scope: 'payment', paymentHash: H('h4') })]);
+  // The second run started at 2000 and registered at 2010: running, not registered, in between (audit 1.4.0).
   expect(result.coverage.gaps.map(gap => [gap.from, gap.to, gap.reason, gap.dropped])).toEqual([
     [at(0), at(10), 'not-registered', 0], [at(850), at(860), 'dropped', 2], [at(1000), at(1100), 'not-registered', 0],
-    [at(1500), at(2010), 'not-running', 0], [at(2400), at(3600), 'unconfirmed', 0]]);
-  expect(result.coverage).toMatchObject({ windowSeconds: 3_600, complete: false, gapCount: 5, gapSeconds: 10 + 10 + 100 + 510 + 1_200,
+    [at(1500), at(2000), 'not-running', 0], [at(2000), at(2010), 'not-registered', 0], [at(2400), at(3600), 'unconfirmed', 0]]);
+  expect(result.coverage).toMatchObject({ windowSeconds: 3_600, complete: false, gapCount: 6, gapSeconds: 10 + 10 + 100 + 510 + 1_200,
     coveredSeconds: 3_600 - (10 + 10 + 100 + 510 + 1_200) });
   expect(result.journal).toMatchObject({ runs: 2, records: journal.length, otherNodeRecords: 0, tornTail: false });
   expect(result.lookups).toEqual({ listed: 7, listTruncated: false, tracked: 2, trackFailed: 1, trackLimited: 0, attributedOutsideWindow: 0 });
@@ -341,8 +342,8 @@ it('RECONCILE/bounds the listing is paged and capped, and per-hash lookups are l
 
 it('RECONCILE/budget a listing the 10 minute budget ends is reported as the budget, not the count limit (audit 1.2.1 N2)', async () => {
   // The budget runs out while the third page is read: the listing stops there, far below LIST_LIMIT.
-  let clock = Date.now();
-  vi.spyOn(Date, 'now').mockImplementation(() => clock);
+  // The budget follows the monotonic clock (audit 1.4.0), injected here.
+  let clock = 0;
   let pages = 0;
   const slow = fakeLnd({ listPayments: async ({ indexOffset, max }) => {
     pages += 1;
@@ -352,7 +353,8 @@ it('RECONCILE/budget a listing the 10 minute budget ends is reported as the budg
     return { payments, lastIndexOffset: indexOffset + BigInt(max) };
   } });
   const s = setup([start(0), line('registered', 1, { session: 1 })]);
-  const output = await reconcile([...s.args, '--since', at(0), '--until', at(100)], slow);
+  const output = await run([...s.args, '--since', at(0), '--until', at(100)],
+    { lnd: slow, fs, env: {}, clock: () => new Date('2026-10-09T12:00:00.000Z'), monotonic: () => clock });
   expectSchemaValid(output);
   expect(pages).toBe(3);
   expect((output.result as ReconcileResult).lookups).toMatchObject({ listed: 3 * LIST_PAGE, listTruncated: true });
@@ -546,4 +548,164 @@ it('RECONCILE/no default window refuses rather than reporting an empty one (N14)
   expectSchemaValid(none);
   expect(none.error).toMatchObject({ code: 2, step: 'Q1' });
   expect(none.error!.message).toContain('no record for this node');
+});
+
+// Audit 1.4.0: a caller whose macaroon watch could not decode (journaled as id:undecodable or
+// id:none) may be any credential: its payments are attributed to none, counted in no credential's
+// totals, and keep the run from exit 0.
+it('RECONCILE/unidentified a payment requested by an unidentified caller is attributed to no credential and blocks exit 0', async () => {
+  const end = [line('unregistered', 100, { session: 1, reason: 'stopping' }), line('run-end', 100, { payments: 1, deletions: 0, dropped: 0 })];
+  const alone = setup([start(0), line('registered', 1, { session: 1 }), payment(10, 'id:undecodable', 'none', H('hidden'), '250000000'), ...end]);
+  const listed = [lnd(H('hidden'), 10, 'succeeded', [htlc('succeeded', 250_000_000n, 10n)], null, 1n)];
+  const output = await reconcile([...alone.args, '--since', at(1), '--until', at(100)], fakeLnd({ listed }));
+  expectSchemaValid(output);
+  expect(output).toMatchObject({ ok: true, error: null, exitCode: 1 });
+  const result = output.result as ReconcileResult;
+  expect(result.coverage.complete).toBe(true);
+  expect(result.payments.map(item => [item.attribution, item.credentials, item.settlement.status]))
+    .toEqual([['unidentified', ['id:undecodable'], 'succeeded']]);
+  expect(result.credentials).toEqual([]);
+  expect(output.warnings.map(item => typeof item === 'string' ? item : item.code)).toEqual(['own-root-key-0', 'attribution-unidentified']);
+
+  // Beside an identified credential (id:none here): the hash is shared with an unknown caller, so the
+  // identified credential counts it as ambiguous, with no amounts, and no unidentified row appears.
+  const shared = setup([start(0), line('registered', 1, { session: 1 }), payment(10, C1, '4294967341', H('shared'), '2000'),
+    payment(11, 'id:none', 'none', H('shared'), '2000'), payment(12, 'id:none', 'none', H('other'), '3000'), ...end]);
+  const both = await reconcile([...shared.args, '--since', at(1), '--until', at(100)], fakeLnd({ listed: [
+    lnd(H('shared'), 10, 'succeeded', [htlc('succeeded', 2_000n, 1n)], null, 1n),
+    lnd(H('other'), 12, 'succeeded', [htlc('succeeded', 3_000n, 1n)], null, 2n)] }));
+  expectSchemaValid(both);
+  expect(both.exitCode).toBe(1);
+  const mixed = both.result as ReconcileResult;
+  expect(mixed.payments.map(item => [item.paymentHash, item.attribution, item.credentials])).toEqual([
+    [H('shared'), 'unidentified', [C1, 'id:none']], [H('other'), 'unidentified', ['id:none']]]);
+  expect(mixed.credentials).toEqual([expect.objectContaining({ credential: C1, rootKeyIds: ['4294967341'], payments: 0, succeeded: 0,
+    ambiguous: 1, requestedMsat: '0', settledMsat: '0', feesMsat: '0' })]);
+  expect(both.warnings).toContainEqual(expect.objectContaining({ code: 'attribution-unidentified',
+    message: expect.stringContaining('2 payment hashes were requested by a caller whose macaroon watch could not decode') }));
+});
+
+// Audit 1.4.0: the text output names an unidentified payment as such, never as ambiguous.
+it('RECONCILE/unidentified text output names the payment unidentified with its journal credentials', async () => {
+  const end = [line('unregistered', 100, { session: 1, reason: 'stopping' }), line('run-end', 100, { payments: 1, deletions: 0, dropped: 0 })];
+  const s = setup([start(0), line('registered', 1, { session: 1 }), payment(10, C1, '4294967341', H('mixed'), '2000'),
+    payment(11, 'id:undecodable', 'none', H('mixed'), '2000'), ...end]);
+  const output = await reconcile([...s.args, '--since', at(1), '--until', at(100)], fakeLnd({ listed: [
+    lnd(H('mixed'), 10, 'succeeded', [htlc('succeeded', 2_000n, 1n)], null, 1n)] }));
+  expect((output.result as ReconcileResult).payments.map(item => item.attribution)).toEqual(['unidentified']);
+  const text = render(output, 'text');
+  expect(text).toContain(`payment      ${H('mixed')}  observed: unidentified (${C1}, id:undecodable), 2 requests`);
+  expect(text).not.toMatch(/observed: ambiguous/);
+});
+
+// Audit 1.4.0: LND skips request fields it does not know, so a DeleteAllPayments padded past what
+// watch reads still deletes; a deletion whose request was not read in full may have removed any payment.
+it('RECONCILE/deletions a deletion watch could not read in full is associated with every journaled payment', async () => {
+  const deletion = (seconds: number, credential: string, method: string, extraction: string) => line('deletion', seconds, {
+    requestId: String(++requestId), method, credential, rootKeyId: credential === 'id:none' ? 'none' : '0', paymentHash: null, scope: 'none', extraction });
+  const s = setup([start(0), line('registered', 1, { session: 1 }), payment(10, C1, '4294967341', H('erased'), '1000'),
+    deletion(20, C2, '/lnrpc.Lightning/DeleteAllPayments', 'payload-too-large'),
+    deletion(30, 'id:none', '/lnrpc.Lightning/DeletePayment', 'malformed'),
+    deletion(40, C1, '/lnrpc.Lightning/DeleteAllPayments', 'complete'), line('alive', 100)]);
+  const output = await reconcile([...s.args, '--since', at(1), '--until', at(100)], fakeLnd({ listed: [] }), at(100));
+  expectSchemaValid(output);
+  const result = output.result as ReconcileResult;
+  // The complete request with no flag (scope none) is one LND refuses: it is still not associated.
+  expect(result.payments[0]).toMatchObject({ paymentHash: H('erased'), deletedBy: [C2, 'id:none'] });
+});
+
+// Audit 1.4.0: an unattributed payment near --since or --until is classified against the coverage
+// around it, not coverage clipped at the window's edge.
+it('RECONCILE/coverage a payment near the window edge inside covered time is covered, not boundary', async () => {
+  const s = setup([start(0), line('registered', 10, { session: 1 }), line('unregistered', 5_000, { session: 1, reason: 'stopping' }),
+    line('run-end', 5_000, { payments: 0, deletions: 0, dropped: 0 })]);
+  const listed = [lnd(H('after-since'), 1_010, 'succeeded', [], null, 1n), lnd(H('before-until'), 1_990, 'succeeded', [], null, 2n)];
+  const output = await reconcile([...s.args, '--since', at(1_000), '--until', at(2_000)], fakeLnd({ listed }), at(6_000));
+  expectSchemaValid(output);
+  const result = output.result as ReconcileResult;
+  expect(result.coverage).toMatchObject({ complete: true, gapCount: 0 });
+  expect(result.unattributed.map(item => [item.paymentHash, item.coverage])).toEqual([[H('after-since'), 'covered'], [H('before-until'), 'covered']]);
+  // Near where coverage really begins the tolerance still applies.
+  const early = await reconcile([...s.args, '--since', at(5), '--until', at(2_000)],
+    fakeLnd({ listed: [lnd(H('at-registration'), 20, 'succeeded', [], null, 1n)] }), at(6_000));
+  expect((early.result as ReconcileResult).unattributed.map(item => item.coverage)).toEqual(['boundary']);
+});
+
+// Audit 1.4.0: a window of no width proves nothing; one at an uncovered instant was reported complete.
+it('RECONCILE/window an empty window is refused at Q1, explicit or default', async () => {
+  const s = setup([start(0), line('registered', 1, { session: 1 }), line('unregistered', 50, { session: 1, reason: 'stopping' }),
+    line('run-end', 50, { payments: 0, deletions: 0, dropped: 0 })]);
+  const calls: string[] = [];
+  const explicit = await reconcile([...s.args, '--since', at(60), '--until', at(60)], fakeLnd({ calls }));
+  expectSchemaValid(explicit);
+  expect(explicit).toMatchObject({ ok: false, error: { code: 2, step: 'Q1', message: 'empty window: --since must be before --until' } });
+  expect(calls).toEqual([]);
+  // The default --since (the earliest record) equal to now.
+  const defaulted = await reconcile(s.args, fakeLnd({}), at(0));
+  expectSchemaValid(defaulted);
+  expect(defaulted.error).toMatchObject({ code: 2, step: 'Q1',
+    message: 'empty window: --since must be before --until (now when --until is not given)' });
+});
+
+// Audit 1.4.0: the command budget runs on a monotonic clock: a system clock step neither ends it nor extends it.
+it('RECONCILE/budget the 10 minute budget follows the monotonic clock, not the system clock', async () => {
+  const pagesOf = (onPage: (page: number) => void) => {
+    let pages = 0;
+    return fakeLnd({ listPayments: async ({ indexOffset, max }) => {
+      onPage(++pages);
+      const payments = pages > 3 ? [] : Array.from({ length: max }, (_, index) => lnd(H(`mono-${indexOffset + BigInt(index)}`), 10, 'succeeded',
+        [], null, indexOffset + BigInt(index) + 1n));
+      return { payments, lastIndexOffset: indexOffset + BigInt(payments.length) };
+    } });
+  };
+  const s = setup([start(0), line('registered', 1, { session: 1 })]);
+  const args = [...s.args, '--since', at(0), '--until', at(100)];
+  const deps = (adapter: LndAdapter & PaymentLookup, monotonic: () => number) =>
+    ({ lnd: adapter, fs, env: {}, clock: () => new Date('2026-10-09T12:00:00.000Z'), monotonic });
+  // The system clock steps forward an hour while the second page is read: the listing runs to its end.
+  let wall = Date.now();
+  vi.spyOn(Date, 'now').mockImplementation(() => wall);
+  const stepped = await run(args, deps(pagesOf(page => { if (page === 2) wall += 3_600_000; }), () => 0));
+  expect((stepped.result as ReconcileResult).lookups).toMatchObject({ listed: 3 * LIST_PAGE, listTruncated: false });
+  // The monotonic clock passes the budget while the second page is read: the listing stops there.
+  let mono = 0;
+  const spent = await run(args, deps(pagesOf(page => { if (page === 2) mono += RECONCILE_BUDGET_MS + 1; }), () => mono));
+  expectSchemaValid(spent);
+  expect((spent.result as ReconcileResult).lookups).toMatchObject({ listed: 2 * LIST_PAGE, listTruncated: true });
+  expect(spent.warnings).toContainEqual(expect.objectContaining({ code: 'lookups-limited' }));
+});
+
+// Audit 1.4.0 (external F04): record times can go back across runs (a clock corrected between
+// them). LND's record is historical only when it predates every journaled request, and the
+// observation spans the earliest to the latest request time, whatever their order in the file.
+it('RECONCILE/attribution a request journaled earlier in time by a later run is the first observation', async () => {
+  const s = setup([start(6_000), line('registered', 6_010, { session: 1 }), payment(6_100, C1, '4294967341', H('both-runs'), '100000'),
+    line('unregistered', 6_200, { session: 1, reason: 'stopping' }), line('run-end', 6_200, { payments: 1, deletions: 0, dropped: 0 }),
+    // The clock was an hour ahead in the first run; the second run, after the correction, starts earlier.
+    start(2_000, RUN2), line('registered', 2_010, { session: 1 }, RUN2), payment(2_400, C1, '4294967341', H('both-runs'), '100000', {}, RUN2),
+    line('unregistered', 2_500, { session: 1, reason: 'stopping' }, RUN2), line('run-end', 2_500, { payments: 1, deletions: 0, dropped: 0 }, RUN2)]);
+  const listed = [lnd(H('both-runs'), 2_400, 'succeeded', [htlc('succeeded', 100_000n, 100n)])];
+  const output = await reconcile([...s.args, '--since', at(2_000), '--until', at(6_200)], fakeLnd({ listed }), at(7_000));
+  expectSchemaValid(output);
+  const result = output.result as ReconcileResult;
+  expect(result.payments).toEqual([expect.objectContaining({ paymentHash: H('both-runs'), attribution: 'single', credentials: [C1],
+    observation: expect.objectContaining({ first: at(2_400), last: at(6_100), calls: 2 }),
+    settlement: expect.objectContaining({ status: 'succeeded', predatesObservation: false }) })]);
+  // The observations keep file order (capture order): the latest request submitted is the last.
+  expect(result.payments[0].observation.observations.map(item => item.time)).toEqual([at(6_100), at(2_400)]);
+  expect(result.credentials).toEqual([expect.objectContaining({ credential: C1, payments: 1, succeeded: 1, historical: 0,
+    settledMsat: '100000', feesMsat: '100' })]);
+});
+
+// Audit 1.4.0 (external F04, verification): the journal's time span is its earliest and latest
+// record time; after a clock set back between runs the last line is not the latest time.
+it('RECONCILE/journal firstRecord and lastRecord are the earliest and latest record times, not the first and last lines', async () => {
+  const s = setup([start(6_000), line('registered', 6_010, { session: 1 }), line('unregistered', 6_200, { session: 1, reason: 'stopping' }),
+    line('run-end', 6_200, { payments: 0, deletions: 0, dropped: 0 }),
+    start(2_000, RUN2), line('registered', 2_010, { session: 1 }, RUN2), line('unregistered', 2_500, { session: 1, reason: 'stopping' }, RUN2),
+    line('run-end', 2_500, { payments: 0, deletions: 0, dropped: 0 }, RUN2)]);
+  const output = await reconcile([...s.args, '--since', at(2_000), '--until', at(6_200)], fakeLnd({ listed: [] }), at(7_000));
+  expectSchemaValid(output);
+  expect((output.result as ReconcileResult).journal).toMatchObject({ records: 8, firstRecord: at(2_000), lastRecord: at(6_200) });
+  expect(render(output, 'text')).toContain(`, ${at(2_000)} to ${at(6_200)}`);
 });

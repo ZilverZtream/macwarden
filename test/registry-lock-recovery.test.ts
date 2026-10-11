@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import { hostname } from 'node:os';
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { openRegistry } from '../src/registry/index.js';
 import { ownProcessDomain } from '../src/registry/process-domain.js';
 import { fixture } from './helpers/cp038-online.js';
@@ -66,15 +66,26 @@ it('REGISTRY/lock-recovery a dead owner from a different process domain is never
 });
 
 // The liveness probe itself: signalling a process this account may not signal fails
-// with EPERM, which means the process exists. That must count as alive.
-const protectedPid = process.platform === 'win32' ? 4 : 1;
-const eperm = (() => { try { process.kill(protectedPid, 0); return false; }
-  catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; } })();
-it.skipIf(!eperm)('REGISTRY/lock-recovery an owner pid that exists but cannot be signalled (EPERM) is treated as alive', async () => {
+// with EPERM, which means the process exists. That must count as alive. The EPERM answer is
+// injected into process.kill for that one pid, so the case runs on every platform and account
+// (an elevated Windows runner or root may signal the real protected pid; audit 1.4.0).
+const protectedPid = 900_003;
+it('REGISTRY/lock-recovery an owner pid that exists but cannot be signalled (EPERM) is treated as alive', async () => {
   const f = fixture();
   const { record, text } = await staleLock(f.registry, { pid: protectedPid, hostname: hostname() });
-  const view = await openRegistry(f.registry);
-  await expect(view.lock({ breakLock: true })).rejects.toMatchObject({ code: 3, message: locked(record) });
+  const real = process.kill.bind(process);
+  const probes: number[] = [];
+  const kill = vi.spyOn(process, 'kill').mockImplementation(((pid: number, signal?: string | number) => {
+    if (pid !== protectedPid) return real(pid, signal);
+    probes.push(pid);
+    throw Object.assign(new Error('kill EPERM'), { code: 'EPERM', errno: -1, syscall: 'kill' });
+  }) as typeof process.kill);
+  try {
+    const view = await openRegistry(f.registry);
+    await expect(view.lock({ breakLock: true })).rejects.toMatchObject({ code: 3, message: locked(record) });
+  } finally { kill.mockRestore(); }
+  // The real probe was asked (not an injected pidAlive), and its EPERM kept the lock.
+  expect(probes).toContain(protectedPid);
   expect(readFileSync(f.registry + '.lock', 'utf8')).toBe(text);
 });
 

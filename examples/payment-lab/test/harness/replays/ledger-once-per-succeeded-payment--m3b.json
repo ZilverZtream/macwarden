@@ -1,0 +1,140 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "ledger-once-per-succeeded-payment",
+  "rule": "A payment LND reports succeeded is recorded succeeded at LND's value and fee and posted exactly once (principal = value, routing fee = fee); nothing else is posted (per payment hash only payment-succeeded, budget entries and, for every succeeded payment of an operation but the first, one double-payment entry); the operation is completed iff a payment succeeded; two succeeded payments of one operation are both flagged double-payment.",
+  "message": "operation op0 is failed with 1 succeeded payment(s)",
+  "seed": 1,
+  "case": 8,
+  "config": {
+    "scale": "small",
+    "budget": false,
+    "limit": "10000"
+  },
+  "failingStep": 12,
+  "originalSteps": 56,
+  "events": [
+    {
+      "t": "intent",
+      "p": "p0",
+      "op": 0,
+      "inv": 0
+    },
+    {
+      "t": "submit",
+      "p": "p0",
+      "op": 0,
+      "inv": 0
+    },
+    {
+      "t": "reconcile",
+      "p": "p1",
+      "op": 0,
+      "inv": 0
+    },
+    {
+      "t": "track.deliver",
+      "pick": 0.5
+    },
+    {
+      "t": "submit",
+      "p": "p1",
+      "op": 0,
+      "inv": 0
+    },
+    {
+      "t": "send.arrive",
+      "pick": 0.75
+    },
+    {
+      "t": "lnd.payment",
+      "pick": 0.5,
+      "what": "fail"
+    },
+    {
+      "t": "send.deliver",
+      "pick": 0.5
+    },
+    {
+      "t": "send.deliver",
+      "pick": 0.5
+    },
+    {
+      "t": "send.arrive",
+      "pick": 0.5
+    },
+    {
+      "t": "lnd.payment",
+      "pick": 0.5,
+      "what": "succeed",
+      "amount": "over"
+    },
+    {
+      "t": "send.deliver",
+      "pick": 0.5
+    },
+    {
+      "t": "send.deliver",
+      "pick": 0.5
+    }
+  ],
+  "states": {
+    "after": {
+      "payments": {
+        "op0/i0": {
+          "op": "op0",
+          "state": "succeeded",
+          "subs": 2,
+          "amount": "1000",
+          "feeLimit": "100",
+          "fee": "10",
+          "value": "1100"
+        }
+      },
+      "operations": {
+        "op0": "failed"
+      },
+      "opBudgets": {},
+      "reservations": [],
+      "ledger": [
+        {
+          "op": "op0",
+          "hash": "op0/i0",
+          "account": "principal",
+          "amount": "1100"
+        },
+        {
+          "op": "op0",
+          "hash": "op0/i0",
+          "account": "routing-fee",
+          "amount": "10"
+        }
+      ],
+      "events": {
+        "op0/i0": [
+          "intent-recorded",
+          "submit",
+          "not-initiated",
+          "in-flight",
+          "failed",
+          "stale-update",
+          "success-after-failure",
+          "amount-mismatch",
+          "succeeded"
+        ]
+      },
+      "budgets": {},
+      "entries": [
+        {
+          "id": "1",
+          "event": "payment-succeeded",
+          "hash": "op0/i0",
+          "op": "op0",
+          "amount": "1100"
+        }
+      ],
+      "outbox": []
+    }
+  },
+  "mutant": "ledger-once-per-succeeded-payment--m3b.cjs"
+}

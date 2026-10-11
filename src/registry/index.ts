@@ -1,5 +1,6 @@
 import { ownProcessDomain, validDomain, type ProcessDomain } from './process-domain.js';
 import * as nodeFs from 'node:fs/promises';
+import type { BigIntStats } from 'node:fs';
 import { reserveOwnerOnly } from '../private-file.js';
 
 /** Largest registry file read: 64 MiB holds far more entries than one node ever bakes. */
@@ -8,7 +9,7 @@ import { homedir as nodeHomedir, hostname as nodeHostname } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { resolveUnprotectedPath } from '../protected-path.js';
-import { LOCK_FILE_LIMIT, readPlainFile } from '../bounded-file.js';
+import { LOCK_FILE_LIMIT, readBoundedFile, readPlainFile } from '../bounded-file.js';
 import { isInstant } from '../instant.js';
 import { isRootKeyId } from '../root-key-id.js';
 
@@ -44,7 +45,28 @@ export type RegistryDeps = {
   hostname?: () => string;
   pidAlive?: (pid: number) => boolean;
   sleep?: (ms: number) => Promise<void>;
+  /** POSIX user ID the registry directory must belong to (default `process.getuid`; none on Windows). */
+  getuid?: () => number | undefined;
 };
+
+// Another acquirer holds the claim only for a few file operations: a contended claim is retried
+// for up to CLAIM_WAIT_ATTEMPTS x CLAIM_WAIT_MS (300 ms) before it is reported.
+const CLAIM_WAIT_ATTEMPTS = 15;
+const CLAIM_WAIT_MS = 20;
+// Windows save: a program reading registry.json without FILE_SHARE_DELETE blocks the rename. Ten
+// attempts with delays doubling from 100 ms to at most 1600 ms wait about 9.5 s in total.
+const SAVE_RENAME_ATTEMPTS = 10;
+const SAVE_RENAME_FIRST_DELAY_MS = 100;
+const SAVE_RENAME_MAX_DELAY_MS = 1600;
+
+/** Why the acquisition claim could not be created, for an error other than an existing claim. */
+function claimProblem(code: string | undefined): string {
+  if (code === 'EACCES' || code === 'EPERM') return 'permission denied in the registry directory';
+  if (code === 'EROFS') return 'the file system is read-only';
+  if (code === 'ENOSPC' || code === 'EDQUOT') return 'no space left on the device';
+  if (code === 'ENOENT' || code === 'ENOTDIR') return 'the registry directory does not exist';
+  return `unexpected file system error${code ? ` ${code}` : ''}`;
+}
 
 export class RegistryInputError extends Error {
   readonly code = 3;
@@ -271,6 +293,10 @@ export class Registry {
       if ((this.deps.platform ?? process.platform) !== 'win32') {
         const stat = await this.fs.stat(directory);
         if (!stat.isDirectory() || (stat.mode & 0o022) !== 0) input('registry-lock', 'unsafe registry directory permissions');
+        // Owned by this user (or root, which can change any file anyway): an owner who is someone
+        // else can replace registry.json or plant the lock files whatever the mode bits say.
+        const uid = this.deps.getuid ? this.deps.getuid() : process.getuid?.();
+        if (uid !== undefined && stat.uid !== uid && stat.uid !== 0) input('registry-lock', 'unsafe registry directory owner');
         if (created !== undefined) await this.fs.chmod(directory, 0o700);
       }
     } catch (error) {
@@ -286,10 +312,7 @@ export class Registry {
     // Every cooperating acquirer holds this guard while checking or moving the
     // lock. No new writer can enter the quarantine rename's pathname gap.
     const claimPath = `${this.path}.lock.claim`;
-    let claim: nodeFs.FileHandle;
-    try { claim = await this.fs.open(claimPath, 'wx', 0o600); }
-    catch { input('registry-lock', `registry acquisition in progress or ambiguous: ${claimPath}. ` +
-      'Stop all writers, establish that the recorded process is gone in its namespace, then delete this .claim file (and any stale lock) offline before retrying.'); }
+    const claim = await this.createClaim(claimPath);
     let identity: { dev: number; ino: number } | undefined;
     let primary: { error: unknown } | undefined;
     try {
@@ -321,11 +344,67 @@ export class Registry {
     // A claim cleanup failure is reported in preference to the primary error.
     const failure = cleanup ?? primary;
     if (failure) {
+      // unlock() retries a busy lock and gives up ownership only when the lock is released, gone
+      // or someone else's: a lock it could not release stays owned, so a later unlock() can
+      // release it (as on the release path, audit N11), and the error says it is still held.
       if (this.ownedLock) await this.unlock().catch(() => {});
-      this.ownedLock = undefined;
+      if (this.ownedLock) {
+        const reported = failure.error instanceof RegistryInputError ? failure.error
+          : new RegistryInputError('registry-lock', 'cannot create registry lock');
+        throw new RegistryInputError(reported.step, `${reported.message}; the registry lock ${this.path}.lock ` +
+          'is still held by this process and could not be released');
+      }
       throw failure.error;
     }
     await this.removeStaleTemps();
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return (this.deps.sleep ?? (wait => new Promise<void>(resolve => setTimeout(resolve, wait))))(ms);
+  }
+
+  /**
+   * Creates the acquisition claim. Another acquirer holds it only briefly, so an existing claim
+   * (and, on Windows, a claim being deleted, which reports EPERM, EACCES or EBUSY) is retried for
+   * a bounded time before it is reported; other errors name their cause.
+   */
+  private async createClaim(claimPath: string): Promise<nodeFs.FileHandle> {
+    const windows = (this.deps.platform ?? process.platform) === 'win32';
+    for (let attempt = 1; ; attempt++) {
+      let code: string | undefined;
+      try {
+        const handle = await this.fs.open(claimPath, 'wx', 0o600);
+        await this.refuseLinkedCreate(claimPath, handle);
+        return handle;
+      } catch (error) {
+        if (error instanceof RegistryInputError) throw error;
+        code = (error as NodeJS.ErrnoException).code;
+      }
+      const contended = code === 'EEXIST' || (windows && (code === 'EPERM' || code === 'EACCES' || code === 'EBUSY'));
+      if (contended && attempt < CLAIM_WAIT_ATTEMPTS) { await this.sleep(CLAIM_WAIT_MS); continue; }
+      if (code === 'EEXIST') input('registry-lock', `registry acquisition in progress or ambiguous: ${claimPath}. ` +
+        'Stop all writers, establish that the recorded process is gone in its namespace, then delete this .claim file (and any stale lock) offline before retrying.');
+      input('registry-lock', `cannot create registry lock ${claimPath}: ${claimProblem(code)}`);
+    }
+  }
+
+  /**
+   * On Windows an exclusive create follows a dangling symbolic link and creates its target (as
+   * for the watch lock, audit 1.2.1): the file just created must be the regular file at the path
+   * itself. Otherwise the handle is closed, the empty file it created is removed, and the lock is
+   * refused. A handle whose stat fails is left to the caller, which reports that itself.
+   */
+  private async refuseLinkedCreate(path: string, handle: nodeFs.FileHandle): Promise<void> {
+    let made: BigIntStats;
+    try { made = await handle.stat({ bigint: true }); } catch { return; }
+    const onDisk = await this.fs.lstat(path, { bigint: true }).catch(() => null);
+    if (onDisk && onDisk.isFile() && !onDisk.isSymbolicLink() && onDisk.dev === made.dev && onDisk.ino === made.ino) return;
+    await handle.close().catch(() => {});
+    const target = await this.fs.realpath(path).catch(() => null);
+    const created = target === null ? null : await this.fs.lstat(target, { bigint: true }).catch(() => null);
+    if (target !== null && created && created.isFile() && created.dev === made.dev && created.ino === made.ino
+      && created.size === 0n) await this.fs.unlink(target).catch(() => {});
+    input('registry-lock', `registry lock path ${path} is a symbolic link or was replaced; remove it and retry`);
   }
 
   // Antivirus and indexers briefly hold files open: retry EBUSY, and on Windows also EPERM/EACCES.
@@ -336,7 +415,7 @@ export class Registry {
         const code = (error as NodeJS.ErrnoException).code;
         const windows = (this.deps.platform ?? process.platform) === 'win32';
         if (!(code === 'EBUSY' || (windows && (code === 'EPERM' || code === 'EACCES'))) || attempt === 10) throw error;
-        await (this.deps.sleep ?? (ms => new Promise<void>(resolve => setTimeout(resolve, ms))))(100);
+        await this.sleep(100);
       }
     }
   }
@@ -364,6 +443,7 @@ export class Registry {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const handle = await this.fs.open(lockPath, 'wx', 0o600);
+        await this.refuseLinkedCreate(lockPath, handle);
         try {
           const record = JSON.stringify({ pid: process.pid, hostname: (this.deps.hostname ?? nodeHostname)(),
             startedAt: new Date().toISOString(), processDomain, token: randomUUID() });
@@ -373,11 +453,17 @@ export class Registry {
           this.ownedLock = { dev: stat.dev, ino: stat.ino, birth: stat.birthtimeNs, record };
         } catch {
           await handle.close().catch(() => {});
-          await this.fs.unlink(lockPath).catch(() => {});
-          input('registry-lock', 'cannot create registry lock');
+          // A lock without its complete owner record blocks every later run, --break-lock included
+          // (it cannot be validated): retry a busy delete, and name the file if it stays.
+          let removed = true;
+          await this.retryBusy(() => this.fs.unlink(lockPath))
+            .catch((error: unknown) => { removed = (error as NodeJS.ErrnoException).code === 'ENOENT'; });
+          input('registry-lock', removed ? 'cannot create registry lock'
+            : `cannot create registry lock; remove the incomplete lock file ${lockPath} offline before retrying`);
         }
         return;
       } catch (error) {
+        if (error instanceof RegistryInputError) throw error;
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') input('registry-lock', 'cannot create registry lock');
       }
       let lock: unknown;
@@ -400,6 +486,7 @@ export class Registry {
       const quarantine = `${lockPath}.${randomUUID()}.stale`;
       let before;
       let quarantined = false;
+      let verified = false;
       try {
         before = await this.fs.lstat(lockPath);
         if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.ino === 0)
@@ -425,9 +512,15 @@ export class Registry {
           // is exclusive; if occupied, preserve the moved file for offline recovery.
           input('registry-lock', 'registry lock changed during recovery; preserved lock requires offline recovery');
         }
-        await this.fs.unlink(quarantine);
+        verified = true;
+        await this.retryBusy(() => this.fs.unlink(quarantine));
         quarantined = false;
       } catch (error) {
+        // A verified stale lock is never linked back: that would leave the lock with two names
+        // (nlink 2), which every later --break-lock refuses. The lock path is free; only the
+        // quarantined copy is left.
+        if (quarantined && verified) input('registry-lock', `the stale registry lock was moved to ${quarantine} ` +
+          'but could not be deleted; delete that file offline, then retry');
         if (quarantined) await this.fs.link(quarantine, lockPath).catch(() => {});
         if (error instanceof RegistryInputError) throw error;
         input('registry-lock', 'stale lock ownership cannot be established; stop writers and recover offline');
@@ -446,6 +539,7 @@ export class Registry {
       input('registry-save', `cannot save registry: it would exceed the ${REGISTRY_FILE_LIMIT / 1024 / 1024} MiB a registry may hold; registry unchanged`);
     const tempPath = `${this.path}.${randomUUID()}.tmp`;
     let handle: nodeFs.FileHandle | undefined;
+    let held = false;
     try {
       // Owner-only from creation on every platform (1.2.1); the rename keeps that.
       handle = (await reserveOwnerOnly(tempPath, this.fs)).handle;
@@ -453,19 +547,22 @@ export class Registry {
       await handle.sync();
       await handle.close();
       handle = undefined;
-      for (let attempt = 1; attempt <= 10; attempt++) {
+      for (let attempt = 1, delay = SAVE_RENAME_FIRST_DELAY_MS; ; attempt++, delay = Math.min(delay * 2, SAVE_RENAME_MAX_DELAY_MS)) {
         try {
           await this.fs.rename(tempPath, this.path);
           await this.syncDirectory();
           return;
         } catch (error) {
           const code = (error as NodeJS.ErrnoException).code;
-          if ((this.deps.platform ?? process.platform) !== 'win32'
-            || (code !== 'EPERM' && code !== 'EBUSY') || attempt === 10) throw error;
-          await (this.deps.sleep ?? (ms => new Promise<void>(resolve => setTimeout(resolve, ms))))(100);
+          if ((this.deps.platform ?? process.platform) !== 'win32' || (code !== 'EPERM' && code !== 'EBUSY')) throw error;
+          if (attempt === SAVE_RENAME_ATTEMPTS) { held = true; throw error; }
+          await this.sleep(delay);
         }
       }
-    } catch { input('registry-save', 'cannot save registry'); }
+    } catch {
+      input('registry-save', held ? `cannot save registry: ${this.path} is open in another program, which blocks ` +
+        'replacing it; close that program and retry; registry unchanged' : 'cannot save registry');
+    }
     finally {
       if (handle) await handle.close().catch(() => {});
       await this.fs.unlink(tempPath).catch(() => {});
@@ -516,11 +613,11 @@ export async function openRegistry(path?: string, deps: RegistryDeps = {}): Prom
   try { selected = await resolveUnprotectedPath(path ?? defaultPath(deps), fs); }
   catch { input('registry-read', 'cannot read registry'); }
   let text: string;
-  // Bounded like every other sidecar (audit 1.2.1): a regular file of at most REGISTRY_FILE_LIMIT.
+  // Bounded like every other sidecar (audit 1.2.1): a regular file of at most REGISTRY_FILE_LIMIT,
+  // read through the descriptor of the file that was checked (audit 1.4.0: a size checked by path
+  // and a separate unbounded read let a file swapped in between be read whole).
   try {
-    const found = await fs.stat(selected);
-    if (!found.isFile() || found.size > REGISTRY_FILE_LIMIT) input('registry-read', 'cannot read registry');
-    text = await fs.readFile(selected, 'utf8');
+    text = (await readBoundedFile(selected, fs, REGISTRY_FILE_LIMIT)).toString('utf8');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return new Registry(selected, [], deps);
     input('registry-read', 'cannot read registry');

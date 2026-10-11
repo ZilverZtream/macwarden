@@ -12,12 +12,34 @@ export type BoundedReadIO = Pick<typeof fs, 'realpath' | 'stat' | 'open'>;
 
 /** Why a bounded read was refused before any content was read or accepted. */
 export class BoundedFileError extends Error {
-  constructor(message: 'protected file' | 'not a regular file' | 'file changed' | 'file too large') {
+  constructor(message: 'protected file' | 'not a regular file' | 'file changed' | 'file too large' | 'not a local file') {
     super(message); this.name = 'BoundedFileError';
   }
 }
 
 export const DEFAULT_FILE_LIMIT = 1_048_576;
+
+/** Options for readBoundedFile. */
+export type BoundedReadOptions = {
+  /** When given, a resolved target it rejects is refused ('not a local file') before stat or open. */
+  local?: (resolved: string) => boolean;
+};
+
+/**
+ * True when two stat identities (device or inode) are equal. Compared as bigints so Windows
+ * file indexes above 2^53 stay exact; a value an injected file system does not supply
+ * compares equal only to another missing value.
+ */
+function sameIdentity(left: number | bigint | undefined, right: number | bigint | undefined): boolean {
+  if (typeof left === typeof right) return left === right;
+  if (left === undefined || right === undefined) return false;
+  return BigInt(left) === BigInt(right);
+}
+
+/** Closes a handle without letting a failed close replace the error (or result) of the read. */
+async function closeQuietly(handle: Pick<fs.FileHandle, 'close'>): Promise<void> {
+  try { await handle.close(); } catch { /* the read's own outcome stands */ }
+}
 
 /**
  * Reads at most limit + 1 bytes from an open handle. The buffer starts at the size fstat
@@ -48,22 +70,26 @@ export async function readBounded(handle: Pick<fs.FileHandle, 'read'>, limit: nu
  * or target, anything but a regular file, a file replaced between check and open, or one
  * larger than `limit` rejects with BoundedFileError before any content is read.
  */
-export async function readBoundedFile(path: string, io: BoundedReadIO, limit = DEFAULT_FILE_LIMIT): Promise<Buffer> {
+export async function readBoundedFile(path: string, io: BoundedReadIO, limit = DEFAULT_FILE_LIMIT,
+  options: BoundedReadOptions = {}): Promise<Buffer> {
   if (isProtectedPath(path)) throw new BoundedFileError('protected file');
   const resolved = await io.realpath(path);
   if (isProtectedPath(resolved)) throw new BoundedFileError('protected file');
-  const before = await io.stat(resolved);
+  if (options.local && !options.local(resolved)) throw new BoundedFileError('not a local file');
+  // Device and inode as bigints: Windows file indexes exceed 2^53 and lose precision as numbers.
+  const before = await io.stat(resolved, { bigint: true });
   if (!before.isFile()) throw new BoundedFileError('not a regular file');
   if (before.size > limit) throw new BoundedFileError('file too large');
   const handle = await io.open(resolved, constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0));
   try {
-    const opened = await handle.stat();
-    if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino) throw new BoundedFileError('file changed');
+    const opened = await handle.stat({ bigint: true });
+    if (!opened.isFile() || !sameIdentity(opened.dev, before.dev) || !sameIdentity(opened.ino, before.ino))
+      throw new BoundedFileError('file changed');
     if (opened.size > limit) throw new BoundedFileError('file too large');
     const bytes = await readBounded(handle, limit, opened.size);
     if (bytes.length > limit) throw new BoundedFileError('file too large');
     return bytes;
-  } finally { await handle.close(); }
+  } finally { await closeQuietly(handle); }
 }
 
 /** Largest lock owner record read: a few fields (pid, host name, start time, process domain). */
@@ -93,5 +119,5 @@ export async function readPlainFile(path: string, io: Pick<typeof fs, 'lstat' | 
     const bytes = await readBounded(handle, limit, opened.size);
     if (bytes.length > limit) throw new BoundedFileError('file too large');
     return bytes.toString('utf8');
-  } finally { await handle.close(); }
+  } finally { await closeQuietly(handle); }
 }

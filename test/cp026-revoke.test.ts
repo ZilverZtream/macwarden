@@ -10,6 +10,7 @@ import { Readable } from 'node:stream';
 import { join, resolve } from 'node:path';
 import { expect, it, vi } from 'vitest';
 import { render } from './helpers/render-adversarial.js';
+import { onRegistryOpen } from './helpers/integration-registry-read.js';
 import { findLeaks } from "./helpers/leak-check.js";
 import { directory, entry, maxId, otherPubkey, ownId, permissionsResponse, pubkey,
   register, snapshot, vector, wireFixture } from './helpers/cp026-revoke-support.mjs';
@@ -259,10 +260,9 @@ it.each(['malformed JSON', 'invalid schema', 'unreadable registry']) (
   'CP-026/V6 %s stops after node identification without mutation', async kind => scratch(async f => {
     if (kind === 'malformed JSON') writeFileSync(f.registry, '{invalid');
     if (kind === 'invalid schema') writeFileSync(f.registry, '{"schema":99,"entries":[]}');
-    if (kind === 'unreadable registry') f.deps.fs.readFile = vi.fn(async (...args: Parameters<typeof fs.readFile>) => {
-      if (args[0] === f.registry) throw Object.assign(new Error('injected registry read failure'), { code: 'EACCES' });
-      return fs.readFile(...args);
-    }) as typeof fs.readFile;
+    if (kind === 'unreadable registry') f.deps.fs.open = onRegistryOpen(f.deps.fs, f.registry, () => {
+      throw Object.assign(new Error('injected registry read failure'), { code: 'EACCES' });
+    });
     refused(await invoke(f), 3, 'V6');
     expect(f.calls).toEqual(['GetInfo', 'ListPermissions']);
   }));

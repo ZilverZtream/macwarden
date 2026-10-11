@@ -1,4 +1,4 @@
-import { githubLines, sarifPieces } from './scan-formats.js';
+import { githubLines, neverOpenedLines, sarifPieces } from './scan-formats.js';
 import { parseLndconnect } from '../input/lndconnect.js';
 import { macaroonEnds } from '../decode/recognition.js';
 import { types } from 'node:util';
@@ -93,7 +93,7 @@ export type ReconcileObservation = { time: string; run: string; requestId: strin
 export type ReconcileSettlement = { status: 'succeeded' | 'failed' | 'in-flight' | 'not-found' | 'unknown';
   source: 'list-payments' | 'track-payment' | null; createdAt: string | null; settledMsat: string | null; feesMsat: string | null;
   inFlightMsat: string | null; attempts: number | null; failureReason: string | null; predatesObservation: boolean };
-export type ReconcilePayment = { paymentHash: string; attribution: 'single' | 'ambiguous' | 'historical'; credentials: string[];
+export type ReconcilePayment = { paymentHash: string; attribution: 'single' | 'ambiguous' | 'historical' | 'unidentified'; credentials: string[];
   observation: { first: string; last: string; calls: number; requestedMsat: string | null; routeAttemptsMsat: string | null;
     feeLimitMsat: string | null; observations: ReconcileObservation[] };
   settlement: ReconcileSettlement; deletedBy: string[] };
@@ -318,6 +318,7 @@ function* scanTextLines(result: import('../scan/index.js').ScanResult): Generato
     const rune = finding.rune ? runeLineFacts(finding.rune) : '';
     yield `${safeText(location)}  ${safeText(finding.kind)}  ${safeText(finding.fingerprint)}${grade}${root}${expired}${counted}${rune}${finding.context === 'mcp-config' ? ' (MCP server config)' : ''}${also}\n`;
   }
+  yield* neverOpenedLines(result, safeText);
   yield* scanSummaryLines(result);
 }
 
@@ -579,13 +580,14 @@ type InventoryRow = InventoryResult['rootKeys'][number];
 /**
  * The argument `revoke` resolves to this row's credential (RL-05): its label only when that label
  * names exactly one active entry on the node (as revoke V6 requires), otherwise its root key ID.
- * Null when revoke refuses the row (root key ID 0, macwarden's own credential).
+ * Null when revoke refuses the row (root key ID 0, macwarden's own credential). `activeLabels`
+ * counts the active entries per label, built once per table: a search of every row for each
+ * expired row made a large inventory quadratic.
  */
-function revokeTarget(rows: InventoryRow[], row: InventoryRow): string | null {
+function revokeTarget(activeLabels: ReadonlyMap<string, number>, row: InventoryRow): string | null {
   if (row.rootKeyId === '0' || row.flags.includes('default-root-key') || row.flags.includes('own-credential')) return null;
   const label = row.entry?.label ?? null;
-  return label !== null && rows.filter(other => other.entry?.status === 'active' && other.entry.label === label).length === 1
-    ? label : row.rootKeyId;
+  return label !== null && activeLabels.get(label) === 1 ? label : row.rootKeyId;
 }
 
 /**
@@ -612,6 +614,15 @@ function inventoryText(result: InventoryResult, now: number): string {
   const lines = [`node ${safeText(node.pubkey)} (${safeText(node.alias)}) ${safeText(node.network)}`];
   // Columns are padded to their widest cell so the table lines up; STATUS is last and unpadded.
   const table: string[][] = [['ROOT KEY ID', 'LABEL', 'GRADE', 'AGE', 'EXPIRES', 'STATUS']];
+  // Indexed once, so the table stays linear in the number of rows.
+  const activeLabels = new Map<string, number>();
+  const replacementOf = new Map<string, InventoryRow>();
+  for (const row of rows) {
+    if (row.entry?.status !== 'active') continue;
+    if (row.entry.label !== null) activeLabels.set(row.entry.label, (activeLabels.get(row.entry.label) ?? 0) + 1);
+    // The first active replacement in row order, as a search of the rows would find it.
+    if (row.entry.replaces !== null && !replacementOf.has(row.entry.replaces)) replacementOf.set(row.entry.replaces, row);
+  }
   for (const row of rows) {
     const entry = row.entry;
     const age = entry ? `${Math.max(0, Math.floor((now - Date.parse(entry.createdAt)) / 86_400_000))}d` : '—';
@@ -634,7 +645,7 @@ function inventoryText(result: InventoryResult, now: number): string {
     else if (row.verify !== 'not-checked') status.push(row.verify);
     // Every printed command runs as printed with the same connection and --registry flags (RL-05).
     if (row.flags.includes('expired')) {
-      const target = revokeTarget(rows, row);
+      const target = revokeTarget(activeLabels, row);
       status.push(target === null ? 'expired' : `expired; revoke with: macwarden revoke ${shellQuote(target)}`);
     } else if (row.flags.includes('expiring') && row.expires) {
       const left = Date.parse(row.expires) - now;
@@ -643,8 +654,7 @@ function inventoryText(result: InventoryResult, now: number): string {
       status.push(command === null ? `expires in ${span}` : `expires in ${span}; rotate with: ${command}`);
     }
     if (row.flags.includes('pending-replacement')) {
-      const replacement = rows.find(candidate => candidate.entry?.status === 'active'
-        && candidate.entry.replaces === row.rootKeyId);
+      const replacement = replacementOf.get(row.rootKeyId);
       if (replacement) status.push(`rotation staged -> ${replacement.rootKeyId}`);
     }
     if (row.usage) status.push(`last used ${row.usage.lastUsed} (${row.usage.calls} calls${row.usage.errors ? `, ${row.usage.errors} errors` : ''})`);
@@ -716,7 +726,8 @@ function reconcileText(result: ReconcileResult): string {
     ...result.payments.map(item => {
       const observed = item.attribution === 'single' ? safeText(item.credentials[0])
         : item.attribution === 'historical' ? `${safeText(item.credentials[0])} (historical: LND's record is older than every journaled request)`
-          : `ambiguous (${item.credentials.map(safeText).join(', ')})`;
+          : item.attribution === 'unidentified' ? `unidentified (${item.credentials.map(safeText).join(', ')})`
+            : `ambiguous (${item.credentials.map(safeText).join(', ')})`;
       const settled = item.settlement;
       return `payment      ${safeText(item.paymentHash)}  observed: ${observed}, ${item.observation.calls} request${item.observation.calls === 1 ? '' : 's'}, `
         + `requested ${msat(item.observation.requestedMsat ?? item.observation.routeAttemptsMsat)}, fee limit ${msat(item.observation.feeLimitMsat)}`
@@ -1049,7 +1060,9 @@ export function* renderChunks(result: OutputResult, mode: Mode): Generator<strin
         ? nwcInspectText(result.result) : isL402InspectResult(result.result)
           ? l402InspectText(result.result) : isRuneInspectResult(result.result)
             ? runeInspectText(result.result) : genericText(result); break;
-    case 'inventory': rendered = typeof result.display?.report === 'string' ? result.display.report
+    // A report on stdout is escaped like every other text output (bidirectional and invisible
+    // characters, '##['), line by line so its CRLF and LF line ends are kept.
+    case 'inventory': rendered = typeof result.display?.report === 'string' ? result.display.report.replace(/[^\r\n]+/g, safeText)
       : typeof result.display?.now === 'number' && Number.isFinite(result.display.now)
         ? inventoryText(result.result, result.display.now) + (result.result.report?.path
           ? `access review (${safeText(result.result.report.format)}) written to ${safeText(result.result.report.path)}\n` : '')

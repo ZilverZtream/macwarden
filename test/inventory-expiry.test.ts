@@ -117,8 +117,16 @@ it('UX/inventory-expiry scan text marks a finding whose time-before is past, lik
   const run = spawnSync(process.execPath, [resolve('dist/bin.js'), 'scan', resolve('test/vectors/time-before.macaroon')],
     { env: childEnvironment(), encoding: 'utf8', timeout: 30_000, windowsHide: true });
   const line = run.stdout.split('\n')[0];
-  if (Date.now() >= instant) expect(line).toMatch(/ root key 0 \(expired\)$/);
-  else expect(line).not.toContain('(expired)');
+  // The vector's caveat passed on 2026-10-02, so the real clock is always past it here; the
+  // not-yet-expired branch is checked below with an injected clock (audit 1.4.0: it never ran).
+  expect(Date.now()).toBeGreaterThanOrEqual(instant);
+  expect(line).toMatch(/ root key 0 \(expired\)$/);
+  const { scan } = await import('../src/scan/index.js');
+  const textAt = async (at: number) => render({ command: 'scan', ok: true, warnings: [], error: null,
+    result: await scan([resolve('test/vectors/time-before.macaroon')], { clock: () => new Date(at) }) } as OutputResult, 'text')
+    .split('\n')[0];
+  expect(await textAt(instant - 1)).toMatch(/ root key 0$/);
+  expect(await textAt(instant + 1)).toMatch(/ root key 0 \(expired\)$/);
   const fresh = spawnSync(process.execPath, [resolve('dist/bin.js'), 'scan', resolve('test/vectors/default-readonly.macaroon')],
     { env: childEnvironment(), encoding: 'utf8', timeout: 30_000, windowsHide: true });
   expect(fresh.stdout).not.toContain('(expired)');

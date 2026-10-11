@@ -1,0 +1,75 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "reconcile-buckets-partition",
+  "rule": "receiver reconcile counts every invoice it covers exactly once (resolved + open + unknown = targets), each in its own bucket (resolved: final when listed, or settled, canceled or not-created as LND or the record decided it; open: OPEN or ACCEPTED in LND as the pass looked it up; unknown: only when the pass was stopped, a lookup of it got no answer, a cancel of it by the pass failed, or a creating invoice was not found within its creation window), and exits 75 iff unknown > 0, else 0.",
+  "message": "receiver reconcile exited 0 with unknown 1",
+  "seed": 1,
+  "case": 2,
+  "config": {
+    "scale": "huge",
+    "budget": true,
+    "limit": "9223372036854775807"
+  },
+  "failingStep": 2,
+  "originalSteps": 6,
+  "events": [
+    {
+      "t": "create",
+      "p": "p0",
+      "order": 2,
+      "hold": true
+    },
+    {
+      "t": "rreconcile",
+      "p": "p1",
+      "order": 2,
+      "cli": true
+    },
+    {
+      "t": "answer",
+      "kind": "lookup",
+      "pick": 0.5,
+      "mode": "ok"
+    }
+  ],
+  "states": {
+    "targets": [
+      "o2#1"
+    ],
+    "result": {
+      "at": "2026-10-11T01:25:17.541Z",
+      "event": "outcome",
+      "resolved": 0,
+      "open": 0,
+      "unknown": 1
+    },
+    "exit": 0,
+    "answers": {
+      "b6b7ae5d4617c103cf283df206c0a8be03163d91953a80b71e73bf5b559ca875": [
+        "not-found"
+      ]
+    },
+    "after": {
+      "invoices": {
+        "o2#1": {
+          "order": "o2",
+          "state": "creating",
+          "amount": "7000"
+        }
+      },
+      "orders": {
+        "o2": "awaiting-payment"
+      },
+      "fulfillments": [],
+      "ledger": [],
+      "cursor": {
+        "settle": "0",
+        "add": "0"
+      },
+      "entries": [],
+      "outbox": []
+    }
+  },
+  "mutant": "reconcile-buckets-partition--m12b.cjs"
+}

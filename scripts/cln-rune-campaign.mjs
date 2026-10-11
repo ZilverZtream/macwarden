@@ -14,9 +14,18 @@ import { builtApi } from './fuzz-runes.mjs';
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const args = process.argv.slice(2);
-  const option = (name, fallback) => { const at = args.indexOf(name); return at < 0 ? fallback : Number(args[at + 1]); };
+  // A flag needs a whole number of at least its minimum: a typo or a missing value is an error,
+  // never NaN (zero cases, a null seed) or a batch of 0 (no progress).
+  const option = (name, fallback, minimum = 0) => {
+    const at = args.indexOf(name);
+    if (at < 0) return fallback;
+    const value = args[at + 1];
+    if (value === undefined || !/^[0-9]+$/.test(value) || Number(value) < minimum || !Number.isSafeInteger(Number(value)))
+      throw new Error(`${name} must be an integer of at least ${minimum}`);
+    return Number(value);
+  };
   const seed = option('--seed', randomInt(2 ** 31));
-  const runes = option('--runes', 2500);
+  const runes = option('--runes', 2500, 1);
   process.stdout.write(`cln rune campaign: seed ${seed}, ${runes} runes\n`);
   const identity = status();
   if (!identity || identity.version !== CLN_VERSION || identity.network !== 'regtest')

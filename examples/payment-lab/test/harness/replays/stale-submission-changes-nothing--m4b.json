@@ -1,0 +1,167 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "stale-submission-changes-nothing",
+  "rule": "An update or call outcome (other than SUCCEEDED) for a superseded submission changes neither the payment, its operation nor its reservation.",
+  "message": "applyUpdate IN_FLIGHT for superseded submission 1 of op1/i0 (record at submission 2, closed 0) moved it submitting -> in_flight, held reservations 1 -> 1",
+  "seed": 1,
+  "case": 12,
+  "config": {
+    "scale": "small",
+    "budget": true,
+    "limit": "2200"
+  },
+  "failingStep": 6,
+  "originalSteps": 39,
+  "events": [
+    {
+      "t": "intent",
+      "p": "p1",
+      "op": 1,
+      "inv": 0
+    },
+    {
+      "t": "submit",
+      "p": "p1",
+      "op": 1,
+      "inv": 0
+    },
+    {
+      "t": "reconcile",
+      "p": "p1",
+      "op": 1,
+      "inv": 0
+    },
+    {
+      "t": "send.arrive",
+      "pick": 0.5
+    },
+    {
+      "t": "track.deliver",
+      "pick": 0.5
+    },
+    {
+      "t": "submit",
+      "p": "p1",
+      "op": 1,
+      "inv": 0
+    },
+    {
+      "t": "send.deliver",
+      "pick": 0.5
+    }
+  ],
+  "states": {
+    "call": {
+      "proc": "p1",
+      "method": "applyUpdate",
+      "args": [
+        {
+          "paymentHash": "op1/i0",
+          "status": "IN_FLIGHT",
+          "htlcs": 0
+        },
+        "SendPaymentV2",
+        1
+      ]
+    },
+    "before": {
+      "payments": {
+        "op1/i0": {
+          "op": "op1",
+          "state": "submitting",
+          "subs": 2,
+          "amount": "2000",
+          "feeLimit": "100"
+        }
+      },
+      "operations": {
+        "op1": "open"
+      },
+      "opBudgets": {
+        "op1": "B"
+      },
+      "reservations": [
+        {
+          "id": "1",
+          "budget": "B",
+          "hash": "op1/i0",
+          "principal": "2000",
+          "allowance": "100",
+          "state": "held"
+        }
+      ],
+      "ledger": [],
+      "events": {
+        "op1/i0": [
+          "intent-recorded",
+          "submit",
+          "not-initiated"
+        ]
+      },
+      "budgets": {
+        "B": "2200"
+      },
+      "entries": [
+        {
+          "id": "1",
+          "event": "budget-held",
+          "hash": "op1/i0",
+          "op": "op1",
+          "amount": "2100"
+        }
+      ],
+      "outbox": []
+    },
+    "after": {
+      "payments": {
+        "op1/i0": {
+          "op": "op1",
+          "state": "in_flight",
+          "subs": 2,
+          "amount": "2000",
+          "feeLimit": "100"
+        }
+      },
+      "operations": {
+        "op1": "open"
+      },
+      "opBudgets": {
+        "op1": "B"
+      },
+      "reservations": [
+        {
+          "id": "1",
+          "budget": "B",
+          "hash": "op1/i0",
+          "principal": "2000",
+          "allowance": "100",
+          "state": "held"
+        }
+      ],
+      "ledger": [],
+      "events": {
+        "op1/i0": [
+          "intent-recorded",
+          "submit",
+          "not-initiated",
+          "in-flight"
+        ]
+      },
+      "budgets": {
+        "B": "2200"
+      },
+      "entries": [
+        {
+          "id": "1",
+          "event": "budget-held",
+          "hash": "op1/i0",
+          "op": "op1",
+          "amount": "2100"
+        }
+      ],
+      "outbox": []
+    }
+  },
+  "mutant": "stale-submission-changes-nothing--m4b.cjs"
+}

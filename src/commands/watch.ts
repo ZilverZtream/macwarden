@@ -42,6 +42,13 @@ export type Deps = {
   env: Record<string, string | undefined>;
   clock: () => Date;
   /**
+   * A monotonic clock in ms (default performance.now()) for the flush, reload and stable-session
+   * timers, which a wall clock stepping back once stalled. When given, observation coverage is
+   * measured on it too, with `clock` only placing spans (watch() passes it); a caller that gives
+   * only `clock` (a test scripting wall time) gets coverage that follows `clock`.
+   */
+  monotonic?: () => number;
+  /**
    * Receives each rendered event line. It must never block: intercept feedback shares
    * the event loop. Priority lines (canary alerts, status) must not be dropped.
    */
@@ -103,6 +110,10 @@ const RECONNECT_RELOAD_MS = 5_000;
 const INITIAL_ATTEMPTS = 3;
 // A session must stay up this long before the reconnect backoff starts again at 1 s.
 const STABLE_SESSION_MS = 60_000;
+// Request IDs remembered for attribution of responses and stream messages. At the bound the
+// least recently seen is forgotten, so a caller opening many calls cannot make a live stream
+// count again (an earlier version forgot every ID at once).
+const REQUEST_KEY_LIMIT = 50_000;
 const DENIAL = 'permission denied';
 
 function fail(code: number, step: string, message: string, warnings: WatchOutput['warnings'] = []): WatchOutput {
@@ -458,7 +469,12 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
   const onAbort = () => stop.abort();
   signal?.addEventListener('abort', onAbort, { once: true });
   if (signal?.aborted) stop.abort();
-  const untilTimer = request.untilMs === null ? undefined : scheduleDeadline(request.untilMs, () => stop.abort());
+  const monotonic = deps.monotonic ?? (() => performance.now());
+  // Coverage follows the monotonic source only when the caller supplied one (see Deps.monotonic).
+  const coverageMono = (): number | undefined => deps.monotonic ? monotonic() : undefined;
+  let untilExpired = false;
+  const untilTimer = request.untilMs === null ? undefined
+    : scheduleDeadline(request.untilMs, () => { untilExpired = true; stop.abort(); });
   const counters = { calls: 0, errors: 0, alerts: 0, canaryUses: 0, alertFailures: 0, reconnects: 0, credentials: new Set<string>(),
     attributionDropped: 0 };
   // The bounded attribution queue (see ATTRIBUTION_QUEUE_ITEMS).
@@ -531,7 +547,9 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
     const total = deps.dropped?.() ?? 0;
     if (total > reportedDrops) {
       emit({ event: 'status', time: deps.clock().toISOString(), status: 'output-dropped', dropped: total - reportedDrops });
-      reportedDrops = total;
+      // Re-read: once output is closed the notice itself is dropped, and counting it as a new
+      // drop would emit another notice every FLUSH_MS for ever.
+      reportedDrops = deps.dropped?.() ?? total;
     }
   };
   // Whoever holds a canary controls how often it is used, so alerting is bounded:
@@ -547,35 +565,45 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
         warnings.push({ code: 'alert-failed', message: 'the alert command failed for at least one canary alert' });
       emit({ event: 'status', time: deps.clock().toISOString(), status: 'alert-failed', rootKeyId: event.rootKeyId, label: event.label });
     });
-  const throttle = createAlertThrottle({ now: () => deps.clock().getTime(), alert: event => {
+  // The throttle's key (a registered canary or the shared bucket) gives each canary its own
+  // waiting slot in the runner, so one canary's alert never replaces another's.
+  const throttle = createAlertThrottle({ now: () => deps.clock().getTime(), alert: (event, key) => {
     counters.alerts += 1;
     emit(event);
-    if (request.alertCommand) runner.submit(event);
+    if (request.alertCommand) runner.submit(event, key);
   } });
 
   // Observer: always accepts. Attribution and recording happen after the answer is sent.
   // call.macaroon is read here, synchronously: the middleware wipes the intercepted bytes
-  // once this returns.
-  const observe = (call: MiddlewareCall): string => {
+  // once this returns. Each registration gets its own observer carrying its session number:
+  // attribution is deferred, so work queued by a lost session can still run after the next
+  // session began, and LND restarts request IDs with a new session. Correlation keys are
+  // therefore session number plus request ID; an ID from one session never matches another's.
+  let sessionNumber = 0;
+  const observe = (session: number) => (call: MiddlewareCall): string => {
     // A payment request is captured for the journal now, while its payload is readable; it is
     // decoded and written later, off this path, and dropped (counted) under overload.
     if (journal && call.kind === 'request' && JOURNALED_METHODS.has(call.method)) journal.capture(call);
-    enqueue(call.macaroonBytes ?? 0, () => {
+    // A response's macaroon is never copied (attribute uses only its request ID), so it is not charged.
+    enqueue(call.kind === 'response' ? 0 : call.macaroonBytes ?? 0, () => {
       const macaroon = call.kind === 'response' ? null : call.macaroon;
-      const { kind, requestId, method, isError, oversizedMacaroon } = call;
-      return () => attribute({ kind, requestId, method, isError, oversizedMacaroon }, macaroon);
+      const { kind, requestId, method, isError, oversizedMacaroon, streamRpc } = call;
+      return () => attribute(session, { kind, requestId, method, isError, oversizedMacaroon, streamRpc }, macaroon);
     });
     return '';
   };
-  const attribute = (call: Pick<MiddlewareCall, 'kind' | 'requestId' | 'method' | 'isError' | 'oversizedMacaroon'>,
+  const attribute = (session: number, call: Pick<MiddlewareCall, 'kind' | 'requestId' | 'method' | 'isError' | 'oversizedMacaroon' | 'streamRpc'>,
     macaroon: Secret | null): void => {
     const at = deps.clock();
     if (call.kind === 'response') {
-      const id = call.requestId.toString();
+      const id = `${session}:${call.requestId}`;
       const key = requestKeys.get(id);
       if (!key) return;
-      // A stream answers many times on one request ID: keep its key until it errors.
-      if (!call.isError) { if (!key.stream) requestKeys.delete(id); return; }
+      // A key is kept after a successful response: LND numbers calls uniquely within a session,
+      // so a later request with this ID is a further message of a stream, never a new call, even
+      // when watch first saw that stream mid-way (after a reconnect). Kept until an error or
+      // until it is the least recently seen at REQUEST_KEY_LIMIT.
+      if (!call.isError) { requestKeys.delete(id); requestKeys.set(id, key); return; }
       requestKeys.delete(id);
       counters.errors += 1;
       if (CREDENTIAL_ID.test(key.credential) && isRootKeyId(key.rootKeyId))
@@ -591,9 +619,16 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
       catch { credential = 'id:undecodable'; }
     }
     // A stream reports stream_auth and then one request per message: count it once.
-    if (call.kind === 'request' && requestKeys.has(call.requestId.toString())) return;
-    if (requestKeys.size > 50_000) requestKeys.clear();
-    requestKeys.set(call.requestId.toString(), { credential, rootKeyId, method: call.method, stream: call.kind === 'stream_auth' });
+    const id = `${session}:${call.requestId}`;
+    const seen = requestKeys.get(id);
+    if (call.kind === 'request' && seen) { requestKeys.delete(id); requestKeys.set(id, seen); return; }
+    if (!seen && requestKeys.size >= REQUEST_KEY_LIMIT) requestKeys.delete(requestKeys.keys().next().value as string);
+    requestKeys.delete(id);
+    requestKeys.set(id, { credential, rootKeyId, method: call.method, stream: call.kind === 'stream_auth' || call.streamRpc === true });
+    // A message of a stream whose opening this session never saw (the stream was open before a
+    // reconnect, or its key was evicted): remembered for its final error, but not a new call.
+    // Its opening was counted when seen, or counted as a dropped attribution.
+    if (call.kind === 'request' && call.streamRpc === true) return;
     counters.calls += 1;
     if (counters.credentials.size < CREDENTIAL_COUNT_LIMIT) counters.credentials.add(credential);
     if (CREDENTIAL_ID.test(credential) && isRootKeyId(rootKeyId)) usage.record(pubkey, credential, rootKeyId, call.method, at);
@@ -647,7 +682,7 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
 
   // Flushes run one at a time, so an older snapshot can never replace a newer one.
   let flushing: Promise<void> = Promise.resolve();
-  let nextFlushAt = 0;
+  let nextFlushAt = Number.NEGATIVE_INFINITY;
   const flush = (): Promise<void> => {
     flushing = flushing.then(async () => {
       if (!usage.changed) return;
@@ -655,14 +690,14 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
         if (!warnings.includes('usage-write-failed')) warnings.push('usage-write-failed');
         return 0;
       });
-      nextFlushAt = Date.now() + Math.max(FLUSH_MS, Math.ceil(bytes / FLUSH_BYTES_PER_SECOND * 1_000));
+      nextFlushAt = monotonic() + Math.max(FLUSH_MS, Math.ceil(bytes / FLUSH_BYTES_PER_SECOND * 1_000));
     });
     return flushing;
   };
   const flusher = setInterval(() => {
     reportDrops();
     reportJournalStop();
-    if (Date.now() >= nextFlushAt) { usage.extendCoverage(pubkey, deps.clock()); void flush(); }
+    if (monotonic() >= nextFlushAt) { usage.extendCoverage(pubkey, deps.clock(), coverageMono()); void flush(); }
   }, FLUSH_MS);
   let refresh = new AbortController();
   const reloader = setInterval(() => { void reloadCanaries().then(changed => { if (changed) refresh.abort(); }); }, deps.canaryReloadMs ?? CANARY_RELOAD_MS);
@@ -682,7 +717,8 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
     });
     return { promise, off };
   };
-  let lastReload = 0;
+  let lastReload = Number.NEGATIVE_INFINITY;
+  let nodeChanged: string | null = null;
   let journalStats: JournalStats | null = null;
   try {
     let backoff = 1_000;
@@ -690,33 +726,36 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
     const markRegistered = () => { everRegistered = true; everRegisteredRun = true; };
     let initialFailures = 0;
     while (!stop.signal.aborted) {
-      if (Date.now() - lastReload >= RECONNECT_RELOAD_MS) { lastReload = Date.now(); await reloadCanaries(); }
+      if (monotonic() - lastReload >= RECONNECT_RELOAD_MS) { lastReload = monotonic(); await reloadCanaries(); }
       // Each pass yields one event-loop turn, so a peer that ends sessions at once can never
       // starve timers (flushes, stop, --until) with a loop of resolved promises.
       else await new Promise(resolve => setImmediate(resolve));
       refresh = new AbortController();
       const sessions: MiddlewareSession[] = [];
-      // Request IDs restart when LND restarts: never carry them across sessions.
+      // Request IDs restart when LND restarts: never carry them across sessions. Clearing alone
+      // is not enough (deferred attribution of the last session may still add keys), so keys
+      // also carry the session number.
       requestKeys.clear();
+      sessionNumber += 1;
       const registeredSessions = new Set<number>();
       const expected = canaries.size ? 2 : 1;
-      let registeredAt = 0;
+      let registeredAt: number | null = null;
       const onRegistered = (index: number) => () => {
         registeredSessions.add(index);
         // Payments are seen by the observer (session 0): its registration starts journal coverage.
         if (index === 0) journal?.registered();
         if (registeredSessions.size === expected) {
           markRegistered();
-          registeredAt = Date.now();
+          registeredAt = monotonic();
           // Observation coverage: recommend reports how long usage was watched.
-          usage.beginCoverage(pubkey, deps.clock());
+          usage.beginCoverage(pubkey, deps.clock(), coverageMono());
           emit({ event: 'status', time: deps.clock().toISOString(), status: 'registered',
             canaries: canaries.size, readOnly: true });
         }
       };
       try {
         const target = { host: request.grpcHost, port: request.grpcPort, tlsCert: cert, macaroon: own };
-        sessions.push(register(target, { name: request.name, readOnly: true }, observe, onRegistered(0),
+        sessions.push(register(target, { name: request.name, readOnly: true }, observe(sessionNumber), onRegistered(0),
           journal ? { payloadMethods: JOURNALED_METHODS } : {}));
         guardName = canaries.size && canaryConfig ? canaryConfig.caveatName : null;
         if (guardName)
@@ -733,7 +772,7 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
       stopping.off();
       for (const session of sessions) session.close();
       const ends = await Promise.all(sessions.map(session => session.ended));
-      usage.endCoverage(pubkey, deps.clock());
+      usage.endCoverage(pubkey, deps.clock(), coverageMono());
       const why: UnregisterReason = first === 'stopped' || stop.signal.aborted ? 'stopping' : first === 'refresh' ? 'refresh' : 'stream-lost';
       journal?.unregistered(why);
       reportJournalStop();
@@ -756,11 +795,22 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
         failure = { registered: false, code: 4, stage: 'W7', message: unreachable(), disabled: false }; break;
       }
       // A session that stayed up resets the backoff; one that flaps keeps it growing.
-      if (registeredAt && Date.now() - registeredAt >= STABLE_SESSION_MS) backoff = 1_000;
+      if (registeredAt !== null && monotonic() - registeredAt >= STABLE_SESSION_MS) backoff = 1_000;
       counters.reconnects += 1;
       emit({ event: 'status', time: deps.clock().toISOString(), status: 'reconnecting', canaries: canaries.size, readOnly: true });
       await sleep(backoff, stop.signal);
       backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
+      // The node behind the endpoint may have changed while the stream was down (a restore, a
+      // re-pointed DNS name or port forward): attribution, labels, canaries and coverage all
+      // belong to the node read at W5, so a different node ends the run. A GetInfo that fails
+      // (LND still down) is left to the registration attempt and its backoff.
+      if (everRegistered && !stop.signal.aborted) {
+        const stopping = stopWait();
+        const current = await Promise.race([onlineAdapter(adapter).getInfo().then(info => nodeInfo(info).pubkey, () => null),
+          stopping.promise]);
+        stopping.off();
+        if (current !== null && current !== 'stopped' && current !== pubkey) { nodeChanged = current; break; }
+      }
     }
   } finally {
     clearInterval(flusher);
@@ -774,7 +824,7 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
     // while (the Windows owner-only creation runs a helper), and a waiting alert must not start
     // behind a command that ends meanwhile. The running one gets its deadline at runner.stop.
     runner.stopping();
-    usage.endCoverage(pubkey, deps.clock());
+    usage.endCoverage(pubkey, deps.clock(), coverageMono());
     await flush();
     if (journal) {
       journal.unregistered('stopping');
@@ -790,11 +840,11 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
     // here on and an alert still waiting is discarded (reported as alert-failed); the running
     // one may finish within ALERT_KILL_MS, then it is cancelled (group or tree killed), and
     // the process-tree kills get what is left of ALERT_CLEANUP_MS.
-    const alertDeadline = Date.now() + ALERT_KILL_MS + ALERT_CLEANUP_MS;
+    const alertDeadline = monotonic() + ALERT_KILL_MS + ALERT_CLEANUP_MS;
     await runner.stop(ALERT_KILL_MS, ALERT_CLEANUP_MS);
     // Anything an alert command left running is killed now, not left behind (POSIX groups).
     reapAlertGroups();
-    await alertCleanupDone(Math.max(0, alertDeadline - Date.now()));
+    await alertCleanupDone(Math.max(0, alertDeadline - monotonic()));
     reportDrops();
     // Queued events go out before the summary; a reader that never reads cannot hold us forever.
     // A reader that never reads must not keep this process alive: after the bounded
@@ -806,6 +856,13 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
   if (!failure && !everRegisteredRun && signal?.aborted)
     return fail(6, 'cancelled', `interrupted before any session registered with LND's gRPC endpoint ${request.grpcHost}:${request.grpcPort} `
       + `(from ${request.grpcSource})`, warnings);
+  if (nodeChanged) return fail(4, 'W5', `the node at ${request.host} changed while watch was reconnecting (${pubkey} at start, now ${nodeChanged}); `
+    + 'usage, labels and canaries were read for the first node: start watch again for the node now there', warnings);
+  // --until ran out while LND had not yet confirmed the registration: say so instead of
+  // blaming the endpoint, which may be fine but slow.
+  if (!failure && !everRegisteredRun && untilExpired)
+    return fail(4, 'W7', `--until expired before LND confirmed the middleware registration with its gRPC endpoint `
+      + `${request.grpcHost}:${request.grpcPort} (from ${request.grpcSource})`, warnings);
   if (!failure && !everRegisteredRun) failure = { registered: false, code: 4, stage: 'W7', message: unreachable(), disabled: false };
   if (failure) {
     if (failure.disabled) return fail(4, 'W7', 'LND RPC middleware is disabled: set rpcmiddleware.enable=true in lnd.conf and restart LND '
@@ -837,5 +894,5 @@ export function stdoutEvents(): Pick<Deps, 'emit' | 'dropped' | 'drainOutput' | 
 
 export async function watch(args: string[]): Promise<OutputResult> {
   return run(args, { createAdapter: createLndAdapter, fs: nodeFs, env: { ...process.env }, clock: () => new Date(),
-    ...stdoutEvents() });
+    monotonic: () => performance.now(), ...stdoutEvents() });
 }

@@ -95,7 +95,8 @@ it('CP-020/B1 valid, root-missing and signature-mismatch reject while other and 
   const ids = ['9', '10', '11', '12', '13', '14'];
   const entries = ids.map(id => entry(id, credential(dir, 'default-readonly', id)));
   const path = registry(dir, entries);
-  const { calls, deps } = fixture(['0', ...ids], index => {
+  // LND reports a missing root key consistently: ID 10 is absent from ListMacaroonIDs too.
+  const { calls, deps } = fixture(['0', ...ids.filter(id => id !== '10')], index => {
     if (index === 0) return { valid: true as const };
     if (index === 1) return { valid: false, reason: 'root-key-missing', message: "root key with id 10 doesn't exist" };
     if (index === 2) return { valid: false as const, reason: 'signature-mismatch', message: 'signature mismatch' };
@@ -179,7 +180,8 @@ it('CP-020/B5 credential forms and request headers stay absent in accepted, reje
   const sentinel = join(sentinelDir, 'cp020-unit.macaroon');
   copyFileSync(join(repo, 'test/vectors/default-readonly.macaroon'), sentinel);
   const path = registry(dir, ['9', '10', '11'].map(id => entry(id, sentinel)));
-  const { deps } = fixture(['0', '9', '10', '11'], index => {
+  // ID 10's root key is missing, so ListMacaroonIDs does not list it either.
+  const { deps } = fixture(['0', '9', '11'], index => {
     if (index === 0) return { valid: true as const };
     if (index === 1) return { valid: false, reason: 'root-key-missing', message: "root key with id 10 doesn't exist" };
     throw new Error('Grpc-Metadata-macaroon header rejected');
@@ -199,18 +201,30 @@ it('CP-020/B5 credential forms and request headers stay absent in accepted, reje
 it('CP-020/B6 previously accepted rows become rejected after a simulated root-key-missing response', async () => temp(async dir => {
   const path = registry(dir, ['9', '10'].map(id => entry(id, credential(dir, 'default-readonly', id))));
   let regenerated = false;
-  const { deps } = fixture(['0', '9', '10'], () => {
+  const listed = ['0', '9', '10'];
+  const { deps } = fixture(listed, () => {
     if (regenerated) return { valid: false, reason: 'root-key-missing', message: "root key with id 9 doesn't exist" };
     return { valid: true as const };
   });
   const before = await invoke(path, deps);
   expect(['9', '10'].map(id => row(before, id).verify)).toEqual(['accepted', 'accepted']);
+  // The root keys are gone: LND no longer lists their IDs either.
   regenerated = true;
+  listed.splice(1);
   const after = await invoke(path, deps);
   for (const id of ['9', '10']) {
     expect(row(after, id).verify).toBe('rejected');
     expect(row(after, id).flags).toContain('rejected');
   }
+}));
+
+// Audit 1.4.0 (as verify, 1.2.1): "root key missing" contradicted by ListMacaroonIDs is an error, never a rejection.
+it('CP-020/B1 root-key-missing while ListMacaroonIDs still lists the ID is an error, not rejected', async () => temp(async dir => {
+  const path = registry(dir, [entry('9', credential(dir, 'default-readonly', '9'))]);
+  const { deps } = fixture(['0', '9'], () => ({ valid: false, reason: 'root-key-missing', message: "root key with id 9 doesn't exist" }));
+  const output = await invoke(path, deps);
+  expect(row(output, '9')).toMatchObject({ inLnd: true, verify: 'error' });
+  expect(row(output, '9').flags).not.toContain('rejected');
 }));
 
 it('CP-020/B7 repeated verification has identical result and leaves registry bytes and mtime unchanged', async () => temp(async dir => {

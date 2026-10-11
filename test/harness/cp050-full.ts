@@ -8,6 +8,7 @@ import { findLeaks } from '../helpers/leak-check.js';
 
 type FullEvidence = {
   level: string; platform: string; candidate: string; status: string;
+  toolchain: { node: string; npm: string | null; lockfileSha256: string | null };
   inputs: Array<{ file: string; sha256: string }>;
   reports: Array<{ label: string; originalPath: string; originalSha256: string; retainedSha256: string }>;
   commands: unknown[]; checks: Array<{ name: string; status: string }>; inventories: unknown; startedAt: string;
@@ -116,6 +117,10 @@ ${(result.stdout + result.stderr).slice(-4000)}`).toBe(variant === 'complete' ? 
   expect(artifacts[0]).toMatch(/[\\/]attempt-[^\\/]+[\\/]full-validation\.json$/);
   const record = JSON.parse(readFileSync(artifacts[0]!, 'utf8')) as FullEvidence;
   expect(record.level).toBe('full'); expect(record.platform).toBe(process.platform); expect(record.candidate).toBe(candidate);
+  // Audit TOOLING-10: the evidence names the toolchain that produced it, and is written whole.
+  expect(record.toolchain.node).toBe(process.version);
+  expect(record.toolchain.npm).toMatch(/^\d+\.\d+\.\d+/);
+  expect(files(evidence).some(path => path.endsWith('.partial')), 'no partial evidence file is left').toBe(false);
   expect(record.startedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   if (variant !== 'metadata-leak') expect(record.commands.length).toBeGreaterThan(0);
   expect(record.checks.length).toBeGreaterThan(0);

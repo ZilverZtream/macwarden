@@ -25,11 +25,19 @@ function attempts(store: PayerStore, paymentHash: string): AttemptRow[] {
       attemptTimeNs: int(row, 'attempt_time_ns') }));
 }
 
+/** 2009-01-01 in nanoseconds: an attempt time before it is not a clock reading (a test stand-in's, or none). */
+const PLAUSIBLE_NS = 1_230_768_000_000_000_000n;
+
+/**
+ * An attempt as the records hold it: its last recorded state, not what it was at any earlier moment (the records keep one
+ * snapshot per attempt). LND's own start time is named when it is a clock reading.
+ */
 function attemptDetail(item: AttemptRow): string {
   const failure = item.status === 'FAILED'
     ? `; failure ${item.failureCode ?? 'unknown'}${item.failureSourceIndex === undefined ? '' : ` from hop index ${item.failureSourceIndex}`}` : '';
+  const started = item.attemptTimeNs >= PLAUSIBLE_NS ? `, started ${new Date(Number(item.attemptTimeNs / 1_000_000n)).toISOString()} by LND's clock` : '';
   return `HTLC attempt ${item.attemptId} (submission ${item.submission}): ${item.status}, route of ${item.hops} hop(s), `
-    + `${item.principalMsat} msat, fee ${item.feeMsat} msat${failure}`;
+    + `${item.principalMsat} msat, fee ${item.feeMsat} msat${failure}${started} (its last recorded state)`;
 }
 
 function parseDetail(detail: string): Record<string, unknown> {
@@ -43,8 +51,12 @@ function parseDetail(detail: string): Record<string, unknown> {
 
 const str = (value: unknown): string => (value === null || value === undefined ? 'none' : typeof value === 'string' ? value : JSON.stringify(value));
 
-/** Kinds after which the attempts of the submission so far are shown: its end, or the next one's start. */
-const ENDS_SUBMISSION = new Set(['submit', 'retry-prepared', 'succeeded', 'failed', 'withdrawn', 'not-initiated', 'uncertain']);
+/**
+ * The attempts of a submission are shown once its last event is: at the next submission's start, or after the payment's
+ * last event. The records keep each attempt's last state only, so it is shown no earlier than the last thing the records
+ * learned about its submission: never as a terminal state before a disconnect or an update that came before it.
+ */
+const ENDS_SUBMISSION = new Set(['submit']);
 
 function paymentItems(timeline: Timeline, store: PayerStore, payment: PaymentRecord): void {
   const fp = fingerprint(payment.paymentHash);
@@ -105,6 +117,12 @@ function paymentItems(timeline: Timeline, store: PayerStore, payment: PaymentRec
         add('track-interrupted', `TrackPaymentV2 interrupted (${str(detail.error)}); tried again, the record is unchanged`, 'timeout');
         break;
       case 'not-initiated':
+        // A payment withdrawn because its operation was paid by another one stays failed WITHDRAWN: no revert to intent.
+        if (detail.withdrawn === true) {
+          add('not-initiated', `LND has no payment for the hash and this submission has no HTLC attempt (${str(detail.evidence)}): `
+            + 'never sent; withdrawn, the record stays failed', 'unresolved');
+          break;
+        }
         add('revert', `LND has no payment for the hash and this submission has no HTLC attempt (${str(detail.evidence)}) -> back to intent, `
           + 'same payment hash; the submission stays open', 'timeout');
         break;
@@ -154,6 +172,15 @@ function paymentItems(timeline: Timeline, store: PayerStore, payment: PaymentRec
         add(event.kind, `${event.kind === 'double-payment' ? 'both payments succeeded' : 'another payment may have been sent'}: `
           + `${fingerprint(str(detail.succeeded))} succeeded, ${fingerprint(str(detail.other))} was ${str(detail.otherState)}`, 'unresolved');
         break;
+      case 'budget-actual-principal':
+        add('budget-actual-principal', `budget ${str(detail.budgetId)}: LND's value ${str(detail.actualPrincipalMsat)} msat differs from the `
+          + `reserved principal ${str(detail.reservedPrincipalMsat)} msat; reservation #${str(detail.replacedReservation)} replaced by `
+          + `#${str(detail.reservation)}, consumed at LND's value plus the actual fee ${str(detail.feeMsat)} msat`, 'accounting');
+        break;
+      case 'budget-overrun':
+        add('budget-overrun', `budget ${str(detail.budgetId)} over its limit by ${str(detail.overMsat)} msat (limit ${str(detail.limitMsat)}, `
+          + `held ${str(detail.heldMsat)}, consumed ${str(detail.consumedMsat)} msat): consumption is never refused, the money left`, 'reservations');
+        break;
       default:
         add('event', `${event.kind}: ${event.detail}`);
     }
@@ -187,7 +214,7 @@ export function resolvePayerSubject(store: PayerStore, subject: { operationId?: 
   return subject.operationId !== undefined && store.operation(subject.operationId) !== undefined ? subject.operationId : undefined;
 }
 
-export function explainPayer(store: PayerStore, operationId: string): Explanation {
+export function explainPayer(store: PayerStore, operationId: string, profile?: string): Explanation {
   const row = store.db.prepare('SELECT kind, amount_msat, state, budget_id, created_at, completed_at FROM operations WHERE operation_id = ?')
     .get(operationId);
   if (row === undefined) throw new Error(`no operation ${operationId}`);
@@ -237,7 +264,7 @@ export function explainPayer(store: PayerStore, operationId: string): Explanatio
     const rule: RuleId = entry.event === 'payment-succeeded' ? 'accounting' : entry.event === 'double-payment' ? 'unresolved' : 'reservations';
     timeline.add(entry.postedAt, 'journal', journalLine(entry), rule);
   }
-  const outbox = outboxView(store.outbox(operationId), known);
+  const outbox = outboxView(store.outbox(operationId), known, profile);
   outboxItems(timeline, outbox);
 
   const succeeded = payments.filter(item => item.state === 'succeeded');

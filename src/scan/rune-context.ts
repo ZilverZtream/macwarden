@@ -11,7 +11,9 @@
 // letter or digit (camelCase); "prune", "runes" and "rune_id" are not rune keys. One optional
 // quote may close the key; then optional blanks, '=', ':' or ':=' (not '==' or '=>'), optional
 // blanks and one optional opening quote. An option token starting with '-' may be followed by
-// blanks alone (--rune …, --cln-rune "…"), and an XML element's '>' ends its key (<rune>…).
+// blanks alone (--rune …, --cln-rune "…"), and an XML element's '>' ends its key (<rune>…). A quoted
+// option token is followed by a comma, optional blanks and a quoted value ("--rune", "…" in an
+// MCP args array, TOML or YAML flow list). Quotes may be JSON-escaped (\") for JSON in a JSON string.
 // Key names are read back at most 64 characters, so the work stays linear. The value is the following run of base64 characters
 // (both alphabets and '=', so a standard-alphabet value is examined and refused rather than cut).
 //
@@ -73,7 +75,11 @@ function keyCandidates(text: string): RuneCandidate[] {
       if (isAlnum(before) && !camel) continue;
     }
     let p = at + 4;
-    const quotedKey = p < text.length && QUOTES.includes(text[p]);
+    // A quote closing the key, JSON-escaped (\") when the JSON is itself inside a JSON string.
+    const escapedKey = text[p] === '\\' && QUOTES.includes(text[p + 1]);
+    if (escapedKey) p++;
+    const keyQuote = p < text.length && QUOTES.includes(text[p]) ? text[p] : null;
+    const quotedKey = keyQuote !== null;
     if (quotedKey) p++;
     if (!quotedKey && text[p] === '>' && text[tokenStart(text, at) - 1] === '<') p++; // <rune>…, <clnRune>…
     else {
@@ -84,13 +90,23 @@ function keyCandidates(text: string): RuneCandidate[] {
         if (text[p] === ':' && text[p + 1] === '=') p++; // := (Go, make)
         p++;
         while (p < text.length && BLANK.includes(text[p])) p++;
+      } else if (quotedKey) {
+        // An option in a quoted argument list (MCP and JSON "args", TOML, YAML flow): "--rune", "…".
+        // The whole quoted token starts with '-'; a comma and a quoted value follow.
+        const start = tokenStart(text, at);
+        if (start < 1 || text[start] !== '-' || text[start - 1] !== keyQuote || escapedKey !== (text[start - 2] === '\\')
+            || text[p] !== ',') continue;
+        p++;
+        while (p < text.length && BLANK.includes(text[p])) p++;
+        if (!QUOTES.includes(text[p]) && !(text[p] === '\\' && QUOTES.includes(text[p + 1]))) continue;
       } else {
         // An option followed by a blank: --rune …, --cln-rune "…" (a whole token that starts with '-').
         const start = tokenStart(text, at);
-        if (quotedKey || p === blanks || text[start] !== '-' || (start > 0 && !BLANK.includes(text[start - 1]) && !QUOTES.includes(text[start - 1])))
+        if (p === blanks || text[start] !== '-' || (start > 0 && !BLANK.includes(text[start - 1]) && !QUOTES.includes(text[start - 1])))
           continue;
       }
     }
+    if (text[p] === '\\' && QUOTES.includes(text[p + 1])) p++; // an escaped opening quote
     const quote = p < text.length && QUOTES.includes(text[p]) ? text[p] : null;
     if (quote) p++;
     const start = p;

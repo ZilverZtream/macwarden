@@ -96,7 +96,9 @@ it('WATCH/peer-fields oversized method, macaroon and condition fields are capped
     { name: 'macwarden-watch', readOnly: true }, call => { calls.push({ ...call }); return ''; }, () => undefined);
   for (let i = 0; i < 500 && calls.length < 2; i++) await new Promise(r => setTimeout(r, 10));
   const elapsed = performance.now() - started;
-  expect(calls[0]).toMatchObject({ method: '/unknown/Unknown', macaroon: null, oversizedMacaroon: true, customCaveatCondition: '' });
+  // Audit 1.4.0: of the 1 MiB macaroon only a 4 KiB prefix (its header) is passed on, never the whole field.
+  expect(calls[0]).toMatchObject({ method: '/unknown/Unknown', macaroonBytes: 4 * 1024, oversizedMacaroon: true, customCaveatCondition: '' });
+  expect(calls[0].macaroon).not.toBeNull();
   // Normal-sized fields pass through unchanged.
   expect(calls[1]).toMatchObject({ method: '/lnrpc.Lightning/GetInfo', customCaveatCondition: '3a1e61423be44eaf', macaroonBytes: own.length });
   expect(calls[1].macaroon).not.toBeNull();
@@ -106,9 +108,12 @@ it('WATCH/peer-fields oversized method, macaroon and condition fields are capped
 }, 30_000);
 
 it('WATCH/peer-backpressure a peer that stops reading feedback ends the session instead of growing memory', async () => {
-  const p = await peer(stream => { stream.pause(); });
+  // The peer has opened the stream and stopped reading it: a positive signal, not a fixed wait.
+  let paused!: () => void;
+  const reading = new Promise<void>(done => { paused = done; });
+  const p = await peer(stream => { stream.pause(); paused(); });
   const stream = openGrpcStream({ ...p.url, ca: tls.ca, path: '/lnrpc.Lightning/RegisterRPCMiddleware', metadata: {} }, () => undefined);
-  await new Promise(r => setTimeout(r, 200));
+  await reading;
   let accepted = 0;
   for (let n = 0; n < 40; n++) if (stream.send(Buffer.alloc(1024 * 1024))) accepted += 1; else break;
   const end = await Promise.race([stream.ended, new Promise(done => setTimeout(() => done('still open'), 5_000))]);
@@ -122,9 +127,12 @@ it('WATCH/peer-backpressure-flow feedback held by HTTP/2 flow control (a peer th
   // Small writes spread over many turns each leave our writable buffer at once and wait in
   // HTTP/2 flow control, where writableLength cannot see them: only counting what is not yet
   // flushed bounds them (old: the session stayed open while memory grew without limit).
-  const p = await peer(stream => { stream.pause(); });
+  // The peer has opened the stream and stopped reading it: a positive signal, not a fixed wait.
+  let paused!: () => void;
+  const reading = new Promise<void>(done => { paused = done; });
+  const p = await peer(stream => { stream.pause(); paused(); });
   const stream = openGrpcStream({ ...p.url, ca: tls.ca, path: '/lnrpc.Lightning/RegisterRPCMiddleware', metadata: {} }, () => undefined);
-  await new Promise(r => setTimeout(r, 200));
+  await reading;
   let sent = 0;
   let open = true;
   const chunk = Buffer.alloc(64 * 1024);

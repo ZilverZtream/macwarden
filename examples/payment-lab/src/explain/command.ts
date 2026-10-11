@@ -10,18 +10,22 @@ import { document, renderError, renderText, renderWarning, type ExplainError, ty
 /**
  * `payer explain` and `receiver explain` (src/cli.ts parses and checks the arguments). Exit codes:
  * 0 the subject was found and explained; 3 the records have no such subject; 4 a `--refresh` lookup
- * failed: the explanation from the records is printed all the same, with a warning and the error.
+ * failed: the explanation from the records is printed all the same, with a warning and the error. An internal error (a
+ * damaged record, for one) is exit 4 too, in the same document: `--json` always prints one explain document.
  */
 
+/** `profile`: the profile the store belongs to, for the effect files' paths (`<lab>/receipts/<profile>/…`); left out, none is named. */
 export type ExplainInput =
-  | { component: 'payer'; store: PayerStore; api: TrackSource; subject: { operationId?: string; paymentHash?: string } }
-  | { component: 'receiver'; store: ReceiverStore; api: LookupSource; subject: { orderId?: string; paymentHash?: string } };
+  | { component: 'payer'; store: PayerStore; api: TrackSource; subject: { operationId?: string; paymentHash?: string }; profile?: string }
+  | { component: 'receiver'; store: ReceiverStore; api: LookupSource; subject: { orderId?: string; paymentHash?: string }; profile?: string };
 
 export interface ExplainOptions {
   json: boolean;
   refresh: boolean;
   out?: (text: string) => void;
   err?: (text: string) => void;
+  /** The --refresh deadline (refresh.ts, REFRESH_DEADLINE_MS when not given; the tests shorten it). */
+  refreshDeadlineMs?: number;
 }
 
 const EXIT = { ok: 0, unknown: 3, nodeError: 4 } as const;
@@ -54,28 +58,56 @@ export async function explainCommand(input: ExplainInput, options: ExplainOption
     }
     return doc.error === null ? EXIT.ok : doc.error.code;
   };
-  const target = input.component === 'payer' ? resolvePayerSubject(input.store, input.subject)
-    : resolveReceiverSubject(input.store, input.subject);
-  if (target === undefined) {
+  try {
+    return await explainOrFail(input, options, finish);
+  } catch (error) {
+    // The message names no secret (scrub, with no hash known: any 64-hex run is redacted) and is cut to its bound.
+    const message = capString(scrub(error instanceof Error ? error.message : String(error), new Set()));
+    return finish(document(null, [], { code: EXIT.nodeError, step: 'records', message: `the records could not be read: ${message}` }));
+  }
+}
+
+/** The records' part of the explanation, read in one read transaction: one snapshot, whatever another process commits meanwhile. */
+function fromRecords(input: ExplainInput): { target: string; explained: Explanation; hashes: string[] } | undefined {
+  const db = input.store.db;
+  const own = !db.isTransaction;
+  if (own) db.exec('BEGIN');
+  try {
+    const target = input.component === 'payer' ? resolvePayerSubject(input.store, input.subject)
+      : resolveReceiverSubject(input.store, input.subject);
+    if (target === undefined) return undefined;
+    const explained = input.component === 'payer' ? explainPayer(input.store, target, input.profile)
+      : explainReceiver(input.store, target, input.profile);
+    const hashes = input.component === 'payer' ? input.store.paymentsForOperation(target).map(item => item.paymentHash)
+      : input.store.db.prepare('SELECT payment_hash FROM invoices WHERE order_id = ? ORDER BY created_at, rowid').all(target)
+        .map(row => String(row.payment_hash));
+    return { target, explained, hashes };
+  } finally {
+    if (own && db.isTransaction) db.exec('COMMIT');
+  }
+}
+
+async function explainOrFail(input: ExplainInput, options: ExplainOptions, finish: (doc: ReturnType<typeof document>) => number): Promise<number> {
+  const read = fromRecords(input);
+  if (read === undefined) {
     // The ID as given, a 64-hex one as its fingerprint (scrub, with the ID as the subject's own).
     const id = (input.component === 'payer' ? input.subject.operationId : input.subject.orderId) ?? '';
     const named = input.subject.paymentHash !== undefined ? `payment hash ${fingerprint(input.subject.paymentHash)}`
       : `${input.component === 'payer' ? 'operation' : 'order'} ${capString(scrub(id, new Set([id.toLowerCase()])))}`;
     return finish(document(null, [], { code: EXIT.unknown, step: 'subject', message: `the ${input.component}'s records have no ${named}` }));
   }
-  const explained = input.component === 'payer' ? explainPayer(input.store, target) : explainReceiver(input.store, target);
-  const hashes = input.component === 'payer' ? input.store.paymentsForOperation(target).map(item => item.paymentHash)
-    : input.store.db.prepare('SELECT payment_hash FROM invoices WHERE order_id = ? ORDER BY created_at, rowid').all(target)
-      .map(row => String(row.payment_hash));
+  const { target, explained, hashes } = read;
   // The lists are bounded first (model.ts, bound), so scrubbing walks at most what is printed.
   const known = new Set([...hashes.map(hash => hash.toLowerCase()), target.toLowerCase()]);
   const explanation: Explanation = scrubAll(bound(explained), known);
   const warnings: Warning[] = [];
   let error: ExplainError | null = null;
   if (options.refresh) {
-    const refreshed = input.component === 'payer' ? await refreshPayer(explanation, hashes, input.api)
-      : await refreshReceiver(explanation, hashes, input.api);
+    const refreshOptions = options.refreshDeadlineMs === undefined ? {} : { deadlineMs: options.refreshDeadlineMs };
+    const refreshed = input.component === 'payer' ? await refreshPayer(explanation, hashes, input.api, refreshOptions)
+      : await refreshReceiver(explanation, hashes, input.api, refreshOptions);
     for (const fact of refreshed.facts) explanation.timeline.push(scrubAll(fact, known));
+    if (refreshed.skipped > 0) explanation.truncated = { ...explanation.truncated, refresh: refreshed.skipped };
     if (refreshed.error !== undefined) {
       const message = scrubAll(refreshed.error, known);
       warnings.push({ code: 'refresh-failed', message: `${message}; the explanation is from the records only` });

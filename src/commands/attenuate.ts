@@ -27,6 +27,11 @@ type AttenuateOutput = OutputResult & { schema: 1 };
 type Request = { input: string; out: string; expires?: string; ip?: string; ipRange?: string;
   dryRun: boolean; unsafeArg: boolean };
 
+// The decoder reports at most 4,096 caveats per macaroon (MAX_CAVEATS in decode/index.ts) and
+// names the rest caveats-exceed-bounds. The A5 self-check compares reported caveat lists, so a
+// child past that bound cannot be proven equal to the input plus the new caveats: refuse up front.
+const MAX_REPORTED_CAVEATS = 4096;
+
 const valueFlags = new Set(['--out', '--expires', '--ip', '--ip-range']);
 const switchFlags = new Set(['--dry-run', '--unsafe-arg', '--json']);
 
@@ -146,6 +151,10 @@ async function runSteps(args: string[], deps: Deps, state: CleanupState): Promis
     if (error instanceof InputError || error instanceof DecodeError) return fail(3, error.stage, error.message, warnings);
     throw error;
   }
+
+  if (parent.warnings.includes('caveats-exceed-bounds')
+    || parent.caveats.length + conditions.length > MAX_REPORTED_CAVEATS)
+    return fail(3, 'A4', `input has too many caveats to attenuate: the result would exceed ${MAX_REPORTED_CAVEATS} caveats; no file was written`, warnings);
 
   // A5: append first-party caveats (HMAC chain) and prove the child is the input plus exactly those caveats.
   let child: Secret = parentSecret;

@@ -110,15 +110,15 @@ it.each(['watcher', 'none'] as const)('SAFE-06/out-share-window attenuate with %
     if (watcher === 'none') {
       expect(result.error).toBeNull();
       expect(readFileSync(out).length).toBeGreaterThan(100);
-      return;
+    } else {
+      expect(result.error).toMatchObject({ code: 3, step: 'A6' });
+      expect(held).toBeTypeOf('number');
+      // The watcher's handle never sees credential bytes.
+      const buffer = Buffer.alloc(4096);
+      expect(readSync(held!, buffer, 0, buffer.length, 0)).toBe(0);
+      closeSync(held!); held = undefined;
+      expect(existsSync(out)).toBe(false);
     }
-    expect(result.error).toMatchObject({ code: 3, step: 'A6' });
-    expect(held).toBeTypeOf('number');
-    // The watcher's handle never sees credential bytes.
-    const buffer = Buffer.alloc(4096);
-    expect(readSync(held!, buffer, 0, buffer.length, 0)).toBe(0);
-    closeSync(held!); held = undefined;
-    expect(existsSync(out)).toBe(false);
   } finally {
     acl.onCreated = undefined;
     if (held !== undefined) closeSync(held);

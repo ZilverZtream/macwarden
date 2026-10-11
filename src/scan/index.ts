@@ -16,9 +16,9 @@ import { isProtectedPath } from '../protected-path.js';
 import { l402Challenge, l402Header, l402MacaroonBase64, l402MacaroonHex, lndconnect, macaroonBase64, macaroonHex, nwc } from './patterns.js';
 import { collectNwcSecrets, knownSecretRedactor, redactDecoded, redactPath } from './redact.js';
 import { nwcMatches, nwcUnescaped } from './nwc-match.js';
-import { IgnoreFileError, parseIgnoreFile, type IgnoreEntry } from './ignore.js';
+import { IGNORE_MATCH_WORK_LIMIT, IgnoreFileError, ignoreDecider, parseIgnoreFile, type IgnoreEntry } from './ignore.js';
 import { assertWorkTree, blobSizes, GitHistoryError, historyEntries, isShallowRepository, locateRepository, MODE_REGULAR, MODE_SYMLINK,
-  readBlobs } from './git-history.js';
+  readBlobs, resolveGit } from './git-history.js';
 import { Cancelled, cancellable, checkCancellation } from '../cancellation.js';
 import { readBounded } from '../bounded-file.js';
 import { runeFindings } from './runes.js';
@@ -108,11 +108,17 @@ function sameFileIdentity(left: FileStat, right: FileStat): boolean {
   return samePart(left.dev, right.dev) && samePart(left.ino, right.ino);
 }
 
+/**
+ * A file's identity for deduplication. A file with one name is identified by its resolved path,
+ * which every route to it (overlapping arguments, a followed root link) resolves to; only a file
+ * with several names (hard links) is identified by device and file index. File indexes are not
+ * unique on every file system (ReFS and Dev Drive have 128-bit IDs that Node truncates to 64
+ * bits), and a false match would skip a distinct file as a duplicate.
+ */
 function fileIdentity(stat: FileStat, target: string): string {
   const dev = exactIdentity(stat.dev);
   const ino = exactIdentity(stat.ino);
-  if (dev === null || ino === null || ino === 0n ||
-      (typeof stat.ino === 'number' && stat.nlink === 1)) return target;
+  if (dev === null || ino === null || ino === 0n || Number(stat.nlink) <= 1) return target;
   return `${dev}:${ino}`;
 }
 
@@ -123,6 +129,8 @@ type Hit = {
   start: number; text: string; kind: HitKind; truncated?: true;
   /** Code points the match covers in the line, when matched on an unescaped copy of it. */
   extent?: number;
+  /** When matched on an unescaped copy: the line offset of a code point offset in `text`. */
+  lineOffset?: (offset: number) => number;
 };
 const detectors = [
   { kind: 'lndconnect', pattern: lndconnect },
@@ -305,9 +313,11 @@ function credentialBytes(hit: Hit): Buffer | null {
  * The credential an L402 Authorization, challenge or pair match carries: an L402 finding, the
  * LND macaroon it holds (reported as macaroon-base64 at the macaroon), or null when it does not
  * decode. Pairs are confirmed only with an L402 identifier: the shape alone is too common.
+ * `accounted`: the line offsets of the macaroons the finding stands for (every macaroon of an
+ * L402 token; only the reported one when the value carries an LND macaroon).
  */
 function l402Credential(hit: Hit, path: string, line: number, column: (start: number) => number, now: Date,
-  ctx: ScanContext): ScanFinding | null {
+  ctx: ScanContext): { finding: ScanFinding; accounted: number[] } | null {
   let macaroons: string[];
   let preimage: Buffer | null = null;
   let offset: number;
@@ -327,14 +337,19 @@ function l402Credential(hit: Hit, path: string, line: number, column: (start: nu
   if (macaroons.length > L402_MAX_MACAROONS) return null;
   const bytes = macaroons.map(decodeBase64);
   if (bytes.some(item => item === null)) return null;
+  // Each macaroon's line offset. The match is ASCII, so a code unit offset in it is a code point offset.
+  const lineOffset = hit.lineOffset ?? ((at: number) => hit.start + at);
+  const starts: number[] = [];
+  for (let at = offset, i = 0; i < macaroons.length; at += macaroons[i].length + 1, i++) starts.push(lineOffset(at));
   const form = hit.kind === 'l402-challenge' ? 'challenge' : hit.kind === 'l402-header' ? 'authorization' : 'pair';
   try {
     const result = decodeL402Macaroons(bytes.map(item => new Secret(item!)), preimage && new Secret(preimage), form, schemeName);
     if ('lnd' in result) {
-      return withFacts(path, line, column(hit.start + offset), 'macaroon-base64', decodeMacaroon(result.lnd), now, ctx);
+      const at = starts[result.index];
+      return { finding: withFacts(path, line, column(at), 'macaroon-base64', decodeMacaroon(result.lnd), now, ctx), accounted: [at] };
     }
     if (form === 'pair' && result.l402.identifier === null) return null;
-    return withL402Facts(path, line, column(hit.start), 'l402', result.l402, now, ctx);
+    return { finding: withL402Facts(path, line, column(hit.start), 'l402', result.l402, now, ctx), accounted: starts };
   } catch (error) {
     if (!(error instanceof DecodeError)) throw error;
     return null;
@@ -418,18 +433,33 @@ function collectHits(points: string[], only?: readonly Hit['kind'][]): Hit[] {
 }
 
 /** The line's code points with every "\/" read as "/"; origin and escaped map back to the line. */
-function slashUnescaped(points: readonly string[]): { points: string[]; origin: number[]; escaped: boolean[] } {
+type UnescapedCopy = { points: string[]; origin: number[]; width: number[] };
+function unescapedCopy(points: readonly string[], escape: (at: number) => { char: string; width: number } | null): UnescapedCopy {
   const out: string[] = [];
   const origin: number[] = [];
-  const escaped: boolean[] = [];
+  const width: number[] = [];
   for (let i = 0; i < points.length; i++) {
-    const pair = points[i] === '\\' && points[i + 1] === '/';
-    out.push(pair ? '/' : points[i]);
+    const read = escape(i);
+    out.push(read ? read.char : points[i]);
     origin.push(i);
-    escaped.push(pair);
-    if (pair) i++;
+    width.push(read ? read.width : 1);
+    if (read) i += read.width - 1;
   }
-  return { points: out, origin, escaped };
+  return { points: out, origin, width };
+}
+
+function slashUnescaped(points: readonly string[]): UnescapedCopy {
+  return unescapedCopy(points, at => points[at] === '\\' && points[at + 1] === '/' ? { char: '/', width: 2 } : null);
+}
+
+// The percent escapes of the standard base64 characters that are not URL-safe ('+', '/', '=').
+const PERCENT_BASE64: Record<string, string> = { '2b': '+', '2f': '/', '3d': '=' };
+function percentUnescaped(points: readonly string[]): UnescapedCopy {
+  return unescapedCopy(points, at => {
+    if (points[at] !== '%' || points[at + 1] === undefined || points[at + 2] === undefined) return null;
+    const char = PERCENT_BASE64[(points[at + 1] + points[at + 2]).toLowerCase()];
+    return char === undefined ? null : { char, width: 3 };
+  });
 }
 
 function byStartThenDetector(a: Hit, b: Hit): number {
@@ -448,14 +478,39 @@ function withoutTrailingPunctuation(text: string): string {
   return text.slice(0, end);
 }
 
-/** The credential an lndconnect match carries, and the match's length in code points once confirmed. */
-function lndconnectCredential(text: string): { bytes: Buffer; length: number } | null {
+/** The credential an lndconnect match carries, and the match's text and length in code points once confirmed. */
+function lndconnectCredential(text: string): { bytes: Buffer; text: string; length: number } | null {
   const bytes = parseLndconnect(text, { standardBase64: true });
-  if (bytes) return { bytes, length: Array.from(text).length };
+  if (bytes) return { bytes, text, length: Array.from(text).length };
   const trimmed = withoutTrailingPunctuation(text);
   if (trimmed === text) return null;
   const retried = parseLndconnect(trimmed, { standardBase64: true });
-  return retried ? { bytes: retried, length: Array.from(trimmed).length } : null;
+  return retried ? { bytes: retried, text: trimmed, length: Array.from(trimmed).length } : null;
+}
+
+/**
+ * The code point span of the macaroon parameter's value in a confirmed lndconnect URI, found
+ * as parseLndconnect finds it: the one query parameter whose percent-decoded key is "macaroon".
+ */
+function macaroonParameter(uri: string): { start: number; end: number } | null {
+  const queryStart = uri.indexOf('?');
+  const fragment = uri.indexOf('#');
+  const queryEnd = fragment < 0 ? uri.length : fragment;
+  if (queryStart < 0 || queryStart > queryEnd) return null;
+  let found: { start: number; end: number } | null = null;
+  for (let at = queryStart + 1; at <= queryEnd;) {
+    const next = uri.indexOf('&', at);
+    const end = next < 0 || next > queryEnd ? queryEnd : next;
+    const part = uri.slice(at, end);
+    const separator = part.indexOf('=');
+    let key: string | null;
+    try { key = decodeURIComponent(separator < 0 ? part : part.slice(0, separator)); } catch { key = null; }
+    if (key === 'macaroon' && separator >= 0) found = { start: at + separator + 1, end };
+    at = end + 1;
+  }
+  if (!found) return null;
+  const points = (units: number) => Array.from(uri.slice(0, units)).length;
+  return { start: points(found.start), end: points(found.end) };
 }
 
 /**
@@ -491,86 +546,130 @@ function scanLine(path: string, line: number, text: string, now: Date, ctx: Scan
   // stop a base64 macaroon or an lndconnect URI at the backslash: both are also matched on a
   // copy of the line with "\/" read as "/". A match there replaces the one at the same column
   // only when it covers more of the line, so an unescaped line yields the same hits.
-  const slashes = text.includes('\\/') ? slashUnescaped(points) : null;
-  if (slashes) {
+  // Percent-encoded standard base64 (a form body, a query string, a HAR or curl log) would stop
+  // a base64 macaroon at its first %2B, %2F or %3D: base64 macaroons are also matched on a copy
+  // of the line with those three escapes decoded, in the same way.
+  const copies: { copy: UnescapedCopy; kinds: readonly HitKind[] }[] = [];
+  if (text.includes('\\/')) copies.push({ copy: slashUnescaped(points),
+    kinds: ['lndconnect', 'macaroon-base64', 'l402-header', 'l402-challenge', 'l402-pair', 'l402-base64'] });
+  if (/%(?:2b|2f|3d)/i.test(text)) copies.push({ copy: percentUnescaped(points), kinds: ['macaroon-base64', 'l402-base64'] });
+  for (const { copy: slashes, kinds } of copies) {
     const byKey = new Map(hits.map(hit => [`${hit.kind}:${hit.start}`, hit]));
     const replaced = new Set<Hit>();
-    for (const hit of collectHits(slashes.points, ['lndconnect', 'macaroon-base64', 'l402-header', 'l402-challenge', 'l402-pair', 'l402-base64'])) {
+    for (const hit of collectHits(slashes.points, kinds)) {
       const start = slashes.origin[hit.start];
       const last = hit.start + Array.from(hit.text).length - 1;
-      const extent = slashes.origin[last] + (slashes.escaped[last] ? 2 : 1) - start;
+      const extent = slashes.origin[last] + slashes.width[last] - start;
       const key = `${hit.kind}:${start}`;
       const prior = byKey.get(key);
       if (prior && extent <= (prior.extent ?? Array.from(prior.text).length)) continue;
       if (prior) replaced.add(prior);
-      const moved = { ...hit, start, extent };
+      const at = hit.start;
+      const length = last - at + 1;
+      const lineOffset = (offset: number) => offset >= length ? start + extent : slashes.origin[at + offset];
+      const moved = { ...hit, start, extent, lineOffset };
       byKey.set(key, moved);
       hits.push(moved);
     }
     if (replaced.size) hits = hits.filter(hit => !replaced.has(hit));
     hits.sort(byStartThenDetector);
   }
-  // An lndconnect URI is confirmed first. Only a confirmed URI hides the matches inside it:
-  // a URI that does not parse never hides the credential it carries (fail closed).
+  // An lndconnect URI is confirmed first. A confirmed URI hides only its own macaroon: the
+  // matches that start inside its macaroon parameter's value, and any match in the URI that
+  // decodes to the same credential. Another credential in a further parameter is reported.
+  // A URI that does not parse never hides the credential it carries (fail closed).
   const lineFindings: { hit: Hit; finding: ScanFinding }[] = [];
-  const spans: { start: number; end: number }[] = [];
+  const spans: { start: number; end: number; l402?: true }[] = [];
+  const uris: { start: number; end: number; fingerprint: string }[] = [];
   for (const hit of hits) {
     if (hit.kind !== 'lndconnect' || hit.truncated) continue;
     const confirmed = lndconnectCredential(hit.text);
     const facts = confirmed && decoded(confirmed.bytes);
     if (!confirmed || !facts) { dropped++; continue; }
     const length = Array.from(hit.text).length;
-    spans.push({ start: hit.start, end: hit.start + (hit.extent ?? length) - (length - confirmed.length) });
+    const lineOffset = hit.lineOffset ?? ((offset: number) => hit.start + offset);
+    const value = macaroonParameter(confirmed.text);
+    if (value) spans.push({ start: lineOffset(value.start), end: lineOffset(value.end) });
+    uris.push({ start: hit.start, end: hit.start + (hit.extent ?? length) - (length - confirmed.length), fingerprint: facts.fingerprint });
     lineFindings.push({ hit, finding: withFacts(path, line, column(hit.start), 'lndconnect', facts, now, ctx) });
   }
+  // The fingerprint of the confirmed URI a match starting at `start` lies in, or null; called with
+  // starts in line order, so each URI is passed once.
+  const uriCover = () => {
+    let index = 0;
+    let end = 0;
+    let uriFingerprint = '';
+    return (start: number): string | null => {
+      for (; index < uris.length && uris[index].start <= start; index++)
+        if (uris[index].end > end) { end = uris[index].end; uriFingerprint = uris[index].fingerprint; }
+      return start < end ? uriFingerprint : null;
+    };
+  };
   // L402 Authorization credentials and pairs are confirmed next, in line order; a confirmed one
-  // hides the matches inside it (its macaroon as a bare L402 or LND macaroon, a pair inside a
-  // header). One that does not decode hides nothing.
+  // hides the matches inside it (its macaroons as bare L402 macaroons, a pair inside a header),
+  // except an LND macaroon the finding does not stand for: a value carrying several LND
+  // macaroons reports the highest graded one for the credential and every other one on its own.
+  // One that does not decode hides nothing.
   const confirmedL402 = new Set<Hit>();
+  const accounted = new Set<number>();
   if (hits.some(hit => hit.kind === 'l402-header' || hit.kind === 'l402-challenge' || hit.kind === 'l402-pair')) {
-    const l402Spans: { start: number; end: number }[] = [];
+    const l402Spans: { start: number; end: number; l402: true }[] = [];
     let lndIndex = 0;
     let covered = 0;
+    const inUri = uriCover();
     for (const hit of hits) {
       while (lndIndex < spans.length && spans[lndIndex].start <= hit.start) covered = Math.max(covered, spans[lndIndex++].end);
+      const uri = inUri(hit.start);
       if ((hit.kind !== 'l402-header' && hit.kind !== 'l402-challenge' && hit.kind !== 'l402-pair') || hit.truncated || hit.start < covered) continue;
-      const finding = l402Credential(hit, path, line, column, now, ctx);
-      if (!finding) continue;
+      const credential = l402Credential(hit, path, line, column, now, ctx);
+      if (!credential) continue;
+      const { finding } = credential;
+      for (const start of credential.accounted) accounted.add(start);
       const end = hit.start + (hit.extent ?? Array.from(hit.text).length);
-      l402Spans.push({ start: hit.start, end });
+      l402Spans.push({ start: hit.start, end, l402: true });
       covered = Math.max(covered, end);
       confirmedL402.add(hit);
-      lineFindings.push({ hit, finding });
+      if (finding.fingerprint !== uri) lineFindings.push({ hit, finding });
     }
     for (const span of l402Spans) spans.push(span);
     spans.sort((a, b) => a.start - b.start);
   }
   let spanIndex = 0;
   let coveredUntil = 0;
+  let l402Until = 0;
+  const inUri = uriCover();
   for (const hit of hits) {
     while (spanIndex < spans.length && spans[spanIndex].start <= hit.start) {
-      coveredUntil = Math.max(coveredUntil, spans[spanIndex].end);
+      const span: { start: number; end: number; l402?: true } = spans[spanIndex];
+      if (span.l402) l402Until = Math.max(l402Until, span.end);
+      else coveredUntil = Math.max(coveredUntil, span.end);
       spanIndex++;
     }
+    // Inside a confirmed L402 value a macaroon its finding does not stand for is reported.
+    const macaroonMatch = hit.kind === 'macaroon-base64' || hit.kind === 'l402-base64';
+    const hidden = hit.start < coveredUntil || (hit.start < l402Until && !(macaroonMatch && !accounted.has(hit.start)));
+    // A match in a confirmed URI that decodes to the URI's own credential is not reported again.
+    const uri = inUri(hit.start);
+    const report = (finding: ScanFinding) => { if (finding.fingerprint !== uri) lineFindings.push({ hit, finding }); };
     const at = column(hit.start);
     // A match cut by its window's end may continue past it: report it, never decode a part.
     if (hit.truncated) {
-      lineFindings.push({ hit, finding: nullFinding(path, line, at, 'undecodable-candidate', fingerprint(hit.text)) });
+      report(nullFinding(path, line, at, 'undecodable-candidate', fingerprint(hit.text)));
       continue;
     }
     // A challenge carries no preimage: one that does not decode is not reported (the bare macaroon
     // detectors still see an L402 macaroon inside it). A pair shape alone is not reported.
     if (hit.kind === 'lndconnect' || hit.kind === 'l402-pair' || hit.kind === 'l402-challenge' || confirmedL402.has(hit)
-      || hit.start < coveredUntil) continue;
+      || hidden) continue;
     if (hit.kind === 'l402-header') {
       // An Authorization credential that does not decode fails closed, like a macaroon prefix.
-      lineFindings.push({ hit, finding: nullFinding(path, line, at, 'undecodable-candidate', fingerprint(hit.text)) });
+      report(nullFinding(path, line, at, 'undecodable-candidate', fingerprint(hit.text)));
       continue;
     }
     if (hit.kind === 'l402-hex' || hit.kind === 'l402-base64') {
       const l402 = l402Macaroon(credentialBytes(hit));
-      lineFindings.push({ hit, finding: l402 ? withL402Facts(path, line, at, 'l402', l402, now, ctx)
-        : nullFinding(path, line, at, 'undecodable-candidate', fingerprint(hit.text)) });
+      report(l402 ? withL402Facts(path, line, at, 'l402', l402, now, ctx)
+        : nullFinding(path, line, at, 'undecodable-candidate', fingerprint(hit.text)));
       continue;
     }
     if (hit.kind === 'nwc') {
@@ -578,13 +677,13 @@ function scanLine(path: string, line: number, text: string, now: Date, ctx: Scan
       // match is reported (fail closed): "&amp;secret=" and other separators included.
       const secret = /secret=([0-9a-f]{64})[^0-9a-f]?$/i.exec(hit.text)![1].toLowerCase();
       ctx.secrets.add(secret);
-      lineFindings.push({ hit, finding: nullFinding(path, line, at, 'nwc', fingerprint(Buffer.from(secret, 'hex'))) });
+      report(nullFinding(path, line, at, 'nwc', fingerprint(Buffer.from(secret, 'hex'))));
       continue;
     }
     const bytes = credentialBytes(hit);
     const facts = bytes && decoded(bytes);
-    lineFindings.push({ hit, finding: facts ? withFacts(path, line, at, hit.kind, facts, now, ctx)
-      : nullFinding(path, line, at, 'undecodable-candidate', fingerprint(hit.text)) });
+    report(facts ? withFacts(path, line, at, hit.kind, facts, now, ctx)
+      : nullFinding(path, line, at, 'undecodable-candidate', fingerprint(hit.text)));
   }
   lineFindings.sort((a, b) => byStartThenDetector(a.hit, b.hit));
   for (const { finding } of lineFindings) findings.push(finding);
@@ -747,6 +846,21 @@ function isCredentialFileName(name: string): boolean {
   return /\.macaroon$/i.test(name) || /^(?:l402|lsat)\.token(?:\.pending)?$/i.test(name);
 }
 
+// The first bytes of a binary v2 macaroon with LND's location ("lnd") and with Aperture's
+// ("lsat"): version 2, location field, its length and text, then the identifier field.
+const RAW_MACAROON_HEADERS = [Buffer.from('0201036c6e6402', 'hex'), Buffer.from('0201046c73617402', 'hex')];
+
+/**
+ * Whether binary content is a raw macaroon (either header above) or an Aperture token store
+ * file (a 4-byte big-endian macaroon length, then such a macaroon), whatever the file's name.
+ */
+function rawCredentialFile(bytes: Buffer): boolean {
+  const macaroonAt = (offset: number) => RAW_MACAROON_HEADERS.some(header =>
+    bytes.length >= offset + header.length && bytes.subarray(offset, offset + header.length).equals(header));
+  if (macaroonAt(0)) return true;
+  return bytes.length >= 4 && bytes[0] === 0 && 4 + bytes.readUInt32BE(0) <= bytes.length && macaroonAt(4);
+}
+
 function fileCredential(bytes: Buffer): Buffer | null {
   if (bytes[0] === 0x02) return bytes;
   let text: string;
@@ -810,7 +924,12 @@ function scanBytes(safePath: string, bytes: Buffer, macaroonFile: boolean, now: 
   }
   if (bytes.length > TEXT_LIMIT) return { skip: 'size' };
   if (!(bytes[0] === 0xff && bytes[1] === 0xfe) &&
-    !(bytes[0] === 0xfe && bytes[1] === 0xff) && bytes.subarray(0, 8192).includes(0)) return { skip: 'binary' };
+    !(bytes[0] === 0xfe && bytes[1] === 0xff) && bytes.subarray(0, 8192).includes(0)) {
+    // A raw macaroon or token store file under another name (admin.macaroon.bak, a renamed
+    // copy, a git blob) is read like a credential file rather than skipped as binary.
+    if (bytes.length <= MACAROON_LIMIT && rawCredentialFile(bytes)) return scanBytes(safePath, bytes, true, now, ctx, name);
+    return { skip: 'binary' };
+  }
   const text = decodeText(bytes);
   const outcome = scanText(safePath, text, now, ctx);
   for (const finding of runeFindings(text, now, ctx)) outcome.findings.push({ ...finding, path: safePath });
@@ -923,6 +1042,8 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
     }
   }
   const explicitIgnore = opts.ignoreFile === undefined ? null : await readIgnoreFile(opts.ignoreFile, false);
+  // Glob matching work for the whole scan (every path argument), see IGNORE_MATCH_WORK_LIMIT.
+  const ignoreBudget = { remaining: IGNORE_MATCH_WORK_LIMIT };
   const skip = (path: string, reason: string) => {
     const safePath = redactPath(reportedPath(path));
     if (!skippedPaths.has(safePath)) {
@@ -935,9 +1056,9 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
   // are committed strictly in walk order, which keeps every observable result
   // (dedupe winner, skip reasons, counters) identical to a sequential walk.
   type FileEvent =
-    | { type: 'skip'; path: string; reason: string; identity?: string }
+    | { type: 'skip'; path: string; reason: string; identity?: string; analysis?: string }
     | { type: 'dup'; path: string; identity: string }
-    | { type: 'file'; path: string; identity: string; findings: ScanFinding[]; dropped: number; droppedKey?: string }
+    | { type: 'file'; path: string; identity: string; findings: ScanFinding[]; dropped: number; droppedKey?: string; analysis?: string }
     | { type: 'error'; error: unknown };
 
   // The parent directory of a walked file: its resolved path and the identity the walk saw.
@@ -960,6 +1081,9 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
    */
   async function scanFileTask(path: string, sourceStat: FileStat, explicit: boolean, parent?: Parent): Promise<FileEvent> {
     let identity: string | undefined;
+    // Set while this task owns the shared analysis of its file (see analyses).
+    let settleAnalysis: ((value: Analysis | null) => void) | undefined;
+    let key = '';
     try {
       let target: string;
       if (parent === undefined) {
@@ -974,10 +1098,12 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
         }
         if (!await unchanged(parent)) throw new InputError('input-read');
       }
-      const macaroonFile = isCredentialFileName(basename(path));
+      // An explicit argument may be a link: the name it resolves to also counts.
+      const macaroonFile = isCredentialFileName(basename(path)) || (parent === undefined && isCredentialFileName(basename(target)));
       if (!macaroonFile && BigInt(sourceStat.size) > BigInt(TEXT_LIMIT)) return { type: 'skip', path, reason: 'size' };
       let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
-      let bytes: Buffer;
+      let bytes: Buffer | undefined;
+      let analysis: Promise<Analysis | null> | undefined;
       try {
         handle = await io.open(target, SCAN_OPEN_FLAGS);
         const openedStat = await handle.stat({ bigint: true });
@@ -995,32 +1121,92 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
           throw new InputError('input-read');
         identity = fileIdentity(openedStat, target);
         if (scannedFiles.has(identity)) return { type: 'dup', path, identity };
-        bytes = await readBounded(handle, macaroonFile ? MACAROON_LIMIT : TEXT_LIMIT, openedStat.size);
+        if (overLimit) throw new FindingsLimitError();
+        // Another name of this file (a hard link) is being read and analysed: its result is shared.
+        key = analysisKey(identity, macaroonFile, basename(path));
+        analysis = analyses.get(key);
+        if (!analysis) {
+          analysis = new Promise(resolve => { settleAnalysis = resolve; });
+          analyses.set(key, analysis);
+          bytes = await readBounded(handle, macaroonFile ? MACAROON_LIMIT : TEXT_LIMIT, openedStat.size);
+        }
+      } catch (error) {
+        if (settleAnalysis) { analyses.delete(key); settleAnalysis(null); }
+        throw error;
       } finally {
         if (handle) await handle.close();
       }
-      // An exception from analysing bytes that were read is a bug, not an unreadable file: it must
-      // stop the scan (exit 8) rather than look like a clean scan of a skipped file.
-      let outcome: ReturnType<typeof scanBytes>;
-      try { outcome = scanBytes('', bytes, macaroonFile, now, ctx, basename(path)); }
-      catch (failure) { throw new ScanAnalysisFailure(failure); }
-      if ('skip' in outcome) return { type: 'skip', path, reason: outcome.skip, identity };
-      if (outcome.findings.length) {
-        const safePath = redactPath(reportedPath(path));
-        for (const finding of outcome.findings) finding.path = safePath;
+      let result: Analysis;
+      if (bytes === undefined) {
+        const shared = await analysis;
+        // The other name's read failed: this one fails the same way.
+        if (shared === null) throw new InputError('input-read');
+        result = shared;
+      } else {
+        try {
+          // Another file's findings may have reached the limit while this one was read.
+          if (overLimit) throw new FindingsLimitError();
+          // An exception from analysing bytes that were read is a bug, not an unreadable file: it must
+          // stop the scan (exit 8) rather than look like a clean scan of a skipped file.
+          let outcome: ReturnType<typeof scanBytes>;
+          try { outcome = scanBytes('', bytes, macaroonFile, now, ctx, basename(path)); }
+          catch (failure) { throw new ScanAnalysisFailure(failure); }
+          result = { outcome, ...(!('skip' in outcome) && outcome.dropped ? { droppedKey: droppedContentKey(bytes) } : {}) };
+        } catch (error) {
+          analyses.delete(key);
+          settleAnalysis!(null);
+          throw error;
+        }
+        settleAnalysis!(result);
       }
-      return { type: 'file', path, identity, findings: outcome.findings, dropped: outcome.dropped,
-        ...(outcome.dropped ? { droppedKey: droppedContentKey(bytes) } : {}) };
+      const { outcome } = result;
+      if ('skip' in outcome) return { type: 'skip', path, reason: outcome.skip, identity, analysis: key };
+      reserve(identity, outcome.findings.length);
+      // The reported path is set when the event is committed: findings may be shared by several names.
+      return { type: 'file', path, identity, findings: outcome.findings, dropped: outcome.dropped, analysis: key,
+        ...(result.droppedKey !== undefined ? { droppedKey: result.droppedKey } : {}) };
     } catch (error) {
-      if (error instanceof Cancelled || error instanceof ScanAnalysisFailure) throw error;
+      // A failure before the analysis was shared (closing the file) fails the names waiting for it too.
+      if (settleAnalysis) { analyses.delete(key); settleAnalysis(null); }
+      if (error instanceof Cancelled || error instanceof ScanAnalysisFailure || error instanceof FindingsLimitError) throw error;
       if (explicit) return { type: 'error', error: new InputError('input-read', 'cannot read scan path') };
       return { type: 'skip', path, reason: 'unreadable', identity };
     }
   }
 
+  // In-flight analyses by file identity, read-as-credential rule and MCP name class: a hard link
+  // reached while its file is still being read or analysed waits for that one result instead of
+  // reading and analysing the file again (memory stays one file's findings, not one per name).
+  // An entry is removed once that file's event is committed or its read fails.
+  type Analysis = { outcome: BytesOutcome; droppedKey?: string };
+  const analyses = new Map<string, Promise<Analysis | null>>();
+  const analysisKey = (identity: string, macaroonFile: boolean, name: string) =>
+    `${identity}\0${macaroonFile ? 'm' : ''}\0${/\.jsonc?$/i.test(name) ? /^mcp\.json$/i.test(name) ? 'mcp' : 'json' : ''}`;
+
   function addFinding(finding: ScanFinding): void {
     if (findings.length >= FINDINGS_LIMIT) throw new FindingsLimitError();
     findings.push(finding);
+  }
+
+  // FINDINGS_LIMIT bounds the findings that exist, not only the committed ones: findings of
+  // files scanned but not yet committed (waiting for an earlier, slower file) are counted when
+  // they are created. Files with the same identity hold the same findings and only one of them
+  // is committed, so each identity is counted once. Once committed and pending findings exceed
+  // the limit the outcome is certain: no further file is read or analysed, and the scan stops.
+  const pendingFindings = new Map<string, number>();
+  let pendingCount = 0;
+  let overLimit = false;
+  function reserve(identity: string, count: number): void {
+    if (count === 0 || scannedFiles.has(identity) || pendingFindings.has(identity)) return;
+    pendingFindings.set(identity, count);
+    pendingCount += count;
+    if (findings.length + pendingCount > FINDINGS_LIMIT) overLimit = true;
+  }
+  function release(identity: string): void {
+    const count = pendingFindings.get(identity);
+    if (count === undefined) return;
+    pendingFindings.delete(identity);
+    pendingCount -= count;
   }
 
   // Another name of a file already scanned under the same path argument (a hard link) is
@@ -1043,7 +1229,13 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
     if (event.type === 'error') throw event.error;
     if (event.type === 'dup') { alias(event.identity, event.path); return; }
     if (event.identity !== undefined && scannedFiles.has(event.identity)) { alias(event.identity, event.path); return; }
+    if (event.analysis !== undefined) analyses.delete(event.analysis);
     if (event.type === 'skip') { skip(event.path, event.reason); return; }
+    release(event.identity);
+    if (event.findings.length) {
+      const safePath = redactPath(reportedPath(event.path));
+      for (const finding of event.findings) finding.path = safePath;
+    }
     for (const finding of event.findings) addFinding(finding);
     dropped += event.dropped;
     if (event.droppedKey !== undefined) walkDropped.add(`${redactPath(reportedPath(event.path))}\0${event.droppedKey}`);
@@ -1061,6 +1253,7 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
   let wake: (() => void) | undefined;
   const signal = () => { const resume = wake; wake = undefined; resume?.(); };
   function drainReady(): void {
+    if (overLimit) throw new FindingsLimitError();
     while (ready.has(committed)) {
       const event = ready.get(committed)!;
       ready.delete(committed);
@@ -1141,7 +1334,8 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
       }
       if (isProtectedPath(target)) { await note(path, 'never-open'); return; }
       if (isSystemDirectoryPath(target)) { await note(path, 'excluded-dir'); return; }
-      if (!opts.includeDirs && namedAs(basename(path), EXCLUDED_DIRS)) {
+      // A path argument is scanned whatever its name: only directories met in the walk are excluded.
+      if (!isRoot && !opts.includeDirs && namedAs(basename(path), EXCLUDED_DIRS)) {
         await note(path, 'excluded-dir'); return;
       }
       let names: string[];
@@ -1186,7 +1380,8 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
     }
   }
 
-  const git = 'git';
+  // git as an absolute path from absolute PATH entries, found once (never from the scanned tree).
+  let gitProgram: Promise<string> | undefined;
   let blobsScanned = 0;
   let shallowHistory = false;
   // Only with several path arguments can a later history scan meet the same blob again;
@@ -1198,9 +1393,17 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
   const SIZE_SKIP: BytesOutcome = { skip: 'size' };
   async function scanHistory(arg: string, stat: FileStat): Promise<void> {
     const directory = stat.isDirectory() ? arg : dirname(arg);
-    const pathspec = stat.isDirectory() ? [] : [basename(arg)];
     // Validate every location git would read before any git process starts.
     const repository = await locateRepository(directory);
+    const git = await (gitProgram ??= resolveGit());
+    // A file argument restricts history to that file under the name as stored on disk: on a
+    // case-insensitive file system the argument's spelling may differ from the committed name,
+    // and pathspecs are literal and exact. Its history is still reported under the argument.
+    let pathspec: string[] = [];
+    if (!stat.isDirectory()) {
+      const stored = relative(await io.realpath(directory), await io.realpath(arg));
+      pathspec = [stored.toLowerCase() === basename(arg).toLowerCase() ? stored : basename(arg)];
+    }
     await assertWorkTree(git, directory, repository);
     if (await isShallowRepository(git, directory, repository)) {
       if (!opts.allowShallow) throw new GitHistoryError('git history is shallow, so older commits cannot be scanned; '
@@ -1218,7 +1421,16 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
     // de-duplicated by path anyway; this only avoids repeating the work).
     const CLASSIFIED = 1, MACAROON = 2, EXCLUDED = 4, MODE_SKIPPED = 8, OUTCOME_SKIPPED = 16;
     const pathState = new Uint8Array(table.paths.length);
-    const joined = (index: number) => join(directory, table.paths[index]);
+    // A committed name may hold '.', '..' or empty components (and on Windows '\' or ':'), which
+    // join would normalise into another path, possibly outside the argument: such a path is
+    // reported as committed, below the argument, and classified by those same components.
+    const windowsNames = sep === '\\';
+    const literal = (relativePath: string) => relativePath.split('/')
+      .some(part => part === '' || part === '.' || part === '..' || (windowsNames && /[\\:]/.test(part)));
+    const under = (relativePath: string) => literal(relativePath)
+      ? `${directory.replace(windowsNames ? /[\\/]+$/ : /\/+$/, '')}${sep}${relativePath}` : join(directory, relativePath);
+    const joined = (index: number) => !stat.isDirectory() && table.paths[index] === pathspec[0]
+      ? join(directory, basename(arg)) : under(table.paths[index]);
     const usage = new Uint8Array(table.blobs.length); // bit 1: as text, bit 2: as *.macaroon
     const wanted = new Uint32Array(table.length);
     let wantedCount = 0;
@@ -1228,12 +1440,12 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
       if (!(pathState[p] & CLASSIFIED)) {
         pathState[p] |= CLASSIFIED;
         const relativePath = table.paths[p];
-        const parents = relativePath.split('/').slice(0, -1);
+        const parents = relativePath.split(windowsNames ? /[\\/]/ : '/').slice(0, -1);
         // Same comparison as the file walk, so history and work tree agree.
         const excluded = parents.findIndex(segment => namedAs(segment, EXCLUDED_DIRS));
         if (isProtectedPath(joined(p))) { skip(joined(p), 'never-open'); pathState[p] |= EXCLUDED; }
         else if (!opts.includeDirs && excluded !== -1) {
-          skip(join(directory, ...parents.slice(0, excluded + 1)), 'excluded-dir'); pathState[p] |= EXCLUDED;
+          skip(under(parents.slice(0, excluded + 1).join('/')), 'excluded-dir'); pathState[p] |= EXCLUDED;
         } else if (isCredentialFileName(basename(relativePath))) pathState[p] |= MACAROON;
       }
       if (pathState[p] & EXCLUDED) continue;
@@ -1427,24 +1639,20 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
     await settle();
     if (opts.gitHistory) await scanHistory(arg, stat);
     if (entries.length) {
-      const byFingerprint = new Map<string, IgnoreEntry[]>();
-      for (const entry of entries) {
-        const list = byFingerprint.get(entry.fingerprint);
-        if (list) list.push(entry); else byFingerprint.set(entry.fingerprint, [entry]);
-      }
+      const isIgnored = ignoreDecider(entries, ignoreBudget);
+      const listed = new Set(entries.map(entry => entry.fingerprint));
       // Findings in one file share a path, so each (fingerprint, path) is matched once.
       const decided = new Map<string, boolean>();
       let kept = firstFinding;
       for (let i = firstFinding; i < findings.length; i++) {
         const finding = findings[i];
-        const candidates = byFingerprint.get(finding.fingerprint);
         let drop = false;
-        if (candidates) {
+        if (listed.has(finding.fingerprint)) {
           const ignoredAt = (path: string): boolean => {
             const matchPath = explicitIgnore === null ? relative(arg, path).split(sep).join('/') : path;
             const key = `${finding.fingerprint}\0${matchPath}`;
             const known = decided.get(key);
-            const result = known ?? candidates.some(entry => entry.matches(matchPath));
+            const result = known ?? isIgnored(finding.fingerprint, matchPath);
             if (known === undefined) decided.set(key, result);
             return result;
           };

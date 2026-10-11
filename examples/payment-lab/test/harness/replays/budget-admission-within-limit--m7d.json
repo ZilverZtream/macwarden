@@ -1,0 +1,73 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "budget-admission-within-limit",
+  "rule": "Admission follows bigint arithmetic (admitted iff principal + fee allowance <= limit - committed, where committed is computed from the payments themselves: amount + fee limit for each unresolved budgeted payment, value + fee for each succeeded one), never throws on large sums, budgetStatus equals the exact sums of the reservations, and both the reservations and the payments stay within the limit unless LND reported success after a recorded failure or a budget-overrun event records the excess.",
+  "message": "budgetStatus(B) reports held 4611686018427388928, consumed 0, available 4611686018427386879; exact sums are 4611686018427388904, 0, 4611686018427386903",
+  "seed": 1,
+  "case": 2,
+  "config": {
+    "scale": "huge",
+    "budget": true,
+    "limit": "9223372036854775807"
+  },
+  "failingStep": 0,
+  "originalSteps": 24,
+  "events": [
+    {
+      "t": "intent",
+      "p": "p1",
+      "op": 0,
+      "inv": 1
+    }
+  ],
+  "states": {
+    "after": {
+      "payments": {
+        "op0/i1": {
+          "op": "op0",
+          "state": "intent",
+          "subs": 0,
+          "amount": "4611686018427387904",
+          "feeLimit": "1000"
+        }
+      },
+      "operations": {
+        "op0": "open"
+      },
+      "opBudgets": {
+        "op0": "B"
+      },
+      "reservations": [
+        {
+          "id": "1",
+          "budget": "B",
+          "hash": "op0/i1",
+          "principal": "4611686018427387904",
+          "allowance": "1000",
+          "state": "held"
+        }
+      ],
+      "ledger": [],
+      "events": {
+        "op0/i1": [
+          "intent-recorded"
+        ]
+      },
+      "budgets": {
+        "B": "9223372036854775807"
+      },
+      "entries": [
+        {
+          "id": "1",
+          "event": "budget-held",
+          "hash": "op0/i1",
+          "op": "op0",
+          "amount": "4611686018427388904"
+        }
+      ],
+      "outbox": []
+    }
+  },
+  "mutant": "budget-admission-within-limit--m7d.cjs"
+}

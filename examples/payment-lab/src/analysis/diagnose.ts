@@ -54,6 +54,12 @@ export interface Diagnosis {
   findings: string[];
 }
 
+/** What diagnose reads of the payment: never its preimage or payment request (see PaymentView in payments.ts). */
+export type DiagnosedPayment = Pick<Payment, 'status' | 'failureReason' | 'htlcs'>;
+
+/** How the payment was looked for (paymentsForHash): a scan that stopped early proves nothing about a payment it did not find. */
+export interface PaymentScan { complete: boolean; scanned: number }
+
 const max0 = (value: bigint): bigint => (value > 0n ? value : 0n);
 
 function channelView(channel: Channel): ChannelView {
@@ -93,7 +99,8 @@ const FAILURE_MEANING: Record<string, string> = {
   PERMANENT_NODE_FAILURE: 'that node reported a permanent problem',
 };
 
-export async function diagnose(read: ReadApi, input: { amountMsat: bigint; destination: string; payment?: Payment }): Promise<Diagnosis> {
+export async function diagnose(read: ReadApi, input: { amountMsat: bigint; destination: string; payment?: DiagnosedPayment;
+  paymentScan?: PaymentScan }): Promise<Diagnosis> {
   const [info, wallet, channels, pendingOpen] = await Promise.all([read.getInfo(), read.walletBalance(), read.listChannels(), read.pendingOpenChannels()]);
   const views = channels.map(channelView);
   const active = views.filter(item => item.active);
@@ -139,6 +146,10 @@ export async function diagnose(read: ReadApi, input: { amountMsat: bigint; desti
     findings: [],
   };
   diagnosis.findings = findings(diagnosis, info.identityPubkey);
+  if (input.payment === undefined && input.paymentScan !== undefined && !input.paymentScan.complete) {
+    diagnosis.findings.push(`The payment was not found in the ${input.paymentScan.scanned} payment(s) read, but the scan of LND's payments stopped `
+      + 'before their end, so it may exist: its HTLC attempts are not part of this diagnosis.');
+  }
   return diagnosis;
 }
 

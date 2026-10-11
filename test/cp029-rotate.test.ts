@@ -6,6 +6,8 @@ import { render } from './helpers/render-adversarial.js';
 import { entry, otherPubkey, ownId, permissionsResponse, register, wireFixture } from './helpers/cp026-revoke-support.mjs';
 import { absent, afterFailure, failure, fault, invoke, newId, oldId, prefix, released,
   save, scratch, success, unchanged } from './helpers/cp029-rotate-support.js';
+// Each test runs the command and the leak check over the scratch tree (findLeaks); under a loaded full
+// suite that took 17-21 s against the 15 s default, so these tests get 90 s (as RECONCILE/bounds did in 1.2.1).
 
 vi.setConfig({ testTimeout: 60_000 });
 it.each(['out', 'allow-admin'])(
@@ -14,50 +16,50 @@ it.each(['out', 'allow-admin'])(
     if (kind === 'allow-admin') f.args.push('--allow-admin');
     f.deps.env.NODE_DEBUG = 'https'; const before = readFileSync(f.registry);
     failure(await invoke(f), 2, 'F1'); expect(f.calls).toEqual([]); unchanged(f, before); released(f);
-  }));
+  }), 90_000);
 it('CP-029/F1-F3 unsafe ENV https stops at F2 offline', async () => scratch(async f => {
     f.deps.env.NODE_DEBUG = 'https';
     const before = readFileSync(f.registry); failure(await invoke(f), 2, 'F2');
     expect(f.calls).toEqual([]); unchanged(f, before); released(f);
-  }));
+  }), 90_000);
 it('CP-029/F1-F3 invalid JSON registry fails at F3 without network', async () => scratch(async f => {
     writeFileSync(f.registry, '{');
     failure(await invoke(f), 3, 'F3'); expect(f.calls).toEqual([]); released(f);
-  }));
+  }), 90_000);
 it('CP-029/F1-F3 no replacement reports the exact stage command offline', async () => scratch(async f => {
     save(f, [f.old, f.other]);
     const before = readFileSync(f.registry), result = await invoke(f); failure(result, 2, 'F3');
     expect(result.error!.message).toContain('nothing staged');
     expect(result.error!.message).toContain('macwarden rotate Alice --out <file>');
     expect(f.calls).toEqual([]); unchanged(f, before); released(f);
-  }));
+  }), 90_000);
 it('CP-029/F4-F5 OWN missing write exits 4 before network', async () => scratch(async f => {
     const permissions = entry('default-admin', ownId).permissions.filter((p: string) => p !== 'macaroon:write');
     f.args[f.args.indexOf('--macaroon') + 1] = register(wireFixture('default-admin', ownId, permissions));
     const before = readFileSync(f.registry); failure(await invoke(f), 4, 'F4');
     expect(f.calls).toEqual([]); unchanged(f, before); released(f);
-  }));
+  }), 90_000);
 it.each(['own ID', 'root zero'])(
   'CP-029/F4-F5 %s cannot be finished before any network call', async kind => scratch(async f => {
     f.old.rootKeyId = kind === 'own ID' ? ownId : '0'; f.next.replaces = f.old.rootKeyId; save(f);
     const before = readFileSync(f.registry), result = await invoke(f);
     expect(result.error?.code).toBe(2); if (kind === 'own ID') expect(result.error?.step).toBe('F4');
     expect(f.calls).toEqual([]); unchanged(f, before); released(f);
-  }));
+  }), 90_000);
 it('CP-029/F4-F5 GetInfo transport error exits unchanged at F5', async () => scratch(async f => {
     f.lnd.getInfo.mockImplementationOnce(async () => { f.calls.push('GetInfo'); throw fault(); });
     const before = readFileSync(f.registry); failure(await invoke(f), 4, 'F5');
     afterFailure(f, 'GetInfo'); unchanged(f, before); released(f);
-  }));
+  }), 90_000);
 it('CP-029/F4-F5 pubkey mismatch stops after GetInfo without mutation', async () => scratch(async f => {
   f.lnd.getInfo.mockImplementationOnce(async () => { f.calls.push('GetInfo'); return { pubkey: otherPubkey, alias: 'fixture', version: '0.21.4-beta', network: 'regtest' }; });
   failure(await invoke(f), 2, 'F5'); expect(f.calls).toEqual(['GetInfo']); released(f);
-}));
+}), 90_000);
 it('CP-029/F6 list transport failure stops with unchanged registry', async () => scratch(async f => {
     f.lnd.listMacaroonIds.mockImplementationOnce(async () => { f.calls.push('ListMacaroonIDs'); throw fault(); });
     const before = readFileSync(f.registry); failure(await invoke(f), 4, 'F6');
     afterFailure(f, 'ListMacaroonIDs'); unchanged(f, before); expect(f.lnd.deleteMacaroonId).not.toHaveBeenCalled(); released(f);
-  }));
+  }), 90_000);
 it('CP-029/F6 missing replacement with old present gives numeric cleanup before proof', async () => scratch(async f => {
     absent(f, newId);
     const before = readFileSync(f.registry), result = await invoke(f); failure(result, 5, 'F6');
@@ -65,7 +67,7 @@ it('CP-029/F6 missing replacement with old present gives numeric cleanup before 
     expect(result.error!.message).toContain(`macwarden revoke ${newId}`);
     expect(f.lnd.checkMacaroon).not.toHaveBeenCalled(); expect(f.lnd.deleteMacaroonId).not.toHaveBeenCalled();
     unchanged(f, before); released(f);
-  }));
+  }), 90_000);
 it.each(['dry-run', 'declined', 'yes'])(
   'CP-029/F6 absent old %s proves replacement before repair and never deletes twice', async kind => scratch(async f => {
     absent(f); const before = readFileSync(f.registry);
@@ -81,7 +83,7 @@ it.each(['dry-run', 'declined', 'yes'])(
     } else if (kind === 'declined') { failure(result, 6, 'F8'); unchanged(f, before); }
     else success(f, result, 'by-id-only', true);
     released(f);
-  }));
+  }), 90_000);
 it.each(['missing file', 'fingerprint mismatch', 'rejected'])(
   'CP-029/F6 absent old with %s replacement cannot plan confirm or complete repair', async kind => scratch(async f => {
     absent(f);
@@ -94,7 +96,7 @@ it.each(['missing file', 'fingerprint mismatch', 'rejected'])(
     failure(await invoke(f, []), kind === 'rejected' ? 5 : 3, 'F7');
     expect(f.prompt).not.toHaveBeenCalled(); expect(f.deps.fs.rename).not.toHaveBeenCalled();
     expect(f.lnd.deleteMacaroonId).not.toHaveBeenCalled(); unchanged(f, before); released(f);
-  }));
+  }), 90_000);
 
 it('CP-029/F7 rejected replacement refuses before deletion with nothing changed', async () => scratch(async f => {
     f.lnd.checkMacaroon.mockImplementationOnce(async () => {
@@ -106,7 +108,7 @@ it('CP-029/F7 rejected replacement refuses before deletion with nothing changed'
     expect(result.error!.message).toContain('new credential is not accepted; nothing changed');
     expect(f.lnd.deleteMacaroonId).not.toHaveBeenCalled(); expect(f.prompt).not.toHaveBeenCalled();
     expect(f.ids).toContain(oldId); unchanged(f, before); released(f);
-  }));
+  }), 90_000);
 it('CP-029/F8 dry-run shows the complete plan without locking prompting or mutating', async () => scratch(async f => {
   const { bytes: lockBytes } = await liveProductLock(f.registry);
   const lock = lockBytes.toString('utf8');
@@ -120,7 +122,7 @@ it('CP-029/F8 dry-run shows the complete plan without locking prompting or mutat
   expect(f.prompt).not.toHaveBeenCalled(); expect(f.deps.fs.rename).not.toHaveBeenCalled();
   expect(f.lnd.deleteMacaroonId).not.toHaveBeenCalled(); expect(f.ids).toEqual(ids); unchanged(f, before);
   expect(readFileSync(`${f.registry}.lock`, 'utf8')).toBe(lock);
-}));
+}), 90_000);
 it.each(['EOF', 'non-TTY'])(
   'CP-029/F8 %s declines without lock or mutation', async kind => scratch(async f => {
     f.prompt.mockResolvedValueOnce(kind === 'EOF' ? null : 'wrong');
@@ -130,7 +132,7 @@ it.each(['EOF', 'non-TTY'])(
     if (kind !== 'non-TTY') expect(f.prompt.mock.calls[0][0]).toBe(
       `Finishing revokes root key ID ${oldId}. Continue only if every replica and config copy of Alice now uses ${f.next.outPath}. Type Alice to continue:`);
     expect(f.lnd.deleteMacaroonId).not.toHaveBeenCalled(); unchanged(f, before); released(f);
-  }));
+  }), 90_000);
 it('CP-029/F8 typed confirmation waits with an unlocked registry after displaying the full plan', async () => scratch(async f => {
   let resume: (value: string) => void;
   let ready: () => void;
@@ -150,7 +152,7 @@ it('CP-029/F8 typed confirmation waits with an unlocked registry after displayin
   expect(f.calls.indexOf(`Check:${newId}`)).toBeLessThan(deletion);
   expect(f.calls.indexOf(`Check:${oldId}`)).toBeLessThan(deletion);
   expect(f.calls.filter(call => call === `Check:${oldId}`)).toHaveLength(2);
-}));
+}), 90_000);
 
 it('CP-029/F9-F10 present old refuses held live lock and preserves its owner', async () => scratch(async f => {
     const { bytes: lockBytes, owner } = await liveProductLock(f.registry);
@@ -160,7 +162,7 @@ it('CP-029/F9-F10 present old refuses held live lock and preserves its owner', a
     for (const value of [String(owner.pid), owner.hostname, owner.startedAt]) expect(result.error!.message).toContain(value);
     expect(readFileSync(`${f.registry}.lock`, 'utf8')).toBe(lock);
     expect(f.lnd.deleteMacaroonId).not.toHaveBeenCalled(); unchanged(f, before);
-  }));
+  }), 90_000);
 it('CP-029/F9-F10 new permissions during confirmation refuses after lock and preserves concurrent registry', async () => scratch(async f => {
     let changed: Buffer;
     f.prompt.mockImplementation(async () => {
@@ -172,7 +174,7 @@ it('CP-029/F9-F10 new permissions during confirmation refuses after lock and pre
     });
     failure(await invoke(f, []), 3, 'F9'); expect(f.lnd.deleteMacaroonId).not.toHaveBeenCalled();
     unchanged(f, changed!); released(f);
-  }));
+  }), 90_000);
 for (const outcome of ['present', 'absent', 'unknown']) {
   it(
     `CP-029/F9-F10 failed delete with old ${outcome} reconciles once and never retries mutation`, async () => scratch(async f => {
@@ -196,7 +198,7 @@ for (const outcome of ['present', 'absent', 'unknown']) {
         if (outcome === 'unknown') expect(result.error!.message).toContain('macwarden inventory');
         unchanged(f, before); released(f);
       }
-    }));
+    }), 90_000);
 }
 
 it.each(['old other rejection', 'new rejected'])(
@@ -213,7 +215,7 @@ it.each(['old other rejection', 'new rejected'])(
     const before = readFileSync(f.registry), result = await invoke(f); failure(result, 7, 'F11');
     expect(result.error!.message).toMatch(/present|absent|unknown/i); expect(result.error!.message).toContain('macwarden inventory');
     expect(f.lnd.deleteMacaroonId).toHaveBeenCalledTimes(1); unchanged(f, before); released(f);
-  }));
+  }), 90_000);
 it('CP-029/F11-F12 normal finish save failure reports exact repair and rerun proves new without deleting', async () => scratch(async f => {
     f.state.registryFails = true;
     const before = readFileSync(f.registry), result = await invoke(f); failure(result, 7, 'F12');
@@ -223,7 +225,7 @@ it('CP-029/F11-F12 normal finish save failure reports exact repair and rerun pro
     success(f, await invoke(f), 'by-id-only', true);
     expect(f.calls).toEqual([...prefix, `Check:${newId}`, 'ListMacaroonIDs', `Check:${newId}`]);
     expect(f.lnd.deleteMacaroonId).not.toHaveBeenCalled();
-  }));
+  }), 90_000);
 
 it('CP-029/abandon numeric revoke of staged ID preserves old authority and removes pending inventory', async () => scratch(async f => {
   const result = await invoke(f, ['--yes'], 'revoke', newId); expect(result.error).toBeNull();
@@ -236,7 +238,7 @@ it('CP-029/abandon numeric revoke of staged ID preserves old authority and remov
   expect(output.error, output.error?.message).toBeNull(); expect(render(output, 'text')).not.toContain('pending-replacement');
   expect(render(output, 'text')).not.toMatch(/\[replacement\]|flags:.*replacement/);
   released(f);
-}));
+}), 90_000);
 it('CP-029/dry-runs finish preserves IDs registry and both credential files', async () => scratch(async f => {
   const before = readFileSync(f.registry), old = readFileSync(f.oldPath), next = readFileSync(f.next.outPath), ids = [...f.ids];
   const result = await invoke(f, ['--dry-run']); expect(result.error).toBeNull();
@@ -246,4 +248,4 @@ it('CP-029/dry-runs finish preserves IDs registry and both credential files', as
   for (const [path, flags] of vi.mocked(f.deps.fs.open).mock.calls)
     if (path === f.oldPath || path === f.next.outPath) expect(String(flags)).not.toMatch(/[wax+]/);
   // The completed stage/finish dry-run sequence is independently covered by the live reference test.
-}));
+}), 90_000);

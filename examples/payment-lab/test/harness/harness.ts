@@ -236,6 +236,11 @@ export class Run {
   #record(state: ProcState, side: 'payer' | 'receiver', method: string, args: unknown[], work: () => unknown): unknown {
     const workflow = this.#delivering?.workflow ?? this.#als.getStore();
     const submission = side === 'payer' ? (this.#delivering ?? workflow?.lastCall)?.submission : undefined;
+    const armed = this.#preempt;
+    if (armed !== undefined && armed.proc === state.name && armed.method === method) {
+      this.#preempt = undefined;
+      this.#preemptNow(armed);
+    }
     const before = side === 'payer' ? this.oracle.payerSnap() : this.oracle.receiverSnap();
     let result: unknown;
     let error: unknown;
@@ -252,6 +257,27 @@ export class Run {
       throw error;
     }
     return result;
+  }
+
+  /**
+   * A preempt (LABHARNESS-07): two processes run concurrently, so between a workflow's read of a record and its next
+   * store call the other process may commit. The harness is single-threaded and runs a workflow's synchronous code
+   * without a break, so a preempt event arms this: right before process `proc` next calls store method `method`, the
+   * other process's queued stream message at `pick` (send, track or sub streams, in call order) is delivered, and its
+   * store writes commit first. Nothing happens if no message is queued then.
+   */
+  #preempt: { proc: Proc; method: string; pick: number } | undefined;
+
+  #preemptNow(armed: { proc: Proc; method: string; pick: number }): void {
+    const other: Proc = armed.proc === 'p0' ? 'p1' : 'p0';
+    const queued = this.lnd.calls.filter(call => call.proc === other && call.open && call.queue.length > 0
+      && (call.kind === 'send' || call.kind === 'track' || call.kind === 'sub'));
+    const call = queued.length === 0 ? undefined : queued[Math.min(queued.length - 1, Math.floor(armed.pick * queued.length))];
+    this.counts[`preempt ${call === undefined ? '(nothing queued)' : 'delivered'}`] = (this.counts[`preempt ${call === undefined ? '(nothing queued)' : 'delivered'}`] ?? 0) + 1;
+    if (call === undefined) return;
+    const outer = this.#delivering;
+    this.#delivering = call;
+    try { this.lnd.deliver(call); } finally { this.#delivering = outer; }
   }
 
   /** Payment streams speak for a submission: a send for its claim, a track opened by submit for that claim, a reconcile's track for the record's current one. */
@@ -422,6 +448,21 @@ export class Run {
         }
         return true;
       }
+      case 'sub.end': {
+        const call = pick(this.calls('sub'));
+        if (call === undefined || !this.lnd.endSub(call, String(event.mode))) return false;
+        // A listener whose subscription ended (LND restarted, a proxy dropped it) waits out a backoff before subscribing
+        // again from its cursor; the harness has no clock, so it lets the listener see the end and then stops it. A later
+        // listen event subscribes again from the cursor, as the reconnect would.
+        if (call.workflow?.kind === 'listen') {
+          await this.drain();
+          call.workflow.controller?.abort();
+        }
+        return true;
+      }
+      case 'preempt':
+        this.#preempt = { proc, method: String(event.method), pick: Number(event.pick ?? 0) };
+        return true;
       case 'lnd.payment': {
         const hash = pick(this.inFlightPayments());
         return hash !== undefined && this.lnd.paymentEvent(hash, event.what as 'attempt' | 'attempt-fail' | 'fail' | 'succeed', event.amount as AmountVariant | undefined);
@@ -442,8 +483,9 @@ export class Run {
       }
       case 'invoice': {
         if (event.what === 'foreign') { this.lnd.foreignInvoice(); return true; }
-        const what = event.what as 'pay' | 'htlc-timeout' | 'expire' | 'misreport' | 'resettle';
-        const hash = pick(this.invoicesIn(what === 'htlc-timeout' ? ['ACCEPTED'] : what === 'misreport' ? ['OPEN', 'ACCEPTED'] : what === 'resettle' ? ['SETTLED'] : ['OPEN']));
+        const what = event.what as 'pay' | 'htlc-timeout' | 'expire' | 'misreport' | 'resettle' | 'delete';
+        const hash = pick(this.invoicesIn(what === 'htlc-timeout' ? ['ACCEPTED'] : what === 'misreport' ? ['OPEN', 'ACCEPTED'] : what === 'resettle' ? ['SETTLED']
+          : what === 'delete' ? ['CANCELED'] : ['OPEN']));
         return hash !== undefined && this.lnd.invoiceEvent(hash, what, event.amount as AmountVariant | undefined);
       }
       case 'settle':
@@ -460,7 +502,8 @@ export class Run {
           return true;
         }
         const workflow = this.#start(proc, 'rreconcile', order ?? 'all', signal => this.lab.reconcileInvoices(state.receiverDeps, order, signal),
-          result => this.oracle.reconcileDone(targets, result as { resolved: number; open: number; unknown: number }, undefined, this.#answers(workflow)));
+          result => this.oracle.reconcileDone(targets, result as { resolved: number; open: number; unknown: number }, undefined, this.#answers(workflow),
+            workflow.controller?.signal.aborted === true));
         return true;
       }
       case 'listen':
@@ -493,12 +536,18 @@ export class Run {
     }
   }
 
-  /** The lookup answers a reconcile workflow received, per invoice (see Oracle.reconcileDone). */
+  /**
+   * The lookup answers a reconcile workflow received, per invoice (see Oracle.reconcileDone): an invoice state or
+   * not-found, 'no-answer' for a lookup that ended without one, and 'cancel-failed' for a CancelInvoice that failed.
+   */
   #answers(workflow: Workflow): Map<string, Set<string>> {
     const answers = new Map<string, Set<string>>();
+    const add = (hash: string, seen: string): void => { answers.set(hash, (answers.get(hash) ?? new Set()).add(seen)); };
     for (const call of this.lnd.calls) {
-      if (call.kind !== 'lookup' || call.workflow !== workflow || call.answered === undefined) continue;
-      answers.set(call.hash, (answers.get(call.hash) ?? new Set()).add(call.answered));
+      if (call.workflow !== workflow) continue;
+      if (call.kind === 'lookup' && call.answered !== undefined) add(call.hash, call.answered);
+      else if (call.kind === 'lookup' && call.outcome === 'error') add(call.hash, 'no-answer');
+      else if (call.kind === 'cancel' && call.outcome === 'error') add(call.hash, 'cancel-failed');
     }
     return answers;
   }
@@ -586,6 +635,21 @@ export class Run {
     await this.kill('p1');
     (this.procs.p0.receiver.db as { exec(sql: string): void }).exec(`UPDATE invoices SET created_at = strftime('%Y-%m-%dT%H:%M:%fZ', created_at, '-180 seconds')`);
     this.#autoAnswer = true;
+    // The subscription catches up from the cursor (LND replays every settlement after a non-zero settle index), so the
+    // oracle can require at the end that every settlement LND made is recorded (Oracle.quiescent, LABHARNESS-05).
+    const catchUp = this.oracle.receiverSnap().cursor.settle;
+    const listener = this.#start('p0', 'listen', 'catch-up', signal => this.lab.listen(this.procs.p0.receiverDeps, { reconcileIntervalMs: 2 ** 31 - 1, signal }));
+    await this.drain();
+    for (let round = 0; round < MAX_CATCH_UP_ROUNDS && this.queued('sub').length > 0; round += 1) {
+      for (const call of this.queued('sub')) {
+        this.#delivering = call;
+        try { this.lnd.deliver(call); } finally { this.#delivering = undefined; }
+      }
+      await this.drain();
+    }
+    listener.controller?.abort();
+    await this.drain();
+    await this.oracle.afterStep();
     for (let pass = 0; pass < 2; pass += 1) {
       const targets = this.oracle.reconcileTargets(undefined);
       const workflow = this.#start('p0', 'rreconcile', 'quiescence', signal => this.lab.reconcileInvoices(this.procs.p0.receiverDeps, undefined, signal),
@@ -593,7 +657,7 @@ export class Run {
       await this.drain();
       await this.oracle.afterStep();
     }
-    this.oracle.quiescent();
+    this.oracle.quiescent(catchUp);
     if (this.lab.outbox !== undefined) {
       // The worker runs until every row is done: past any backoff (at most 5 minutes) and any lease.
       this.#clockMs += 10 * 60_000;
@@ -1049,6 +1113,17 @@ export class Run {
     if (!this.#listening(p)) options.push([0.6, () => ({ t: 'listen', p })]);
     const subQueued = this.queued('sub');
     if (subQueued.length > 0) options.push([4, () => ({ t: 'sub.deliver', pick: at(subQueued).pick })]);
+    // A subscription that ends while its process lives (LND restarted, a proxy dropped it): the listener subscribes again later.
+    const subs = this.calls('sub');
+    if (subs.length > 0) options.push([0.4, () => ({ t: 'sub.end', pick: at(subs).pick, mode: rng.chance(0.5) ? 'eof' : 'transport' })]);
+    // LND deletes a canceled invoice (its lookups answer NotFound from then on).
+    const canceledInLnd = this.invoicesIn(['CANCELED']);
+    if (canceledInLnd.length > 0) options.push([0.4, () => ({ t: 'invoice', what: 'delete', pick: at(canceledInLnd).pick })]);
+    // The other process commits between a workflow's read and its store call (LABHARNESS-07).
+    const otherStreams = this.lnd.calls.filter(call => call.proc !== p && call.open && (call.kind === 'send' || call.kind === 'track' || call.kind === 'sub'));
+    if (otherStreams.length > 0) {
+      options.push([0.8, () => ({ t: 'preempt', p, method: weighted(rng, PREEMPT_METHODS), pick: Number(rng.next().toFixed(4)) })]);
+    }
     options.push([0.3, () => ({ t: 'cursor-set', p, pick: Number(rng.next().toFixed(4)), add: Number(rng.next().toFixed(4)) })]);
     options.push([0.6, () => ({ t: 'age' })]);
     // The outbox worker, killed now and then at a point of a row.
@@ -1070,6 +1145,11 @@ type PaymentRowView = ReturnType<Oracle['payerSnap']>['payments'] extends Map<st
 const PAYER_PLAN_CHANCE = 0.08;
 const RECEIVER_PLAN_CHANCE = 0.01;
 const MAX_PLANS = 2;
+/** Delivery rounds of the end-of-case subscription catch-up (each delivers every queued message; a case has a few dozen invoices at most). */
+const MAX_CATCH_UP_ROUNDS = 100;
+/** The store methods a preempt event can precede (MUTATING, both sides), each with its weight in the generator. */
+const PREEMPT_METHODS: [string, number][] = [['markUncertain', 2], ['applyUpdate', 1.5], ['markNotInitiated', 1], ['markRejected', 1],
+  ['claimForSubmission', 0.5], ['applyInvoice', 1], ['markCreated', 0.5], ['markNotCreated', 0.5]];
 const PENDING_STATES = new Set(['intent', 'submitting', 'in_flight', 'uncertain']);
 
 /** The pick that selects `item` from `items` (an event picks its target by position). */
@@ -1157,7 +1237,7 @@ export async function runCase(options: CaseOptions): Promise<CaseResult> {
   } finally {
     await run?.dispose();
   }
-  const violation = stop in PREDICATES ? violations.find(item => item.predicate === stop) ?? violations[0] : violations[0];
+  const violation = Object.hasOwn(PREDICATES, stop) ? violations.find(item => item.predicate === stop) ?? violations[0] : violations[0];
   return { config: options.config, events, violation, violations, counts: run.counts, ms: performance.now() - began };
 }
 
@@ -1258,12 +1338,14 @@ const EVENTS: Record<string, [Record<string, FieldCheck>, Record<string, FieldCh
   create: [{ order: ORDER, hold: BOOLEAN }, { p: PROC }],
   answer: [{ kind: oneOf('create', 'lookup', 'settle', 'cancel'), mode: oneOf(...UNARY_MODES, 'stale') }, { pick: PICK }],
   'create.arrive': [{}, { pick: PICK }],
-  invoice: [{ what: oneOf('pay', 'htlc-timeout', 'expire', 'misreport', 'resettle', 'foreign') }, { pick: PICK, amount: AMOUNT }],
+  invoice: [{ what: oneOf('pay', 'htlc-timeout', 'expire', 'misreport', 'resettle', 'foreign', 'delete') }, { pick: PICK, amount: AMOUNT }],
   settle: [{ order: ORDER }, { p: PROC }],
   cancel: [{ order: ORDER }, { p: PROC }],
   rreconcile: [{}, { p: PROC, order: value => (value === null ? undefined : ORDER(value) === undefined ? undefined : `null or ${ORDER(value) ?? ''}`), cli: BOOLEAN }],
   listen: [{}, { p: PROC }],
   'sub.deliver': [{}, { pick: PICK }],
+  'sub.end': [{ mode: oneOf('transport', 'eof') }, { pick: PICK }],
+  preempt: [{ method: oneOf(...PREEMPT_METHODS.map(([method]) => method)) }, { p: PROC, pick: PICK }],
   'cursor-set': [{}, { p: PROC, pick: PICK, add: PICK }],
   age: [{}, {}],
   kill: [{}, { p: PROC }],
@@ -1278,7 +1360,7 @@ export function validateReplay(file: string, value: unknown): Replay {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) fail('not a JSON object');
   const replay = value as Replay;
   if (replay.kind !== 'macwarden-payment-lab-harness-replay' || replay.schema !== 1) fail('not a payment-lab harness replay (schema 1)');
-  if (typeof replay.predicate !== 'string' || !(replay.predicate in PREDICATES)) fail(`predicate ${JSON.stringify(replay.predicate)} is not one of the oracle's`);
+  if (typeof replay.predicate !== 'string' || !Object.hasOwn(PREDICATES, replay.predicate)) fail(`predicate ${JSON.stringify(replay.predicate)} is not one of the oracle's`);
   const config = replay.config as unknown as Record<string, unknown> | null;
   if (config === null || typeof config !== 'object' || Array.isArray(config)) fail('config is not an object');
   const configProblem = Object.keys(config as object).find(key => !['scale', 'budget', 'limit'].includes(key)) !== undefined ? 'config has a field other than scale, budget and limit'
@@ -1296,17 +1378,18 @@ export function validateReplay(file: string, value: unknown): Replay {
   replay.events.forEach((event: unknown, step: number) => {
     if (event === null || typeof event !== 'object' || Array.isArray(event)) fail('the event is not an object', step);
     const fields = event as Record<string, unknown>;
-    const spec = typeof fields.t === 'string' ? EVENTS[fields.t] : undefined;
+    // Own properties only (LABHARNESS-09): "constructor" or "toString" is not an event kind, a field or a predicate.
+    const spec = typeof fields.t === 'string' && Object.hasOwn(EVENTS, fields.t) ? EVENTS[fields.t] : undefined;
     if (spec === undefined) fail(`unknown event kind ${JSON.stringify(fields.t)}`, step);
     const [required, optional] = spec as [Record<string, FieldCheck>, Record<string, FieldCheck>];
     for (const [name, check] of Object.entries(required)) {
-      if (!(name in fields)) fail(`${String(fields.t)} needs ${name}`, step);
+      if (!Object.hasOwn(fields, name)) fail(`${String(fields.t)} needs ${name}`, step);
       const problem = check(fields[name]);
       if (problem !== undefined) fail(`${String(fields.t)}.${name} is ${JSON.stringify(fields[name])}, not ${problem}`, step);
     }
     for (const [name, item] of Object.entries(fields)) {
-      if (name === 't' || name in required) continue;
-      const check = optional[name];
+      if (name === 't' || Object.hasOwn(required, name)) continue;
+      const check = Object.hasOwn(optional, name) ? optional[name] : undefined;
       if (check === undefined) fail(`${String(fields.t)} has no field ${name}`, step);
       const problem = (check as FieldCheck)(item);
       if (problem !== undefined) fail(`${String(fields.t)}.${name} is ${JSON.stringify(item)}, not ${problem}`, step);
@@ -1470,7 +1553,7 @@ export const MUTANTS = resolve(dirname(fileURLToPath(import.meta.url)), 'mutants
 
 export function readMutant(path: string): Mutant {
   const mutant = createRequire(import.meta.url)(resolve(path)) as Mutant;
-  if (!(mutant.predicate in PREDICATES) || !Array.isArray(mutant.edits) || mutant.edits.length === 0) throw new Error(`${path} is not a harness mutant`);
+  if (typeof mutant.predicate !== 'string' || !Object.hasOwn(PREDICATES, mutant.predicate) || !Array.isArray(mutant.edits) || mutant.edits.length === 0) throw new Error(`${path} is not a harness mutant`);
   return mutant;
 }
 

@@ -24,6 +24,8 @@ export function platformVariants(platform = process.platform) {
       counterpart: 'test/watch-alert-tree.windows.test.ts', requiredCase: 'WATCH/alert-tree-windows' },
     { file: 'test/rr111-walk.linux-fs.test.ts', reason: 'Linux file names (backslash, case-sensitive) and FIFO variant',
       counterpart: 'test/rr111-walk.windows-fs.test.ts', requiredCase: 'RR-111/walk-windows' },
+    { file: 'test/redteam-file-names.posix.test.ts', reason: 'POSIX file names with a colon and bidi controls, which Windows refuses',
+      counterpart: 'test/redteam-files.test.ts', requiredCase: 'RED-TEAM/forging' },
   ];
   return [
     { file: 'test/cp023-acl.windows-fs.test.ts', reason: 'Windows ACL variant',
@@ -56,11 +58,19 @@ export function platformVariants(platform = process.platform) {
       counterpart: 'test/rr111-walk.test.ts', requiredCase: 'RR-111/walk-portable' }]),
     { file: 'test/out-private.windows-fs.test.ts', reason: 'Windows owner-only creation and output-name variant',
       counterpart: 'test/cp023-acl-principal.test.ts', requiredCase: 'RO-1/acl-verified' },
+    { file: 'test/out-registry-case.windows-fs.test.ts', reason: 'Windows case-folding file system variant (a real bake)',
+      counterpart: 'test/out-registry-collision.test.ts', requiredCase: 'OUT-REGISTRY/case-rule' },
+    { file: 'test/lnd-audit-env-case.windows-fs.test.ts', reason: 'Windows case-insensitive environment names (the built CLI)',
+      counterpart: 'test/cli-runtime.test.ts', requiredCase: 'ENV-CASE/portable' },
+    { file: 'test/githist-audit-alias.windows-fs.test.ts', reason: 'Windows 8.3 short-name alias of a protected file (git history location check)',
+      counterpart: 'test/githist-audit-location.test.ts', requiredCase: 'githist-audit/alias' },
   ];
 }
 
 /**
- * Platform-specific files that must run on this platform.
+ * Platform-specific files that must run on this platform. Every platform-suffixed test file
+ * is either here or excluded by platformVariants (test/harness/tooling-audit-platform.test.ts),
+ * and full validation fails when a file here did not run and pass (validation-support.mjs).
  * @param {NodeJS.Platform} [platform]
  * @returns {string[]}
  */
@@ -70,7 +80,11 @@ export function requiredPlatformFiles(platform = process.platform) {
       ? ['test/cp023-acl.windows-fs.test.ts', 'test/cp036-protected-streams.windows-fs.test.ts',
         'test/cp038-acl.windows-fs.test.ts', 'test/cp039-acl.windows-fs.test.ts',
         'test/cp040-acl.windows-fs.test.ts', 'test/shell-quote.windows.test.ts', 'test/watch-alert-tree.windows.test.ts',
-        'test/rr111-walk.windows-fs.test.ts', 'test/out-private.windows-fs.test.ts']
+        'test/rr111-walk.windows-fs.test.ts', 'test/out-private.windows-fs.test.ts',
+        'test/sidecar-private.windows-fs.test.ts', 'test/private-file-leftover.windows-fs.test.ts',
+        'test/out-registry-case.windows-fs.test.ts', 'test/lnd-audit-env-case.windows-fs.test.ts',
+        'test/githist-audit-alias.windows-fs.test.ts']
       : ['test/input.real-fs.test.ts', 'test/shell-quote.posix.test.ts', 'test/watch-alert-process.posix.test.ts',
+        'test/redteam-file-names.posix.test.ts',
         ...(platform === 'linux' ? ['test/cp040-modes.linux-fs.test.ts', 'test/rr111-walk.linux-fs.test.ts'] : [])])];
 }

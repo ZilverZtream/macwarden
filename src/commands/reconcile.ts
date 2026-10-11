@@ -28,6 +28,8 @@ export type Deps = {
   fs: typeof nodeFs;
   env: Record<string, string | undefined>;
   clock: () => Date;
+  /** A monotonic clock in milliseconds for the command budget (default performance.now): a system clock step never ends or extends it. */
+  monotonic?: () => number;
 };
 
 type ReconcileOutput = OutputResult & { schema: 1; exitCode?: number };
@@ -50,6 +52,12 @@ export const TRACK_LIMIT = 1_000;
 /** Most gaps and observations per payment listed in full; counts are always exact. */
 export const GAP_LIST_LIMIT = 1_000;
 export const OBSERVATION_LIST_LIMIT = 100;
+/**
+ * Journal credentials that name no credential: a call without a macaroon watch could decode. Any
+ * number of different credentials share them (audit 1.4.0: a pay credential re-encoded or padded so
+ * watch could not read it was reported as one `single` credential and the run could exit 0).
+ */
+const UNIDENTIFIED = new Set(['id:none', 'id:undecodable']);
 
 /** `<instant>` (UTC, as macwarden writes them) or `<n>(m|h|d)` before now; null when neither. */
 function timeArgument(value: string, now: number): number | null {
@@ -106,7 +114,7 @@ function settlement(payment: LndPayment, source: 'list-payments' | 'track-paymen
     inFlightMsat: payment.inFlightMsat.toString(),
     attempts: payment.attempts,
     failureReason: payment.status === 'failed' ? payment.failureReason ?? 'unknown' : null,
-    // LND's record is older than the first request watch saw for this hash (beyond clock skew):
+    // LND's record is older than the earliest request watch saw for this hash (beyond clock skew):
     // its outcome may belong to an earlier attempt, made by any credential.
     predatesObservation: firstObserved !== null && createdAt < firstObserved - CLOCK_TOLERANCE_MS,
   };
@@ -140,6 +148,7 @@ async function runSteps(args: string[], deps: Deps): Promise<ReconcileOutput> {
   if (sinceFlag !== null && sinceFlag < 0) return fail(2, 'Q1', '--since must not be before 1970-01-01T00:00:00Z');
   if (untilFlag !== null && untilFlag < 0) return fail(2, 'Q1', '--until must not be before 1970-01-01T00:00:00Z');
   if (sinceFlag !== null && untilFlag !== null && sinceFlag > untilFlag) return fail(2, 'Q1', '--since must not be after --until');
+  if (sinceFlag !== null && sinceFlag === untilFlag) return fail(2, 'Q1', 'empty window: --since must be before --until');
   const { host, cert: certPath, own: ownPath, problem: mixedSource } = connectionSettings(flag => flags.get(flag), deps.env);
   if (mixedSource) return fail(2, 'Q1', mixedSource);
   if (!host) return fail(2, 'Q1', 'missing --lnd-rest (or MACWARDEN_LND_REST)');
@@ -213,10 +222,14 @@ async function runSteps(args: string[], deps: Deps): Promise<ReconcileOutput> {
   // The default window starts at the earliest record time for this node, not the first appended
   // record: times never go back within a run, but a clock set back between runs makes a later run
   // start earlier, and its payments would fall before the first record's time.
+  // The journal's time span (journal.firstRecord, lastRecord) is the earliest and latest record time
+  // for the same reason, not the first and last line (audit 1.4.0).
   let earliestMine: number | null = null;
+  let latestMine: number | null = null;
   for (const record of mine) {
     const ms = Date.parse(record.time);
     if (earliestMine === null || ms < earliestMine) earliestMine = ms;
+    if (latestMine === null || ms > latestMine) latestMine = ms;
   }
   const until = untilFlag ?? now;
   // A default window with no width would report nothing as if nothing happened: refuse it instead.
@@ -227,6 +240,8 @@ async function runSteps(args: string[], deps: Deps): Promise<ReconcileOutput> {
     `${untilFlag === null ? 'now (the clock may be behind the journal)' : '--until'}; give --since and --until explicitly`, warnings);
   const since = sinceFlag ?? earliestMine!;
   if (since > until) return fail(2, 'Q1', '--since must not be after --until (now when --until is not given)');
+  // A window of no width proves nothing either way (audit 1.4.0: one at an uncovered instant was reported complete).
+  if (since === until) return fail(2, 'Q1', 'empty window: --since must be before --until (now when --until is not given)', warnings);
   const inWindow = (ms: number) => ms >= since && ms <= until;
   // Requests journaled after the window never establish who initiated a payment in it, nor change
   // its observations (1.2.1): a retry of an already paid invoice after --until would otherwise
@@ -256,7 +271,8 @@ async function runSteps(args: string[], deps: Deps): Promise<ReconcileOutput> {
   const listed = new Map<string, LndPayment>();
   // The listing stops at the count limit or at the budget; each is reported as itself (audit 1.2.1).
   let listLimited = false, budgetReached = false;
-  const deadline = Date.now() + RECONCILE_BUDGET_MS;
+  const monotonic = deps.monotonic ?? (() => performance.now());
+  const deadline = monotonic() + RECONCILE_BUDGET_MS;
   try {
     let offset = 0n;
     const startSeconds = Math.max(0, Math.floor((since - CLOCK_TOLERANCE_MS) / 1_000));
@@ -266,7 +282,7 @@ async function runSteps(args: string[], deps: Deps): Promise<ReconcileOutput> {
       for (const payment of page.payments) listed.set(payment.paymentHash, payment);
       if (page.payments.length < LIST_PAGE || page.lastIndexOffset <= offset) break;
       listLimited = listed.size >= LIST_LIMIT;
-      budgetReached = Date.now() > deadline;
+      budgetReached = monotonic() > deadline;
       if (listLimited || budgetReached) break;
       offset = page.lastIndexOffset;
     }
@@ -285,7 +301,10 @@ async function runSteps(args: string[], deps: Deps): Promise<ReconcileOutput> {
   const deletionsByHash = new Map<string, Set<string>>();
   const deletedAllBy = new Set<string>();
   for (const record of deletionRecords) {
-    if (record.method === '/lnrpc.Lightning/DeleteAllPayments' && record.scope !== 'none') deletedAllBy.add(record.credential);
+    // A deletion whose request was not read in full (oversized or malformed) may have deleted anything:
+    // LND skips fields it does not know, so a padded DeleteAllPayments still deletes (audit 1.4.0).
+    if ((record.method === '/lnrpc.Lightning/DeleteAllPayments' && record.scope !== 'none') || record.extraction !== 'complete')
+      deletedAllBy.add(record.credential);
     if (record.paymentHash) {
       const set = deletionsByHash.get(record.paymentHash) ?? new Set<string>();
       set.add(record.credential);
@@ -296,12 +315,23 @@ async function runSteps(args: string[], deps: Deps): Promise<ReconcileOutput> {
   let requestsCapped = false;
   const capped = (value: bigint) => { if (value > MAX_MSAT) { requestsCapped = true; return MAX_MSAT; } return value; };
   const deletedBy = (hash: string) => [...new Set([...(deletionsByHash.get(hash) ?? []), ...deletedAllBy])].sort();
-  for (const [hash, records] of [...byHash].sort((a, b) => Date.parse(a[1][0].time) - Date.parse(b[1][0].time) || (a[0] < b[0] ? -1 : 1))) {
-    const firstObserved = Date.parse(records[0].time);
+  // The earliest and latest request time per hash (audit 1.4.0): records keep file order, which is
+  // capture order (the latest SendPaymentV2 is the last one), but a clock set back between runs makes
+  // a later run's times earlier, so the first record in the file is not always the earliest request.
+  // LND's record must predate every journaled request to be historical, and the observation spans
+  // the earliest to the latest time.
+  const span = new Map<string, { first: number; last: number }>();
+  for (const [hash, records] of byHash) {
+    let first = Infinity, last = -Infinity;
+    for (const record of records) { const ms = Date.parse(record.time); first = Math.min(first, ms); last = Math.max(last, ms); }
+    span.set(hash, { first, last });
+  }
+  for (const [hash, records] of [...byHash].sort((a, b) => span.get(a[0])!.first - span.get(b[0])!.first || (a[0] < b[0] ? -1 : 1))) {
+    const { first: firstObserved, last: lastObserved } = span.get(hash)!;
     let found: ReconcileSettlement;
     const fromList = listed.get(hash);
     if (fromList) found = settlement(fromList, 'list-payments', firstObserved);
-    else if (tracked + trackFailed >= TRACK_LIMIT || Date.now() > deadline) { trackLimited += 1; found = unknownSettlement('unknown'); }
+    else if (tracked + trackFailed >= TRACK_LIMIT || monotonic() > deadline) { trackLimited += 1; found = unknownSettlement('unknown'); }
     else {
       try {
         const payment = await cancellable(() => adapter.trackPayment(hash));
@@ -324,8 +354,11 @@ async function runSteps(args: string[], deps: Deps): Promise<ReconcileOutput> {
     const routes = records.filter(record => record.method === '/routerrpc.Router/SendToRouteV2' && record.amountMsat !== null);
     // LND's record older than every journaled request for the hash: its outcome may belong to an
     // attempt no credential here is known to have made (1.2.1), so no credential gets it.
-    results.push({ paymentHash: hash, attribution: credentials.length > 1 ? 'ambiguous' : found.predatesObservation ? 'historical' : 'single', credentials,
-      observation: { first: records[0].time, last: records.at(-1)!.time, calls: records.length,
+    // A requester the journal could not identify may be any credential: the payment is attributed to none.
+    const attribution: ReconcilePayment['attribution'] = credentials.some(credential => UNIDENTIFIED.has(credential)) ? 'unidentified'
+      : credentials.length > 1 ? 'ambiguous' : found.predatesObservation ? 'historical' : 'single';
+    results.push({ paymentHash: hash, attribution, credentials,
+      observation: { first: iso(firstObserved), last: iso(lastObserved), calls: records.length,
         requestedMsat: latest?.amountMsat ?? null,
         routeAttemptsMsat: routes.length ? capped(sum(routes.map(record => BigInt(record.amountMsat!)))).toString() : null,
         feeLimitMsat: latest?.feeLimitMsat ?? null,
@@ -335,13 +368,17 @@ async function runSteps(args: string[], deps: Deps): Promise<ReconcileOutput> {
 
   // Coverage of the window, and LND payments in it that the journal does not attribute.
   const coverage = journalCoverage(mine, node.pubkey, since, until);
+  // Each unattributed payment is classified against coverage beyond the window's edges by the clock
+  // tolerance it is checked with (audit 1.4.0: coverage clipped at --since and --until made a payment
+  // near either edge `boundary` inside covered time).
+  const around = journalCoverage(mine, node.pubkey, since - CLOCK_TOLERANCE_MS, until + CLOCK_TOLERANCE_MS);
   const unattributed: ReconcileUnattributed[] = [];
   let attributedOutsideWindow = 0;
   // Recorded drops, kept as excluded spans for the per-payment classification (1.2.1): a drop
   // that lasted no measurable time leaves the covered time whole, yet a payment created at that
   // instant may be the call it lost. Sorted and merged, so one binary search answers each payment.
   const dropSpans: [number, number][] = [];
-  for (const gap of coverage.gaps.filter(gap => gap.reason === 'dropped').sort((a, b) => a.from - b.from)) {
+  for (const gap of around.gaps.filter(gap => gap.reason === 'dropped').sort((a, b) => a.from - b.from)) {
     const previous = dropSpans.at(-1);
     if (previous && gap.from <= previous[1]) previous[1] = Math.max(previous[1], gap.to);
     else dropSpans.push([gap.from, gap.to]);
@@ -351,8 +388,8 @@ async function runSteps(args: string[], deps: Deps): Promise<ReconcileOutput> {
     if (!inWindow(created)) continue;
     if (byHash.has(payment.paymentHash)) continue;
     if (journaledHashes.has(payment.paymentHash)) { attributedOutsideWindow += 1; continue; }
-    const inside = coveredSpan(coverage.covered, created, created) && !touchesSpan(dropSpans, created, created);
-    const clear = coveredSpan(coverage.covered, created - CLOCK_TOLERANCE_MS, created + CLOCK_TOLERANCE_MS)
+    const inside = coveredSpan(around.covered, created, created) && !touchesSpan(dropSpans, created, created);
+    const clear = coveredSpan(around.covered, created - CLOCK_TOLERANCE_MS, created + CLOCK_TOLERANCE_MS)
       && !touchesSpan(dropSpans, created - CLOCK_TOLERANCE_MS, created + CLOCK_TOLERANCE_MS);
     const facts = settlement(payment, 'list-payments', null);
     unattributed.push({ paymentHash: payment.paymentHash, createdAt: facts.createdAt!, status: payment.status, settledMsat: facts.settledMsat!,
@@ -385,6 +422,12 @@ async function runSteps(args: string[], deps: Deps): Promise<ReconcileOutput> {
   };
   for (const item of results) {
     const records = byHash.get(item.paymentHash)!;
+    if (item.attribution === 'unidentified') {
+      // Counted in no credential's totals; an identified credential that also requested the hash shares it with an unknown one.
+      for (const record of records) if (!UNIDENTIFIED.has(record.credential)) noteRoot(credentialRow(record.credential), record.rootKeyId);
+      for (const credential of item.credentials) if (!UNIDENTIFIED.has(credential)) credentialRow(credential).ambiguous += 1;
+      continue;
+    }
     for (const record of records) noteRoot(credentialRow(record.credential), record.rootKeyId);
     if (item.attribution === 'ambiguous') { for (const credential of item.credentials) credentialRow(credential).ambiguous += 1; continue; }
     if (item.attribution === 'historical') { credentialRow(item.credentials[0]).historical += 1; continue; }
@@ -407,13 +450,14 @@ async function runSteps(args: string[], deps: Deps): Promise<ReconcileOutput> {
   const uncertain = results.filter(item => item.settlement.status !== 'succeeded' && item.settlement.status !== 'failed').length;
   const ambiguous = results.filter(item => item.attribution === 'ambiguous').length;
   const historical = results.filter(item => item.attribution === 'historical').length;
+  const unidentified = results.filter(item => item.attribution === 'unidentified').length;
   // The window less the covered time (1.2.1): listed gaps can overlap (a drop inside time that is
   // uncovered for another reason is listed beside it), so their sum counted such time twice.
   const gapMs = Math.max(0, until - since - coverage.coveredMs);
   const result: ReconcileResult = {
     node,
-    journal: { path: journalPath, size: contents.size, runs, records: mine.length, firstRecord: mine[0]?.time ?? null,
-      lastRecord: mine.at(-1)?.time ?? null, otherNodeRecords, tornTail: contents.tornTail, repairedLines: contents.repairedLines },
+    journal: { path: journalPath, size: contents.size, runs, records: mine.length, firstRecord: earliestMine === null ? null : iso(earliestMine),
+      lastRecord: latestMine === null ? null : iso(latestMine), otherNodeRecords, tornTail: contents.tornTail, repairedLines: contents.repairedLines },
     window: { since: iso(since), until: iso(until) },
     coverage: { windowSeconds: Math.floor((until - since) / 1_000), coveredSeconds: Math.floor(coverage.coveredMs / 1_000),
       complete: coverage.gaps.length === 0, gapCount: coverage.gaps.length, gapSeconds: Math.ceil(gapMs / 1_000),
@@ -434,6 +478,9 @@ async function runSteps(args: string[], deps: Deps): Promise<ReconcileOutput> {
   if (historical) warnings.push({ code: 'attribution-historical', message: `${historical} payment hash${historical === 1 ? ' has' : 'es have'} `
     + 'an LND record older than every journaled request for it: the outcome may belong to an attempt made before the journal observed '
     + 'the hash, by any credential, so it is not counted for the credential that requested it later' });
+  if (unidentified) warnings.push({ code: 'attribution-unidentified', message: `${unidentified} payment hash${unidentified === 1 ? ' was' : 'es were'} `
+    + 'requested by a caller whose macaroon watch could not decode (id:none or id:undecodable): any credential may have made the request, '
+    + 'so their outcomes are not counted for any credential' });
   if (unattributed.length) warnings.push({ code: 'unattributed-payments', message: `LND lists ${unattributed.length} payment`
     + `${unattributed.length === 1 ? '' : 's'} in the window that the journal does not attribute to any credential (made during a gap, `
     + 'by a path the middleware does not see, or recorded in another journal)' });
@@ -457,10 +504,10 @@ async function runSteps(args: string[], deps: Deps): Promise<ReconcileOutput> {
     + 'or stopped while writing it); it was ignored' });
   if (otherNodeRecords) warnings.push({ code: 'journal-other-node', message: `${otherNodeRecords} journal records belong to another node and were ignored` });
 
-  // Exit 1 (a finding, ok: true) unless every journaled payment has a final LND outcome, the
-  // window is fully covered and LND lists no payment the journal does not attribute.
+  // Exit 1 (a finding, ok: true) unless every journaled payment has a final LND outcome and one
+  // identified credential, the window is fully covered and LND lists no payment the journal does not attribute.
   const complete = result.coverage.complete && !unattributed.length && !uncertain && !unmatched.length && !ambiguous && !historical
-    && !deletionRecords.length && !listTruncated && !trackLimited;
+    && !unidentified && !deletionRecords.length && !listTruncated && !trackLimited;
   return { schema: 1, command: 'reconcile', ok: true, warnings, result, error: null, ...(complete ? {} : { exitCode: 1 }) };
 }
 

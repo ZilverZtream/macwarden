@@ -1,0 +1,154 @@
+{
+  "schema": 1,
+  "kind": "macwarden-payment-lab-harness-replay",
+  "predicate": "settlement-posted-once",
+  "rule": "Every settlement LND reports is posted exactly once (one ledger entry for the amount paid, however often it is delivered; the first settlement recorded wins over a later report of another amount); per payment hash only one invoice-settled (paid in full) or underpaid-settlement entry, and a double-payment entry exactly when an invoice-settled one has no fulfillment; settled is final; an order has at most one fulfillment, and is fulfilled iff it has one; at the end of a case every invoice LND holds SETTLED is recorded settled with exactly one settlement entry, whatever it was paid (unless an explicit cursor-set skipped it, or the subscription cursor never left 0, where LND replays nothing).",
+  "message": "invoice o2#1 (not-created): 1 double-payment entries with 1 invoice-settled entries and its fulfillment",
+  "seed": 1,
+  "case": 3,
+  "config": {
+    "scale": "small",
+    "budget": true,
+    "limit": "10000"
+  },
+  "failingStep": 9,
+  "originalSteps": 23,
+  "events": [
+    {
+      "t": "create",
+      "p": "p0",
+      "order": 2,
+      "hold": false
+    },
+    {
+      "t": "answer",
+      "kind": "create",
+      "pick": 0.75,
+      "mode": "in-transit"
+    },
+    {
+      "t": "age"
+    },
+    {
+      "t": "answer",
+      "kind": "lookup",
+      "pick": 0.5,
+      "mode": "ok"
+    },
+    {
+      "t": "create",
+      "p": "p0",
+      "order": 2,
+      "hold": false
+    },
+    {
+      "t": "answer",
+      "kind": "create",
+      "pick": 0.75,
+      "mode": "ok"
+    },
+    {
+      "t": "create.arrive",
+      "pick": 0.5
+    },
+    {
+      "t": "invoice",
+      "what": "pay",
+      "pick": 0.25,
+      "amount": "exact"
+    },
+    {
+      "t": "invoice",
+      "what": "pay",
+      "pick": 0.5,
+      "amount": "exact"
+    }
+  ],
+  "states": {
+    "after": {
+      "invoices": {
+        "o2#1": {
+          "order": "o2",
+          "state": "not-created",
+          "late": "SETTLED",
+          "amount": "7000"
+        },
+        "o2#2": {
+          "order": "o2",
+          "state": "settled",
+          "amount": "7000",
+          "amtPaid": "7000"
+        }
+      },
+      "orders": {
+        "o2": "fulfilled"
+      },
+      "fulfillments": [
+        {
+          "hash": "o2#1",
+          "order": "o2"
+        },
+        {
+          "hash": "o2#2",
+          "order": "o2"
+        }
+      ],
+      "ledger": [
+        {
+          "hash": "o2#2",
+          "order": "o2",
+          "amount": "7000"
+        },
+        {
+          "hash": "o2#1",
+          "order": "o2",
+          "amount": "7000"
+        }
+      ],
+      "cursor": {
+        "settle": "0",
+        "add": "0"
+      },
+      "entries": [
+        {
+          "id": "1",
+          "event": "invoice-settled",
+          "hash": "o2#2",
+          "op": "o2",
+          "amount": "7000"
+        },
+        {
+          "id": "2",
+          "event": "invoice-settled",
+          "hash": "o2#1",
+          "op": "o2",
+          "amount": "7000"
+        },
+        {
+          "id": "3",
+          "event": "double-payment",
+          "hash": "o2#1",
+          "op": "o2",
+          "amount": "7000"
+        }
+      ],
+      "outbox": [
+        {
+          "id": "1",
+          "kind": "fulfill-order",
+          "key": "o2:474c50978e3a09e6ee531deab5d8fe762fcd9f1dac81b67ea6791961ec222525",
+          "subject": "o2",
+          "payload": {
+            "orderId": "o2",
+            "paymentHash": "o2#2",
+            "amountMsat": "7000",
+            "settleIndex": "1",
+            "ledgerEntryId": 1
+          },
+          "state": "pending"
+        }
+      ]
+    }
+  },
+  "mutant": "settlement-posted-once--m10a.cjs"
+}

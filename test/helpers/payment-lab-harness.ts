@@ -39,10 +39,31 @@ export interface Harness {
   ReplayError: new (file: string, step: number | undefined, problem: string) => Error & { file: string; step: number | undefined };
 }
 
+/** One case of the harness (harness.ts Run), driven event by event, with the scripted LND's payments in view. */
+export interface HarnessRun {
+  step(event: Record<string, unknown>): Promise<boolean>;
+  dispose(): Promise<void>;
+  lnd: { payments: Map<string, { status: string; valueMsat: bigint; feeMsat: bigint; htlcs: { status: string; principalMsat: bigint;
+    route: { totalAmtMsat: bigint; totalFeesMsat: bigint; hops: { amtToForwardMsat: bigint }[] } }[] }> };
+  oracle: { violations: { predicate: string; message: string }[] };
+}
+
+export interface HarnessCase {
+  Run: new (lab: unknown, config: { scale: 'small' | 'huge'; budget: boolean; limit: string }, scratch: string) => HarnessRun;
+  loadLab(): Promise<unknown>;
+}
+
 const HARNESS = '../../examples/payment-lab/test/harness/';
 
 export async function loadHarness(): Promise<Harness> {
   return await import(/* @vite-ignore */ `${HARNESS}harness.ts`) as Harness;
+}
+
+/** The Run class and the lab loader, to drive one case by hand. */
+export async function loadHarnessCase(): Promise<HarnessCase> {
+  const { Run } = await import(/* @vite-ignore */ `${HARNESS}harness.ts`) as Pick<HarnessCase, 'Run'>;
+  const { loadLab } = await import(/* @vite-ignore */ `${HARNESS}lab.ts`) as { loadLab(): Promise<unknown> };
+  return { Run, loadLab };
 }
 
 /** The replay corpus directory, relative to the repository root. */
