@@ -113,7 +113,12 @@ it('JOURNAL-AUDIT/sync a failed fsync after a complete write keeps the written r
   const syncFails = { ...fs, open: async (...args: Parameters<typeof fs.open>) => {
     const handle = await fs.open(...args);
     return new Proxy(handle, { get(target, key) {
-      if (key === 'sync' && failSync) return async () => { throw Object.assign(new Error('EIO'), { code: 'EIO' }); };
+      // Fail the sync that follows the write holding the payment line. The journal decodes on a
+      // time budget, so a slow runner may write `registered` in a batch of its own first: that
+      // batch syncs normally, and the failure always comes after a complete write of the payment.
+      if (key === 'sync' && failSync && readFileSync(path, 'utf8').includes('"type":"payment"')) {
+        return async () => { throw Object.assign(new Error('EIO'), { code: 'EIO' }); };
+      }
       const value = Reflect.get(target, key, target);
       return typeof value === 'function' ? value.bind(target) : value;
     } });
@@ -122,8 +127,7 @@ it('JOURNAL-AUDIT/sync a failed fsync after a complete write keeps the written r
   failSync = true;
   journal.registered();
   journal.capture(paymentCall(SEND, bytes(3, hash('landed')), vector('preset-pay-only')));
-  await settle();
-  expect(stops).toEqual(['write-failed']);
+  await vi.waitFor(() => expect(stops).toEqual(['write-failed']), { timeout: 10_000, interval: 5 });
   const stats = await journal.close();
   // The record is in the file: it is counted as journaled, not as dropped.
   const read = await readJournal(path);
