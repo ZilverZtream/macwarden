@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { expect, it, vi } from 'vitest';
@@ -140,4 +140,28 @@ it('REGISTRY/lock-recovery an owner that becomes alive during the quarantine ren
     message: expect.stringContaining('changed during recovery') });
   expect(renamed).toBe(true);
   expect(readFileSync(lockPath, 'utf8')).toBe(text);
+});
+
+it('REGISTRY/lock-recovery a lock preserved after its owner changed during recovery keeps one name, so a later --break-lock can recover it', async () => {
+  const f = fixture();
+  const lockPath = f.registry + '.lock';
+  await staleLock(f.registry);
+  const competitor = JSON.stringify({ pid: 900_002, hostname: 'host-a', startedAt, processDomain: await domain() });
+  const io = { ...fs, rename: (async (from: string, to: string) => {
+    await fs.rename(from, to);
+    if (String(from) === lockPath) await fs.writeFile(to, competitor); // same file, new owner
+  }) as typeof fs.rename };
+  const view = await openRegistry(f.registry, { fs: io, hostname: () => 'host-a', pidAlive: () => false });
+  await expect(view.lock({ breakLock: true })).rejects.toMatchObject({ code: 3,
+    message: expect.stringContaining('changed during recovery') });
+  // Preserved means: the new owner's record is at the lock path, under that one name. A second
+  // name (the quarantine's) would make every later --break-lock refuse the lock as ambiguous.
+  expect(readFileSync(lockPath, 'utf8')).toBe(competitor);
+  expect(statSync(lockPath).nlink).toBe(1);
+  expect(readdirSync(f.dir).filter(name => name.endsWith('.stale'))).toEqual([]);
+  // Once the new owner is gone too, the preserved lock is recovered like any stale lock.
+  const next = await openRegistry(f.registry, { hostname: () => 'host-a', pidAlive: () => false });
+  await next.lock({ breakLock: true });
+  await next.unlock();
+  expect(existsSync(lockPath)).toBe(false);
 });

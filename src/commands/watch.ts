@@ -530,7 +530,48 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
     if (!workScheduled) { workScheduled = true; setImmediate(drainWork); }
   };
   const startedAt = deps.clock();
-  const requestKeys = new Map<string, { credential: string; rootKeyId: string; method: string; stream: boolean }>();
+  type RequestKey = { credential: string; rootKeyId: string; method: string; stream: boolean };
+  // Keys of open streams and unanswered calls, by session number and request ID (see the observer).
+  const requestKeys = new Map<string, RequestKey>();
+  // Keys of answered unary calls (1.3.1). LND numbers calls uniquely within a session, so a
+  // further message under an answered ID belongs to a stream whose opening this session never
+  // saw and whose messages carry no stream flag; the kept key stops it counting as a new call.
+  // These share REQUEST_KEY_LIMIT with requestKeys and are forgotten first, so an answered call
+  // never ages an open stream out (an idle server stream sends no further request, so before
+  // 1.3.1 the calls answered after it opened pushed it to the head and its final error was lost);
+  // one that does not fit is not kept.
+  const answered = new Map<string, RequestKey>();
+  // Stream keys of lost sessions, by request ID (1.3.1): a stream opened under an earlier session
+  // is still intercepted after re-registration (see the observer below), so its later responses
+  // are attributed by this map. Bounded like requestKeys, the oldest forgotten first.
+  const carried = new Map<string, RequestKey>();
+  // Forgets the least recently seen key of a full map of open streams and unanswered calls, so
+  // this is reached with over REQUEST_KEY_LIMIT of them open at once. A stream forgotten here
+  // loses its final error; when usage would have recorded that error (a credential usage
+  // records), the loss is counted like a dropped call, so recommend sees the evidence as
+  // incomplete. An unidentified caller's stream is never in the usage file.
+  const forgetOldest = (map: Map<string, RequestKey>, atMs: number): void => {
+    const oldest = map.keys().next().value as string;
+    const key = map.get(oldest)!;
+    map.delete(oldest);
+    if (!key.stream || !CREDENTIAL_ID.test(key.credential) || !isRootKeyId(key.rootKeyId)) return;
+    counters.attributionDropped += 1;
+    usage.noteDroppedAttribution(atMs);
+  };
+  // Makes room in requestKeys for one more key: answered calls go first, then the oldest open one.
+  const makeRoom = (atMs: number): void => {
+    if (requestKeys.size + answered.size < REQUEST_KEY_LIMIT) return;
+    if (answered.size) answered.delete(answered.keys().next().value as string);
+    else forgetOldest(requestKeys, atMs);
+  };
+  // Keeps an answered call's key while it fits beside the open ones, replacing the oldest answered.
+  const keepAnswered = (id: string, key: RequestKey): void => {
+    if (requestKeys.size + answered.size >= REQUEST_KEY_LIMIT) {
+      if (!answered.size) return;
+      answered.delete(answered.keys().next().value as string);
+    }
+    answered.set(id, key);
+  };
   const emit = (event: WatchEvent) => {
     if (request.alertsOnly && event.event !== 'canary' && event.event !== 'status') return;
     deps.emit(renderWatchEvent(event, request.json ? 'json' : 'text'), event.event === 'canary' || event.event === 'status');
@@ -577,8 +618,12 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
   // call.macaroon is read here, synchronously: the middleware wipes the intercepted bytes
   // once this returns. Each registration gets its own observer carrying its session number:
   // attribution is deferred, so work queued by a lost session can still run after the next
-  // session began, and LND restarts request IDs with a new session. Correlation keys are
-  // therefore session number plus request ID; an ID from one session never matches another's.
+  // session began. Correlation keys are session number plus request ID. LND numbers requests
+  // per process (rpcperms/interceptor.go lastRequestID), never per middleware session: a stream
+  // opened under an earlier session keeps its ID and is still intercepted after re-registration,
+  // so its later responses and final error are attributed to the credential that opened it, by
+  // `carried`. IDs restart only with LND, when every earlier stream is gone; a reused number then
+  // always arrives first as a new request or stream_auth, which forgets the carried one.
   let sessionNumber = 0;
   const observe = (session: number) => (call: MiddlewareCall): string => {
     // A payment request is captured for the journal now, while its payload is readable; it is
@@ -597,14 +642,38 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
     const at = deps.clock();
     if (call.kind === 'response') {
       const id = `${session}:${call.requestId}`;
-      const key = requestKeys.get(id);
-      if (!key) return;
-      // A key is kept after a successful response: LND numbers calls uniquely within a session,
-      // so a later request with this ID is a further message of a stream, never a new call, even
-      // when watch first saw that stream mid-way (after a reconnect). Kept until an error or
-      // until it is the least recently seen at REQUEST_KEY_LIMIT.
-      if (!call.isError) { requestKeys.delete(id); requestKeys.set(id, key); return; }
-      requestKeys.delete(id);
+      let key = requestKeys.get(id);
+      if (key) {
+        // A stream's key (stream_auth, or LND's stream flag) is kept and marked seen after each
+        // response: LND numbers calls uniquely within a session, so a later request with its ID
+        // is a further message of that stream, never a new call, even when watch first saw the
+        // stream mid-way (after a reconnect). Kept until its final error or until it is the
+        // least recently seen open key at REQUEST_KEY_LIMIT. A unary call has exactly one
+        // response: its key leaves the open set for `answered` (1.3.1), where it is forgotten
+        // before any open stream.
+        if (!call.isError) {
+          requestKeys.delete(id);
+          if (key.stream) requestKeys.set(id, key);
+          else keepAnswered(id, key);
+          return;
+        }
+        requestKeys.delete(id);
+      } else if ((key = answered.get(id))) {
+        // A second response under an answered ID: a stream whose messages carry no flag (see
+        // `answered`); from here it is an open stream, or this is its final error.
+        answered.delete(id);
+        if (!call.isError) { key.stream = true; makeRoom(at.getTime()); requestKeys.set(id, key); return; }
+      } else {
+        // A stream opened under a lost session, still delivering under its ID. Only a stream
+        // message qualifies (a unary request this session failed to key, after an LND restart,
+        // must not inherit the old stream's credential), and only of the same method.
+        const number = `${call.requestId}`;
+        key = call.streamRpc === true ? carried.get(number) : undefined;
+        if (!key) return;
+        carried.delete(number);
+        if (key.method !== call.method) return;
+        if (!call.isError) { makeRoom(at.getTime()); requestKeys.set(id, key); return; }
+      }
       counters.errors += 1;
       if (CREDENTIAL_ID.test(key.credential) && isRootKeyId(key.rootKeyId))
         usage.record(pubkey, key.credential, key.rootKeyId, key.method, at, true);
@@ -618,11 +687,23 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
       try { const identity = macaroonId(macaroon); credential = identity.id; rootKeyId = identity.rootKeyId.toString(); }
       catch { credential = 'id:undecodable'; }
     }
+    // A request or stream_auth under a number carried from a lost session: LND restarted (its
+    // numbering begins again, and every earlier stream is dead), or this is a further message of
+    // the carried stream itself, which carries the macaroon that opened it and is keyed from
+    // that below. Either way the carried key is no longer needed.
+    if (carried.size) carried.delete(`${call.requestId}`);
     // A stream reports stream_auth and then one request per message: count it once.
     const id = `${session}:${call.requestId}`;
     const seen = requestKeys.get(id);
     if (call.kind === 'request' && seen) { requestKeys.delete(id); requestKeys.set(id, seen); return; }
-    if (!seen && requestKeys.size >= REQUEST_KEY_LIMIT) requestKeys.delete(requestKeys.keys().next().value as string);
+    const done = answered.get(id);
+    if (done) {
+      answered.delete(id);
+      // A further request under an answered ID: a stream whose messages carry no flag, seen
+      // mid-way (see `answered`); from here it is an open stream, and not a new call.
+      if (call.kind === 'request') { done.stream = true; makeRoom(at.getTime()); requestKeys.set(id, done); return; }
+    }
+    if (!seen) makeRoom(at.getTime());
     requestKeys.delete(id);
     requestKeys.set(id, { credential, rootKeyId, method: call.method, stream: call.kind === 'stream_auth' || call.streamRpc === true });
     // A message of a stream whose opening this session never saw (the stream was open before a
@@ -732,15 +813,28 @@ async function runSteps(args: string[], deps: Deps): Promise<WatchOutput> {
       else await new Promise(resolve => setImmediate(resolve));
       refresh = new AbortController();
       const sessions: MiddlewareSession[] = [];
-      // Request IDs restart when LND restarts: never carry them across sessions. Keys carry the
-      // session number, so an ID of the lost session never matches one of the next; the lost
-      // session's keys are forgotten once its queued attribution has run (the purge is queued
-      // behind that work, FIFO, so its queued responses are still recorded). Clearing here would
-      // strand them: a queued error response finds no key and is silently lost. The purge is
-      // pushed directly, never admitted against the queue limits, so it cannot be dropped.
+      // Keys carry the session number, so an ID of the lost session never matches one of the
+      // next directly; the lost session's keys are forgotten once its queued attribution has run
+      // (the purge is queued behind that work, FIFO, so its queued responses are still recorded).
+      // Clearing here would strand them: a queued error response finds no key and is silently
+      // lost. Its stream keys are carried by request ID instead of forgotten: LND numbers
+      // requests per process, so a stream that outlives the session keeps delivering under its
+      // ID (see `carried`). The purge is pushed directly, never admitted against the queue
+      // limits, so it cannot be dropped.
       if (sessionNumber > 0) {
-        const lost = sessionNumber;
-        work.push({ run: () => { for (const key of requestKeys.keys()) if (key.startsWith(`${lost}:`)) requestKeys.delete(key); }, bytes: 0 });
+        const prefix = `${sessionNumber}:`;
+        work.push({ run: () => {
+          for (const id of answered.keys()) if (id.startsWith(prefix)) answered.delete(id);
+          for (const [id, key] of requestKeys) {
+            if (!id.startsWith(prefix)) continue;
+            requestKeys.delete(id);
+            if (!key.stream) continue;
+            const number = id.slice(prefix.length);
+            carried.delete(number);
+            if (carried.size >= REQUEST_KEY_LIMIT) forgetOldest(carried, deps.clock().getTime());
+            carried.set(number, key);
+          }
+        }, bytes: 0 });
         if (!workScheduled) { workScheduled = true; setImmediate(drainWork); }
       }
       sessionNumber += 1;

@@ -115,7 +115,14 @@ export const MAX_GIT_DIR_ENTRIES = 1_000_000;
 const ABSENT = ['ENOENT', 'ENOTDIR', 'EACCES', 'EPERM'];
 const errorCode = (error: unknown) => (error as NodeJS.ErrnoException).code ?? '';
 
-function absolute(base: string, value: string): string {
+/**
+ * The path git opens for a gitfile target, `commondir` or alternates entry at `base`: an
+ * absolute path as written, a Windows rooted path (\x, no drive) on the work tree's drive (git
+ * resolves it in its working directory, the work tree, whatever drive macwarden runs from),
+ * and anything else relative to `base`.
+ */
+export function absoluteLocation(base: string, value: string, workTree: string): string {
+  if (windows && /^[\\/](?![\\/])/.test(value)) return win32.resolve(win32.parse(workTree).root, value);
   return isAbsolute(value) || (windows && win32.isAbsolute(value)) ? resolve(value) : resolve(base, value);
 }
 
@@ -330,7 +337,7 @@ function checkAlternates(run: Preflight, objects: string, depth: number): Promis
       const line = raw.trim();
       if (!line || line.startsWith('#')) continue;
       run.edge();
-      run.follow(own, await checkAlternates(run, await local(run.io, absolute(objects, unquoteAlternate(line))), depth + 1));
+      run.follow(own, await checkAlternates(run, await local(run.io, absoluteLocation(objects, unquoteAlternate(line), run.workTree)), depth + 1));
     }
     return own;
   });
@@ -534,15 +541,20 @@ const UNREAD_GIT_DIR_ENTRIES = new Set(['hooks', 'lfs']);
  * through whatever symlinks or junctions are there. Lists the git and common directories
  * (lstat-only directory entries, never following an unchecked link) and resolves every link
  * found like any other location: a network, device or protected target is refused, and a
- * local directory target is listed in turn. Loose-object fan-out directories (objects/xx)
- * are not listed. At most MAX_GIT_DIR_ENTRIES entries are examined.
+ * local directory target is listed in turn. git reads every regular file under refs/, logs/
+ * and objects/pack/ by name, so inside a directory reached through a link (and its
+ * subdirectories) a protected file or directory name (SAFE-02) is refused as well: the link's
+ * own path and target passed the per-location check, and this is the only check the files
+ * below it get. git's own, unlinked directory is exempt: a branch named `seed` or
+ * `password` there is a ref, not a credential. Loose-object fan-out directories
+ * (objects/xx) are not listed. At most MAX_GIT_DIR_ENTRIES entries are examined.
  */
 async function checkGitDirectoryLinks(run: Preflight, roots: string[]): Promise<void> {
   const seen = new Set<string>();
-  const queue = roots.map(directory => ({ directory, top: true }));
+  const queue = roots.map(directory => ({ directory, top: true, linked: false }));
   let examined = 0;
   while (queue.length) {
-    const { directory, top } = queue.pop()!;
+    const { directory, top, linked } = queue.pop()!;
     const key = run.key(directory);
     if (seen.has(key)) continue;
     seen.add(key);
@@ -562,10 +574,11 @@ async function checkGitDirectoryLinks(run: Preflight, roots: string[]): Promise<
       if (entry.isSymbolicLink()) {
         const real = await local(run.io, path);
         const stat = await run.io.lstat(real).catch(() => null);
-        if (stat?.isDirectory()) queue.push({ directory: real, top: false });
-      } else if (entry.isDirectory() && !(objects && /^[0-9a-f]{2}$/i.test(entry.name))) {
-        queue.push({ directory: path, top: false });
+        if (stat?.isDirectory()) queue.push({ directory: real, top: false, linked: true });
+        continue;
       }
+      if (linked && isProtectedPath(entry.name)) throw new GitHistoryError(PROTECTED);
+      if (entry.isDirectory() && !(objects && /^[0-9a-f]{2}$/i.test(entry.name))) queue.push({ directory: path, top: false, linked });
     }
   }
 }
@@ -609,18 +622,24 @@ export async function locateRepository(directory: string,
     const stat = await io.lstat(candidate).catch(() => null);
     if (stat) {
       run.workTree = current;
+      // The entry is resolved link by link first (a non-local or protected target is refused
+      // before it is touched) and classified by what is there: a .git that is a symlink to a
+      // gitfile or to a directory is followed like the gitfile itself, as git does, and a
+      // relative gitdir: resolves against the directory holding .git, not the link target's.
+      const resolved = await local(io, candidate);
+      const kind = await io.lstat(resolved).catch(() => null);
       let gitDir: string;
-      if (stat.isFile()) {
+      if (kind?.isFile()) {
         const bytes = await run.small(candidate);
         const target = bytes === null ? null : gitfileTarget(bytes);
         if (!target) throw new GitHistoryError(NOT_WORK_TREE);
-        gitDir = await local(io, absolute(current, target));
-      } else gitDir = await local(io, candidate);
+        gitDir = await local(io, absoluteLocation(current, target, current));
+      } else gitDir = resolved;
       // gitDir is resolved and checked, so stat follows no unchecked link.
       const gitStat = await io.stat(gitDir).catch(() => null);
       if (!gitStat?.isDirectory()) throw new GitHistoryError(NOT_WORK_TREE);
       const common = await run.small(join(gitDir, 'commondir'));
-      const commonDir = common === null ? gitDir : await local(io, absolute(gitDir, common.toString('utf8').trim()));
+      const commonDir = common === null ? gitDir : await local(io, absoluteLocation(gitDir, common.toString('utf8').trim(), current));
       await checkGitDirectoryLinks(run, run.key(commonDir) === run.key(gitDir) ? [gitDir] : [gitDir, commonDir]);
       run.root(await checkAlternates(run, join(commonDir, 'objects'), 0));
       run.root(await checkIncludes(run, join(commonDir, 'config'), 0));

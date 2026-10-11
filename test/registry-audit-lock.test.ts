@@ -1,7 +1,8 @@
 // Pre-1.4 audit, registry lock acquisition: links at the lock paths, ownership after a failed
 // acquisition, incomplete lock records, quarantined stale locks, claim contention and errors,
 // the directory owner and the Windows save back-off.
-import { existsSync, readdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import type { BigIntStats, Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { expect, it } from 'vitest';
@@ -137,6 +138,106 @@ it('REGISTRY-AUDIT/break-lock a verified stale lock that cannot be deleted is ne
   await next.lock(); await next.unlock();
 });
 
+/** fs whose lstat of a quarantined stale lock fails with EBUSY `failures.left` times. */
+function busyQuarantineStat(failures: { left: number }) {
+  return { ...fs, lstat: (async (...args: Parameters<typeof fs.lstat>) => {
+    if (String(args[0]).endsWith('.stale') && failures.left > 0) { failures.left -= 1; throw busy(); }
+    return fs.lstat(...args);
+  }) as typeof fs.lstat };
+}
+
+it('REGISTRY-AUDIT/break-lock a transient busy stat of the quarantined stale lock is retried and the lock acquired', async () => {
+  const f = fixture();
+  await staleLock(f.registry);
+  const view = await openRegistry(f.registry, { fs: busyQuarantineStat({ left: 1 }), hostname: () => 'host-a', pidAlive: () => false, sleep: noSleep });
+  await view.lock({ breakLock: true });
+  try {
+    expect(staleNames(f)).toEqual([]);
+    expect(statSync(`${f.registry}.lock`).nlink).toBe(1);
+  } finally { await view.unlock(); }
+});
+
+it('REGISTRY-AUDIT/break-lock a stale lock that cannot be verified after its move goes back under one name, and a later --break-lock recovers it', async () => {
+  const f = fixture();
+  await staleLock(f.registry);
+  const view = await openRegistry(f.registry, { fs: busyQuarantineStat({ left: 100 }), hostname: () => 'host-a', pidAlive: () => false, sleep: noSleep });
+  await expect(view.lock({ breakLock: true })).rejects.toMatchObject({ code: 3, message: expect.stringContaining('cannot be established') });
+  expect(statSync(`${f.registry}.lock`).nlink, 'the lock has its one name back').toBe(1);
+  expect(staleNames(f)).toEqual([]);
+  // The fault is over: the same stale lock is recovered by the next --break-lock.
+  const next = await openRegistry(f.registry, { hostname: () => 'host-a', pidAlive: () => false, sleep: noSleep });
+  await next.lock({ breakLock: true });
+  try { expect(staleNames(f)).toEqual([]); } finally { await next.unlock(); }
+});
+
+/**
+ * fs that reports the file identifier `ino(path, real)` chooses for a path (undefined keeps the
+ * real one), from lstat and from the stat of a handle opened at that path, as bigint or as Number
+ * exactly as the caller asked: what NTFS reports for two files whose 64-bit identifiers differ only
+ * beyond 53 bits.
+ */
+function remappedInodes(ino: (path: string, real: Stats | BigIntStats) => bigint | undefined) {
+  const remap = <S extends Stats | BigIntStats>(path: string, real: S, bigint: boolean): S => {
+    const chosen = ino(path, real);
+    return chosen === undefined ? real : Object.assign(real, { ino: bigint ? chosen : Number(chosen) }) as unknown as S;
+  };
+  const wantsBigint = (options: unknown) => typeof options === 'object' && options !== null && (options as { bigint?: boolean }).bigint === true;
+  return { ...fs,
+    lstat: (async (...args: Parameters<typeof fs.lstat>) => remap(String(args[0]), await fs.lstat(...args), wantsBigint(args[1]))) as typeof fs.lstat,
+    open: (async (...args: Parameters<typeof fs.open>) => {
+      const handle = await fs.open(...args);
+      const path = String(args[0]);
+      return new Proxy(handle, { get(target, key) {
+        if (key === 'stat') return async (options?: unknown) => remap(path, await (target.stat as (o?: unknown) => Promise<Stats | BigIntStats>)(options), wantsBigint(options));
+        const value = Reflect.get(target, key, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      } });
+    }) as typeof fs.open };
+}
+
+it('REGISTRY-AUDIT/file-identity a claim replaced by a file whose identifier differs only beyond 53 bits is preserved, not removed', async () => {
+  const f = fixture();
+  const claimPath = `${f.registry}.lock.claim`;
+  // Both convert to the same Number (2^53 + 4): only a full 64-bit comparison tells them apart.
+  const created = 2n ** 53n + 3n, found = 2n ** 53n + 4n;
+  expect(Number(created)).toBe(Number(found));
+  // The claim this run creates reports `created` while it is empty (its creation check and its
+  // identity) and `found` once an owner record is in it (the cleanup's look at the path).
+  const io = remappedInodes((path, real) => path === claimPath ? (real.size > 0 ? found : created) : undefined);
+  const view = await openRegistry(f.registry, { fs: io, sleep: noSleep });
+  await expect(view.lock()).rejects.toMatchObject({ code: 3, message: 'registry acquisition owner changed; preserved competing claim' });
+  expect(existsSync(claimPath), 'competing claim preserved').toBe(true);
+  expect(existsSync(`${f.registry}.lock`), 'the lock taken meanwhile was released').toBe(false);
+  unlinkSync(claimPath);
+});
+
+it('REGISTRY-AUDIT/file-identity a quarantined stale lock whose identifier differs only beyond 53 bits is not taken as the moved lock', async () => {
+  const f = fixture();
+  const lockPath = `${f.registry}.lock`;
+  await staleLock(f.registry);
+  const text = readFileSync(lockPath, 'utf8');
+  const before = 2n ** 53n + 3n, moved = 2n ** 53n + 4n;
+  expect(Number(before)).toBe(Number(moved));
+  const io = remappedInodes(path => path === lockPath ? before : path.endsWith('.stale') ? moved : undefined);
+  const view = await openRegistry(f.registry, { fs: io, hostname: () => 'host-a', pidAlive: () => false, sleep: noSleep });
+  await expect(view.lock({ breakLock: true })).rejects.toMatchObject({ code: 3, message: expect.stringContaining('changed during recovery') });
+  expect(readFileSync(lockPath, 'utf8'), 'the moved lock is back at the lock path').toBe(text);
+});
+
+it('REGISTRY-AUDIT/empty-lock a lock file without an owner record names the file and the offline remedy, with and without --break-lock', async () => {
+  const f = fixture();
+  const lockPath = `${f.registry}.lock`;
+  writeFileSync(lockPath, '');
+  for (const options of [{}, { breakLock: true }]) {
+    const view = await openRegistry(f.registry, { hostname: () => 'host-a', pidAlive: () => false, sleep: noSleep });
+    const error = await view.lock(options).then(() => undefined, (caught: unknown) => caught as { code: number; step: string; message: string });
+    expect(error).toMatchObject({ code: 3, step: 'registry-lock' });
+    expect(error?.message).toContain(lockPath);
+    expect(error?.message).toContain('delete it offline');
+    expect(statSync(lockPath).size, 'the empty lock is left for the operator').toBe(0);
+  }
+});
+
 for (const [code, reason] of [['EACCES', 'permission denied in the registry directory'], ['EROFS', 'the file system is read-only'],
   ['ENOSPC', 'no space left on the device'], ['ENOENT', 'the registry directory does not exist']] as const) {
   it(`REGISTRY-AUDIT/claim-errors ${code} creating the claim names its cause and never advises deleting a claim`, async () => {
@@ -178,6 +279,33 @@ it('REGISTRY-AUDIT/claim-contention a Windows claim being deleted (EPERM) is wai
   await view.lock();
   await view.unlock();
   expect(pending).toBe(0);
+});
+
+it('REGISTRY-AUDIT/lock-contention a Windows lock being deleted (EPERM) is waited out', async () => {
+  const f = fixture();
+  let pending = 2, sleeps = 0;
+  const io = { ...fs, open: (async (...args: Parameters<typeof fs.open>) => {
+    if (String(args[0]) === `${f.registry}.lock` && args[1] === 'wx' && pending > 0) { pending -= 1; throw failure('EPERM'); }
+    return fs.open(...args);
+  }) as typeof fs.open };
+  const view = await openRegistry(f.registry, { fs: io, platform: 'win32', sleep: async () => { sleeps += 1; } });
+  await view.lock();
+  await view.unlock();
+  expect(pending).toBe(0);
+  expect(sleeps).toBe(2);
+});
+
+it('REGISTRY-AUDIT/lock-contention EPERM creating the lock on POSIX fails at once', async () => {
+  const f = fixture();
+  let sleeps = 0;
+  const io = { ...directoryOwnedBy(f, 4242), open: (async (...args: Parameters<typeof fs.open>) => {
+    if (String(args[0]) === `${f.registry}.lock` && args[1] === 'wx') throw failure('EPERM');
+    return fs.open(...args);
+  }) as typeof fs.open };
+  const view = await openRegistry(f.registry, { fs: io, platform: 'linux', getuid: () => 4242, sleep: async () => { sleeps += 1; } });
+  await expect(view.lock()).rejects.toMatchObject({ code: 3, message: 'cannot create registry lock' });
+  expect(sleeps, 'a non-contention error is not waited on').toBe(0);
+  expect(existsSync(`${f.registry}.lock.claim`)).toBe(false);
 });
 
 it('REGISTRY-AUDIT/claim-contention a claim that stays past the bounded wait keeps the offline recovery advice', async () => {

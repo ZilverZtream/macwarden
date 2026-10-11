@@ -178,16 +178,18 @@ const LND_TO_RECORD: Record<string, InvoiceRecordState | undefined> = {
  * States only move forward; a stale delivery never moves a record back from canceled or settled.
  * Canceled is final for a replayed OPEN or ACCEPTED, but settled outranks it: an invoice LND
  * reports SETTLED after a CANCELED was recorded (a stale or wrong cancel) was paid, and the
- * record says so. Open and accepted rank alike (as in LATE_RANK below): LND returns a hold
- * invoice from ACCEPTED to OPEN when its accepted HTLCs are canceled or time out, so either can
- * follow the other, and the record takes LND's latest word (an OPEN clears the amount paid).
+ * record says so. Open and accepted rank alike (as in LATE_RANK below): lnd never returns a hold
+ * invoice from ACCEPTED to OPEN (a held HTLC that times out cancels the invoice), so an OPEN
+ * after an ACCEPTED is a stale or reordered answer; the record still takes the latest answer
+ * (an OPEN clears the amount paid), so that LND's word wins whichever order two answers land in,
+ * and either way the invoice is to be settled or canceled only on what LND answers next.
  */
 const RANK: Record<InvoiceRecordState, number> = { 'not-created': 0, creating: 0, open: 1, accepted: 1, canceled: 3, settled: 4 };
 /**
  * The order for LND's state of a late invoice (late_lnd_state), so a stale delivery never moves
- * it back from CANCELED or SETTLED. OPEN and ACCEPTED rank alike: LND returns a hold invoice
- * from ACCEPTED to OPEN when its accepted HTLCs are canceled or time out, so either can follow
- * the other, and either way the invoice is live in LND and is to be canceled there.
+ * it back from CANCELED or SETTLED. OPEN and ACCEPTED rank alike: an OPEN after an ACCEPTED is a
+ * stale or reordered answer (lnd never reopens an accepted hold invoice), and either way the
+ * invoice is live in LND and is to be canceled there.
  */
 const LATE_RANK = (expression: string): string =>
   `CASE ${expression} WHEN 'OPEN' THEN 1 WHEN 'ACCEPTED' THEN 1 WHEN 'CANCELED' THEN 3 WHEN 'SETTLED' THEN 4 ELSE 0 END`;
@@ -264,16 +266,22 @@ export class ReceiverStore {
   /**
    * Why this invoice may not be settled now, read in one transaction: its order was
    * fulfilled by another invoice (settling would take a second payment for it), so
-   * it is superseded and to be canceled. Undefined when it may be settled.
+   * it is superseded and to be canceled; or the record is no longer open or accepted
+   * (decided meanwhile by another process or an older answer: canceled, settled, or
+   * not-created again, a late invoice to be canceled in LND). Only an invoice LND
+   * holds for its order, open or accepted in the record, is settled. Undefined when
+   * it may be settled.
    */
   settleRefusal(paymentHash: string): string | undefined {
     return immediate(this.db, () => {
       const record = this.invoice(paymentHash);
       if (record === undefined) return `no invoice ${paymentHash}`;
+      const hint = `invoice ${paymentHash} is to be canceled ("receiver reconcile" or "receiver cancel"), not settled`;
       const other = this.db.prepare('SELECT payment_hash FROM fulfillments WHERE order_id = ? AND payment_hash <> ? LIMIT 1')
         .get(record.orderId, paymentHash);
-      if (other !== undefined) return `order ${record.orderId} was fulfilled by invoice ${text(other, 'payment_hash')}`;
-      if (this.isSuperseded(paymentHash)) return `order ${record.orderId} was fulfilled by another invoice`;
+      if (other !== undefined) return `order ${record.orderId} was fulfilled by invoice ${text(other, 'payment_hash')}; ${hint}`;
+      if (this.isSuperseded(paymentHash)) return `order ${record.orderId} was fulfilled by another invoice; ${hint}`;
+      if (record.state !== 'open' && record.state !== 'accepted') return `invoice ${paymentHash} is ${record.state}, not open or accepted`;
       return undefined;
     });
   }
@@ -478,9 +486,9 @@ export class ReceiverStore {
     // `late-invoice`, for the caller to cancel in LND, and a settlement is still posted below.
     // Canceled is final: a late invoice LND canceled is never adopted (its order still awaits a
     // payment, and a replacement may be issued), and an update older than LND's last known state
-    // of it (a replayed OPEN after CANCELED) changes nothing. OPEN after ACCEPTED is not older:
-    // LND reopens a hold invoice whose accepted HTLCs were canceled, so it is recorded and the
-    // invoice is `late-invoice` again, to be canceled.
+    // of it (a replayed OPEN after CANCELED) changes nothing. OPEN and ACCEPTED rank alike (an
+    // OPEN after an ACCEPTED is a stale or reordered answer; lnd never reopens an accepted hold
+    // invoice): it is recorded, and the invoice is `late-invoice` again, to be canceled.
     const late = record.lateLndState;
     const behind = record.state === 'not-created' && late !== undefined
       && (late === 'CANCELED' || (LND_RANK[invoice.state] ?? 0) < (LND_RANK[late] ?? 0));
@@ -502,7 +510,7 @@ export class ReceiverStore {
     if (move) {
       this.db.prepare(`UPDATE invoices SET state = ?, settle_index = ?, amt_paid_msat = ?, add_index = COALESCE(add_index, ?),
         payment_request = COALESCE(payment_request, ?), updated_at = ? WHERE payment_hash = ?`)
-        // An OPEN invoice holds no accepted HTLCs, so nothing is paid (a hold invoice LND returned from ACCEPTED to OPEN).
+        // An OPEN invoice holds no accepted HTLCs, so nothing is paid (an OPEN answer landing after an ACCEPTED one).
         .run(next, invoice.settleIndex === 0n ? null : invoice.settleIndex, next === 'open' ? 0n : invoice.amtPaidMsat, invoice.addIndex,
           invoice.paymentRequest === '' ? null : invoice.paymentRequest, now, invoice.paymentHash);
       outcome = 'state-updated';

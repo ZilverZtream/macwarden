@@ -313,12 +313,14 @@ export class Registry {
     // lock. No new writer can enter the quarantine rename's pathname gap.
     const claimPath = `${this.path}.lock.claim`;
     const claim = await this.createClaim(claimPath);
-    let identity: { dev: number; ino: number } | undefined;
+    // File identity as 64-bit values: NTFS file reference numbers exceed 2^53, where a Number
+    // loses the low bits and two different files can compare equal (audit 1.4.0).
+    let identity: { dev: bigint; ino: bigint } | undefined;
     let primary: { error: unknown } | undefined;
     try {
       // Under the cleanup below (audit N12): a failing stat must still close the descriptor and
       // remove the claim, and is reported as an ordinary lock failure.
-      try { identity = await claim.stat(); }
+      try { identity = await claim.stat({ bigint: true }); }
       catch { input('registry-lock', 'cannot create registry lock'); }
       await claim.writeFile(JSON.stringify({ pid: process.pid,
         hostname: (this.deps.hostname ?? nodeHostname)(), startedAt: new Date().toISOString(), processDomain }));
@@ -328,10 +330,10 @@ export class Registry {
     await claim.close().catch(() => {});
     let cleanup: { error: unknown } | undefined;
     try {
-      const current = await this.fs.lstat(claimPath);
+      const current = await this.fs.lstat(claimPath, { bigint: true });
       // Without the descriptor's identity, only the empty file this run created (nothing was
       // written to it) is taken as ours; a competitor's claim carries its owner record.
-      const ours = identity ? current.dev === identity.dev && current.ino === identity.ino : current.size === 0;
+      const ours = identity ? current.dev === identity.dev && current.ino === identity.ino : current.size === 0n;
       if (!current.isFile() || !ours)
         input('registry-lock', 'registry acquisition owner changed; preserved competing claim');
       await this.retryBusy(() => this.fs.unlink(claimPath));
@@ -408,9 +410,9 @@ export class Registry {
   }
 
   // Antivirus and indexers briefly hold files open: retry EBUSY, and on Windows also EPERM/EACCES.
-  private async retryBusy(operation: () => Promise<void>): Promise<void> {
+  private async retryBusy<T>(operation: () => Promise<T>): Promise<T> {
     for (let attempt = 1; ; attempt++) {
-      try { await operation(); return; }
+      try { return await operation(); }
       catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
         const windows = (this.deps.platform ?? process.platform) === 'win32';
@@ -438,11 +440,29 @@ export class Registry {
     }
   }
 
+  /**
+   * Creates the lock file exclusively; undefined when a lock exists. On Windows a lock whose
+   * delete is still pending (the previous holder's release, a scanner's handle) reports EPERM,
+   * EACCES or EBUSY for a moment: as for the claim, that is waited out for a bounded time.
+   */
+  private async createLock(lockPath: string): Promise<nodeFs.FileHandle | undefined> {
+    const windows = (this.deps.platform ?? process.platform) === 'win32';
+    for (let attempt = 1; ; attempt++) {
+      let code: string | undefined;
+      try { return await this.fs.open(lockPath, 'wx', 0o600); }
+      catch (error) { code = (error as NodeJS.ErrnoException).code; }
+      if (code === 'EEXIST') return undefined;
+      const pending = windows && (code === 'EPERM' || code === 'EACCES' || code === 'EBUSY');
+      if (pending && attempt < CLAIM_WAIT_ATTEMPTS) { await this.sleep(CLAIM_WAIT_MS); continue; }
+      input('registry-lock', 'cannot create registry lock');
+    }
+  }
+
   private async lockUnderClaim(options: { breakLock?: boolean }, processDomain: ProcessDomain | null): Promise<void> {
     const lockPath = `${this.path}.lock`;
     for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const handle = await this.fs.open(lockPath, 'wx', 0o600);
+      const handle = await this.createLock(lockPath);
+      if (handle) {
         await this.refuseLinkedCreate(lockPath, handle);
         try {
           const record = JSON.stringify({ pid: process.pid, hostname: (this.deps.hostname ?? nodeHostname)(),
@@ -462,17 +482,21 @@ export class Registry {
             : `cannot create registry lock; remove the incomplete lock file ${lockPath} offline before retrying`);
         }
         return;
-      } catch (error) {
-        if (error instanceof RegistryInputError) throw error;
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') input('registry-lock', 'cannot create registry lock');
       }
-      let lock: unknown;
+      let text: string;
       try {
         // The lock is ours to read only as a plain file: never through a symlink (SAFE-02),
         // through one descriptor bound to the checked file and at most LOCK_FILE_LIMIT + 1 bytes.
-        const text = await readPlainFile(lockPath, this.fs, LOCK_FILE_LIMIT);
-        lock = JSON.parse(text);
+        text = await readPlainFile(lockPath, this.fs, LOCK_FILE_LIMIT);
       } catch { input('registry-lock', 'invalid registry lock'); }
+      let lock: unknown;
+      try { lock = JSON.parse(text); }
+      catch {
+        // Empty or cut short: a writer killed between creating the lock and writing its record.
+        // No owner to prove dead, so --break-lock cannot take it either (audit 1.4.0).
+        input('registry-lock', `registry lock ${lockPath} holds no complete owner record (a writer may have crashed ` +
+          'while creating it), so --break-lock cannot verify it; stop all writers and delete it offline before retrying');
+      }
       if (!validLock(lock)) input('registry-lock', 'invalid or unverifiable registry lock; stop writers and recover offline');
       const locked = `registry locked by pid ${lock.pid} on ${lock.hostname} since ${lock.startedAt}`;
       if (options.breakLock && (!processDomain || !lock.processDomain
@@ -488,8 +512,8 @@ export class Registry {
       let quarantined = false;
       let verified = false;
       try {
-        before = await this.fs.lstat(lockPath);
-        if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.ino === 0)
+        before = await this.fs.lstat(lockPath, { bigint: true });
+        if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n || before.ino === 0n)
           input('registry-lock', 'stale lock ownership ambiguous; stop writers and recover offline');
         const text = await readPlainFile(lockPath, this.fs, LOCK_FILE_LIMIT);
         if (text !== JSON.stringify(lock)) {
@@ -498,14 +522,16 @@ export class Registry {
           if (!validLock(reread) || JSON.stringify(reread) !== JSON.stringify(lock))
             input('registry-lock', 'registry lock changed; stop writers and recover offline');
         }
-        const current = await this.fs.lstat(lockPath);
+        const current = await this.fs.lstat(lockPath, { bigint: true });
         if (current.dev !== before.dev || current.ino !== before.ino
           || (this.deps.pidAlive ?? alive)(lock.pid))
           input('registry-lock', 'registry lock changed or owner alive; recover offline');
         await this.fs.rename(lockPath, quarantine);
         quarantined = true;
-        const moved = await this.fs.lstat(quarantine);
-        const movedOwner: unknown = JSON.parse(await readPlainFile(quarantine, this.fs, LOCK_FILE_LIMIT));
+        // A scanner may hold the just-renamed file for a moment: its stat and read are retried
+        // like its delete, so a one-off EBUSY/EPERM does not end the recovery (audit 1.4.0).
+        const moved = await this.retryBusy(() => this.fs.lstat(quarantine, { bigint: true }));
+        const movedOwner: unknown = JSON.parse(await this.retryBusy(() => readPlainFile(quarantine, this.fs, LOCK_FILE_LIMIT)));
         if (moved.dev !== before.dev || moved.ino !== before.ino || !validLock(movedOwner)
           || JSON.stringify(movedOwner) !== JSON.stringify(lock) || (this.deps.pidAlive ?? alive)(lock.pid)) {
           // Never overwrite a replacement writer's pathname. Hard-link restoration
@@ -521,7 +547,14 @@ export class Registry {
         // quarantined copy is left.
         if (quarantined && verified) input('registry-lock', `the stale registry lock was moved to ${quarantine} ` +
           'but could not be deleted; delete that file offline, then retry');
-        if (quarantined) await this.fs.link(quarantine, lockPath).catch(() => {});
+        if (quarantined) {
+          // An unverified lock (changed owner, or a stat or read that kept failing) goes back
+          // under its one name: the second name alone would make every later --break-lock refuse
+          // it as ambiguous. Only when the lock path is occupied by a replacement writer does the
+          // moved file keep its quarantine name, for offline recovery.
+          const relinked = await this.fs.link(quarantine, lockPath).then(() => true, () => false);
+          if (relinked) await this.retryBusy(() => this.fs.unlink(quarantine)).catch(() => {});
+        }
         if (error instanceof RegistryInputError) throw error;
         input('registry-lock', 'stale lock ownership cannot be established; stop writers and recover offline');
       }

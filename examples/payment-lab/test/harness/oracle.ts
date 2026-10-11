@@ -549,6 +549,21 @@ export class Oracle {
       this.fail('superseded-canceled-never-settled', `${proc} called SettleInvoice for ${this.lnd.labelOf(hash)} although order ${invoice.order} `
         + `was fulfilled by ${this.lnd.labelOf(other.hash)}`, this.readable({ after: snap }) as Record<string, unknown>);
     }
+    // A late invoice (recorded not-created, LND seen to hold it OPEN or ACCEPTED) whose order has another live invoice or no
+    // longer awaits payment is canceled in LND, never settled (README, "An invoice that turns up late"): a settlement is recorded
+    // only when LND reports one. Settling it would take a payment for an order that has another payable invoice (the 1.4 audit:
+    // a settle whose lookup answer landed after the record was decided not-created and a replacement issued).
+    if (invoice.state === 'not-created' && (invoice.late === 'OPEN' || invoice.late === 'ACCEPTED')) {
+      const live = [...snap.invoices].find(([otherHash, row]) => otherHash !== hash && row.order === invoice.order
+        && (row.state === 'creating' || row.state === 'open' || row.state === 'accepted'
+          || (row.state === 'settled' && (row.amtPaid === undefined || row.amtPaid >= row.amount))));
+      const orderState = snap.orders.get(invoice.order);
+      if (live !== undefined || orderState !== 'awaiting-payment') {
+        this.fail('superseded-canceled-never-settled', `${proc} called SettleInvoice for ${this.lnd.labelOf(hash)}, a late invoice (recorded not-created, `
+          + `LND holds it ${invoice.late}) although order ${invoice.order} ${live === undefined ? `is ${orderState}` : `has live invoice ${this.lnd.labelOf(live[0])} (${live[1].state})`}; `
+          + 'it is to be canceled in LND, never settled', this.readable({ after: snap }) as Record<string, unknown>);
+      }
+    }
   }
 
   /**

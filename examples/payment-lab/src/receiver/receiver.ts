@@ -402,16 +402,28 @@ export async function settleHoldInvoice(deps: ReceiverDeps, orderId: string): Pr
   if (typeof invoice === 'string') return { kind: 'refused', reason: invoice };
   const before = await lookup(deps, invoice.paymentHash);
   if (before === 'not-found' || before === 'unknown') return { kind: 'unresolved', reason: `invoice lookup: ${before}` };
+  // The lookup was awaited: meanwhile the record may have been decided not-created (an older lookup's NotFound landing
+  // after the creation window) and a replacement issued. LND's answer then makes it a late invoice, resolved as a
+  // reconciliation pass resolves one (canceled in LND while the order has another live invoice, or adopted), never
+  // settled from here: a late invoice is canceled, and a settlement is recorded only when LND reports one. One LND
+  // reports SETTLED was paid before anything could cancel it: recorded below, as resolveLateInvoice records it.
+  const displaced = deps.store.invoice(invoice.paymentHash);
+  if (displaced?.state === 'not-created' && before.state !== 'SETTLED') {
+    const late = await resolveLateInvoice(deps, displaced, before, 'lookup');
+    // Adopted (the order had no other live invoice): it is the order's live invoice after all, and is settled as any other.
+    if (late.kind === 'adopted') return await settleHoldInvoice(deps, orderId);
+    return { kind: late.kind === 'unresolved' ? 'unresolved' : 'refused', reason: late.reason };
+  }
   const beforeOutcome = apply(deps, before, 'lookup');
+  // A settlement that fulfilled the order cancels every other invoice of the order still live in LND, in the same step.
+  await supersedeOthers(deps, beforeOutcome, invoice.paymentHash);
   if (before.state === 'SETTLED') return { kind: 'settled', outcome: beforeOutcome };
   if (before.state !== 'ACCEPTED') return { kind: 'refused', reason: `invoice is ${before.state}; settle only after LND accepted the HTLCs` };
-  // The lookup was awaited: meanwhile another invoice's settlement may have fulfilled the order. Checked again in one
-  // transaction, with nothing awaited between this check and the SettleInvoice request below.
+  // The lookup was awaited: meanwhile another invoice's settlement may have fulfilled the order, or the record may have been
+  // decided (canceled, settled, not-created). Checked again in one transaction, with nothing awaited between this check and
+  // the SettleInvoice request below.
   const refusal = deps.store.settleRefusal(invoice.paymentHash);
-  if (refusal !== undefined) {
-    return { kind: 'refused', reason: `${refusal}; invoice ${invoice.paymentHash} is to be canceled ("receiver reconcile" or "receiver cancel"), `
-      + 'not settled' };
-  }
+  if (refusal !== undefined) return { kind: 'refused', reason: refusal };
   let callError: unknown;
   try {
     await deps.api.settleInvoice(invoice.preimage);
@@ -426,6 +438,8 @@ export async function settleHoldInvoice(deps: ReceiverDeps, orderId: string): Pr
     return { kind: 'unresolved', reason: `settle ${callError === undefined ? 'sent' : describeError(callError)}; lookup ${after}` };
   }
   const outcome = apply(deps, after, 'settle-call');
+  // The settlement fulfilled the order: every other invoice of the order still live in LND is canceled in the same step.
+  await supersedeOthers(deps, outcome, invoice.paymentHash);
   if (after.state === 'SETTLED') return { kind: 'settled', outcome };
   return { kind: 'unresolved', reason: `invoice is ${after.state} after SettleInvoice${callError === undefined ? '' : `: ${describeError(callError)}`}` };
 }
@@ -441,8 +455,11 @@ export async function cancelHoldInvoice(deps: ReceiverDeps, orderId: string): Pr
     callError = error;
   }
   const after = await lookup(deps, invoice.paymentHash);
-  // NotFound after CancelInvoice for an invoice LND held (open or accepted): canceled, and deleted.
-  if (after === 'not-found' && (invoice.state === 'open' || invoice.state === 'accepted')) {
+  // NotFound after CancelInvoice for an invoice LND held: canceled, and deleted. LND held it when the record is open or
+  // accepted, or when LND accepted the cancel (CancelInvoice answers an error for a hash LND does not hold), which also
+  // decides a `creating` invoice whose create call had reached LND: canceled, as deletedInLnd says. A `creating` one whose
+  // cancel failed proves nothing (LND may never have had it): unresolved, and the creation window decides it.
+  if (after === 'not-found' && (invoice.state === 'open' || invoice.state === 'accepted' || callError === undefined)) {
     deletedInLnd(deps, invoice, 'lookup');
     return { kind: 'canceled' };
   }

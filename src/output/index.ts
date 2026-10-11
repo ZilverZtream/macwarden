@@ -732,7 +732,10 @@ function reconcileText(result: ReconcileResult): string {
     `journal      ${safeText(result.journal.path)}: ${result.journal.records} records in ${result.journal.runs} watch runs`
       + (result.journal.firstRecord ? `, ${safeText(result.journal.firstRecord)} to ${safeText(result.journal.lastRecord ?? '')}` : ''),
     `window       ${safeText(result.window.since)} to ${safeText(result.window.until)}; covered ${formatDuration(result.coverage.coveredSeconds)} `
-      + `of ${formatDuration(result.coverage.windowSeconds)}${result.coverage.complete ? '' : ` (${result.coverage.gapCount} gaps)`}`,
+      + `of ${formatDuration(result.coverage.windowSeconds)}${result.coverage.complete ? '' : ` (${result.coverage.gapCount} gaps)`}`
+      // Reported by the window of their request: neither listed nor unattributed in this one.
+      + (result.lookups.attributedOutsideWindow ? `; ${result.lookups.attributedOutsideWindow} payment${result.lookups.attributedOutsideWindow === 1 ? '' : 's'}`
+        + ' attributed by requests before the window' : ''),
     ...result.coverage.gaps.slice(0, 20).map(gap => `gap          ${safeText(gap.from)} to ${safeText(gap.to)}  ${safeText(gap.reason)}`
       + (gap.dropped ? `  ${gap.dropped} payment calls not journaled` : '')),
     ...(result.coverage.gapCount > 20 ? [`gap          ... ${result.coverage.gapCount - 20} more (see --json)`] : []),

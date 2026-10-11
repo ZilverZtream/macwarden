@@ -601,10 +601,12 @@ export class FakeLnd {
         return { value: created.hold ? { paymentRequest, addIndex: created.addIndex } : { paymentHash: call.hash, paymentRequest, addIndex: created.addIndex } };
       }
       case 'settle':
-        // LND's own errors (invoices.ErrInvoiceNotFound, ErrInvoiceAlreadySettled, ErrInvoiceAlreadyCanceled, ErrInvoiceStillOpen),
-        // all gRPC Unknown (2), HTTP 500 through the REST proxy: a settled invoice is not settled "again" without an error.
+        // LND's own errors (invoices.ErrInvoiceNotFound, ErrInvoiceAlreadyCanceled, ErrInvoiceStillOpen), all gRPC Unknown (2),
+        // HTTP 500 through the REST proxy. An invoice already settled is the exception: the RPC treats the registry's
+        // ErrInvoiceAlreadySettled as success (lnrpc/invoicesrpc/invoices_server.go, SettleInvoice: "If the invoice is already
+        // settled, this call will succeed"), so a retry after a lost answer succeeds.
         if (item === undefined) return { error: new this.lab.LndError('unable to locate invoice', 2, 500) };
-        if (item.state === 'SETTLED') return { error: new this.lab.LndError('invoice already settled', 2, 500) };
+        if (item.state === 'SETTLED') return { value: undefined };
         if (item.state === 'CANCELED') return { error: new this.lab.LndError('invoice already canceled', 2, 500) };
         if (item.state !== 'ACCEPTED') return { error: new this.lab.LndError('invoice still open', 2, 500) };
         item.state = 'SETTLED';
@@ -701,7 +703,7 @@ export class FakeLnd {
     return true;
   }
 
-  /** What happens to an invoice outside the receiver: a payer pays it, a held HTLC times out, it expires. */
+  /** What happens to an invoice outside the receiver: a payer pays it, a held HTLC times out (canceling it), it expires. */
   invoiceEvent(hash: string, what: 'pay' | 'htlc-timeout' | 'expire' | 'misreport' | 'resettle' | 'delete', amount?: AmountVariant): boolean {
     const item = this.invoices.get(hash);
     if (item === undefined) return false;
@@ -722,7 +724,13 @@ export class FakeLnd {
         this.#notifySubscribers(item);
       }
     } else if (what === 'htlc-timeout' && item.state === 'ACCEPTED') {
-      item.state = 'OPEN';
+      // A held HTLC reaching its expiry: lnd's expiry watcher force-cancels an accepted invoice at its block-based expiry
+      // (invoice_expiry_watcher.go, cancelNextHeightExpiredInvoice: "so that we can cancel invoices that have been accepted but
+      // not yet resolved"), the HTLC returns to the payer, and the invoice is CANCELED; lnd never returns an invoice to OPEN
+      // (a single HTLC is canceled only on an open invoice: invoiceregistry.go, cancelSingleHtlc; invoices/update.go never sets
+      // ContractOpen). On an OPEN invoice a partial payment's HTLC timing out leaves it open, which this receiver cannot see
+      // (one HTLC per payment, no HTLCs in lookups): no event.
+      item.state = 'CANCELED';
       item.amtPaidMsat = 0n;
     } else if (what === 'expire' && item.state === 'OPEN') {
       item.state = 'CANCELED';

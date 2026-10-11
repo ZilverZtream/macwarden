@@ -236,6 +236,9 @@ it('RECONCILE/relative windows and a payment journaled before the window is attr
   const later = await reconcile([...s.args, '--since', at(1_800), '--until', at(2_000)], fakeLnd({ listed }), at(3_600));
   expect((later.result as ReconcileResult).unattributed).toEqual([]);
   expect((later.result as ReconcileResult).lookups.attributedOutsideWindow).toBe(1);
+  // The text says why such a payment is neither listed nor unattributed in this window.
+  expect(render(later, 'text')).toContain('1 payment attributed by requests before the window');
+  expect(render(output, 'text')).not.toContain('attributed by requests before the window');
 });
 
 it('RECONCILE/epoch a window reaching before 1970 is refused at Q1; a large valid window stays inside the schema (PF-2)', async () => {

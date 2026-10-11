@@ -461,6 +461,136 @@ it('WATCH/session-isolation a response of a lost session still queued at the rec
   expect(usage.entries).toContainEqual(expect.objectContaining({ method: '/lnrpc.Lightning/SubscribeChannelEvents', calls: 1, errors: 1 }));
 }, 60_000);
 
+// --- streams that outlive a session ------------------------------------------------------------
+// LND numbers requests per process (rpcperms/interceptor.go lastRequestID), not per middleware
+// session: a server-streaming RPC opened under session N keeps its ID and is still intercepted
+// after watch re-registers, so its later responses and final error arrive in session N+1.
+
+it('WATCH/stream-carried the final error of a stream opened before an interceptor-only reconnect is counted under the credential that opened it', async () => {
+  const s = setup();
+  const admin = vector('default-admin');
+  const script = newScript();
+  const lines: string[] = [];
+  const h = start([...s.args, '--json'], fakeRegister(script), { emit: line => { lines.push(line); } });
+  await until(() => script.count === 1);
+  await turns();
+  // Session 1: SubscribeInvoices opened (stream_auth, then its single request message), one update delivered.
+  script.decide[0](call('stream_auth', 5, '/lnrpc.Lightning/SubscribeInvoices', admin, { streamRpc: true }));
+  script.decide[0](call('request', 5, '/lnrpc.Lightning/SubscribeInvoices', admin, { streamRpc: true }));
+  script.decide[0](call('response', 5, '/lnrpc.Lightning/SubscribeInvoices', null, { streamRpc: true }));
+  await until(() => lines.some(line => line.includes('"event":"call"')));
+  await turns();
+  // Only the interceptor stream is lost; LND keeps running and the subscription stays open.
+  script.end[0]({ registered: true, code: 4, stage: 'middleware-stream', message: 'LND transport failure', disabled: false });
+  await until(() => script.count === 2);
+  await turns(10);
+  // The subscription's final error arrives in session 2 with the ID it was opened under.
+  script.decide[1](call('response', 5, '/lnrpc.Lightning/SubscribeInvoices', null, { streamRpc: true, isError: true }));
+  await until(() => lines.some(line => line.includes('"event":"error"')));
+  await turns();
+  h.stop();
+  const result = await h.result;
+  expect(result).toMatchObject({ ok: true, result: { errors: 1, calls: 1, reconnects: 1, droppedAttributions: 0 } });
+  const events = lines.map(line => JSON.parse(line) as { event: string; method?: string; credential?: string });
+  expect(events.filter(event => event.event === 'error')).toEqual([
+    expect.objectContaining({ method: '/lnrpc.Lightning/SubscribeInvoices', credential: macaroonId(new Secret(admin)).id })]);
+  const usage = JSON.parse(readFileSync(`${s.registry}.usage.json`, 'utf8')) as { entries: { method: string; calls: number; errors: number }[] };
+  expect(usage.entries).toContainEqual(expect.objectContaining({ method: '/lnrpc.Lightning/SubscribeInvoices', calls: 1, errors: 1 }));
+}, 60_000);
+
+it('WATCH/stream-carried a new stream_auth reusing the ID after a reconnect (LND restarted) forgets the carried stream; its error counts under the new credential', async () => {
+  const s = setup();
+  const admin = vector('default-admin');
+  const app = vector('preset-read-only');
+  const script = newScript();
+  const lines: string[] = [];
+  const h = start([...s.args, '--json'], fakeRegister(script), { emit: line => { lines.push(line); } });
+  await until(() => script.count === 1);
+  await turns();
+  script.decide[0](call('stream_auth', 5, '/lnrpc.Lightning/SubscribeInvoices', admin, { streamRpc: true }));
+  script.decide[0](call('request', 5, '/lnrpc.Lightning/SubscribeInvoices', admin, { streamRpc: true }));
+  await until(() => lines.some(line => line.includes('"event":"call"')));
+  await turns();
+  script.end[0]({ registered: true, code: 4, stage: 'middleware-stream', message: 'LND transport failure', disabled: false });
+  await until(() => script.count === 2);
+  await turns(10);
+  // LND restarted, so every earlier stream is gone and ID 5 opens a new stream by another credential.
+  script.decide[1](call('stream_auth', 5, '/lnrpc.Lightning/SubscribeInvoices', app, { streamRpc: true }));
+  script.decide[1](call('request', 5, '/lnrpc.Lightning/SubscribeInvoices', app, { streamRpc: true }));
+  script.decide[1](call('response', 5, '/lnrpc.Lightning/SubscribeInvoices', null, { streamRpc: true, isError: true }));
+  await until(() => lines.some(line => line.includes('"event":"error"')));
+  await turns();
+  h.stop();
+  const result = await h.result;
+  expect(result).toMatchObject({ ok: true, result: { errors: 1, calls: 2, reconnects: 1, droppedAttributions: 0 } });
+  const events = lines.map(line => JSON.parse(line) as { event: string; method?: string; credential?: string });
+  expect(events.filter(event => event.event === 'error')).toEqual([
+    expect.objectContaining({ method: '/lnrpc.Lightning/SubscribeInvoices', credential: macaroonId(new Secret(app)).id })]);
+  const usage = JSON.parse(readFileSync(`${s.registry}.usage.json`, 'utf8')) as { entries: { credential: string; method: string; calls: number; errors: number }[] };
+  expect(usage.entries).toContainEqual(expect.objectContaining({ credential: macaroonId(new Secret(admin)).id, method: '/lnrpc.Lightning/SubscribeInvoices', calls: 1, errors: 0 }));
+  expect(usage.entries).toContainEqual(expect.objectContaining({ credential: macaroonId(new Secret(app)).id, method: '/lnrpc.Lightning/SubscribeInvoices', calls: 1, errors: 1 }));
+}, 60_000);
+
+// --- the remembered set holds open streams only -----------------------------------------------
+
+it('WATCH/stream-idle an idle server stream outlives 50,000 unary calls answered meanwhile: its final error is counted', async () => {
+  const s = setup();
+  const admin = vector('default-admin');
+  const script = newScript();
+  const lines: string[] = [];
+  const calls = () => lines.filter(line => line.includes('"event":"call"')).length;
+  const h = start([...s.args, '--json'], fakeRegister(script), { emit: line => { lines.push(line); } });
+  await until(() => script.count === 1);
+  await turns();
+  script.decide[0](call('stream_auth', 99_999, '/lnrpc.Lightning/SubscribeChannelEvents', admin, { streamRpc: true }));
+  script.decide[0](call('request', 99_999, '/lnrpc.Lightning/SubscribeChannelEvents', admin, { streamRpc: true }));
+  await until(() => calls() === 1);
+  // 50,000 unary calls, each answered, paced so attribution drains between batches.
+  for (let batch = 0; batch < 50; batch++) {
+    for (let n = 0; n < 1_000; n++) {
+      const id = batch * 1_000 + n;
+      script.decide[0](call('request', id, '/lnrpc.Lightning/GetInfo', admin));
+      script.decide[0](call('response', id, '/lnrpc.Lightning/GetInfo', null));
+    }
+    await until(() => calls() === 1 + (batch + 1) * 1_000);
+  }
+  // The idle stream's final error (it sent no further request meanwhile).
+  script.decide[0](call('response', 99_999, '/lnrpc.Lightning/SubscribeChannelEvents', null, { streamRpc: true, isError: true }));
+  await turns(20);
+  h.stop();
+  const result = await h.result;
+  expect(result).toMatchObject({ ok: true, result: { calls: 50_001, errors: 1, droppedAttributions: 0 } });
+  const events = lines.map(line => JSON.parse(line) as { event: string; method?: string; credential?: string });
+  expect(events.filter(event => event.event === 'error')).toEqual([
+    expect.objectContaining({ method: '/lnrpc.Lightning/SubscribeChannelEvents', credential: macaroonId(new Secret(admin)).id })]);
+}, 60_000);
+
+it('WATCH/stream-evicted a stream forgotten at the 50,000 limit by 50,000 further open streams counts as a dropped attribution', async () => {
+  const s = setup();
+  const admin = vector('default-admin');
+  const script = newScript();
+  const lines: string[] = [];
+  const calls = () => lines.filter(line => line.includes('"event":"call"')).length;
+  const h = start([...s.args, '--json'], fakeRegister(script), { emit: line => { lines.push(line); } });
+  await until(() => script.count === 1);
+  await turns();
+  script.decide[0](call('stream_auth', 1, '/lnrpc.Lightning/SubscribeChannelEvents', admin, { streamRpc: true }));
+  await until(() => calls() === 1);
+  // 50,000 more streams by a recorded credential, left open: the first stream is the least recently seen.
+  for (let batch = 0; batch < 50; batch++) {
+    for (let n = 0; n < 1_000; n++) script.decide[0](call('stream_auth', 2 + batch * 1_000 + n, '/lnrpc.Lightning/SubscribeInvoices', admin, { streamRpc: true }));
+    await until(() => calls() === 1 + (batch + 1) * 1_000);
+  }
+  script.decide[0](call('response', 1, '/lnrpc.Lightning/SubscribeChannelEvents', null, { streamRpc: true, isError: true }));
+  await turns(20);
+  h.stop();
+  const result = await h.result;
+  // The forgotten stream's error cannot be attributed; the loss is counted, so usage is marked incomplete.
+  expect(result).toMatchObject({ ok: true, result: { calls: 50_001, errors: 0, droppedAttributions: 1 } });
+  const usage = JSON.parse(readFileSync(`${s.registry}.usage.json`, 'utf8')) as { droppedAttributions: number };
+  expect(usage.droppedAttributions).toBe(1);
+}, 60_000);
+
 // --- the stream flag ------------------------------------------------------------------------
 
 it('LND/middleware-proto RPCMessage.stream_rpc (field 2) is decoded; false or absent is false; stream_auth is a stream', () => {

@@ -1,8 +1,8 @@
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs/promises';
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, win32 } from 'node:path';
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import { createPrivateDirectory } from '../scripts/private-scratch.mjs';
 
@@ -106,6 +106,69 @@ it('githist-audit/location links inside the git directory are checked: refs to a
   if (windows) await expect(locate(repo, network.io)).rejects.toThrow(NOT_LOCAL);
   else await expect(locate(repo, network.io)).resolves.toBeTruthy();
   expect(networkCalls(network.calls)).toEqual([]);
+});
+
+it('githist-audit/location a directory reached through a link in the git directory is refused when it holds a protected name', async () => {
+  // git reads every regular file under refs/ (and logs/, objects/pack/) by name, so a junction
+  // or directory symlink refs/heads/ext → a directory holding wallet.db makes git open wallet.db
+  // to resolve the ref ext/wallet.db. The link's own path and target carry no protected
+  // component, so the per-location check passes; the listing of the linked directory must refuse.
+  // symlinkSync's type is honoured on Windows (a junction) and ignored elsewhere (a symlink).
+  const head = (repo: string) => `${git(repo, 'rev-parse', 'HEAD')}\n`;
+  const touched = (calls: string[]) => calls.filter(path => /(wallet\.db|seed\.txt)$/i.test(path));
+  // (a) The target is outside the work tree.
+  {
+    const { root, repo, gitDir } = repository();
+    const outside = join(root, 'outside');
+    mkdirSync(outside);
+    writeFileSync(join(outside, 'wallet.db'), head(repo));
+    symlinkSync(outside, join(gitDir, 'refs', 'heads', 'ext'), 'junction');
+    const { io, calls } = recording();
+    await expect(locate(repo, io)).rejects.toThrow(PROTECTED);
+    expect(touched(calls)).toEqual([]);
+  }
+  // (a') The protected name is in a subdirectory of the linked directory: the listing inherits.
+  {
+    const { root, repo, gitDir } = repository();
+    const outside = join(root, 'outside');
+    mkdirSync(join(outside, 'nested'), { recursive: true });
+    writeFileSync(join(outside, 'plain'), head(repo));
+    writeFileSync(join(outside, 'nested', 'seed.txt'), head(repo));
+    symlinkSync(outside, join(gitDir, 'refs', 'heads', 'ext'), 'junction');
+    const { io, calls } = recording();
+    await expect(locate(repo, io)).rejects.toThrow(PROTECTED);
+    expect(touched(calls)).toEqual([]);
+  }
+  // (b) The target is inside the work tree (data/wallet.db, which the walk itself never opens).
+  {
+    const { repo, gitDir } = repository();
+    const data = join(repo, 'data');
+    mkdirSync(data);
+    writeFileSync(join(data, 'wallet.db'), head(repo));
+    symlinkSync(data, join(gitDir, 'refs', 'heads', 'wt'), 'junction');
+    const { io, calls } = recording();
+    await expect(locate(repo, io)).rejects.toThrow(PROTECTED);
+    expect(touched(calls)).toEqual([]);
+  }
+  // (c) Control: a linked directory holding only ordinary names is still accepted.
+  {
+    const { root, repo, gitDir } = repository();
+    const outside = join(root, 'outside');
+    mkdirSync(join(outside, 'nested'), { recursive: true });
+    writeFileSync(join(outside, 'plain'), head(repo));
+    writeFileSync(join(outside, 'nested', 'deeper'), head(repo));
+    symlinkSync(outside, join(gitDir, 'refs', 'heads', 'ext'), 'junction');
+    await expect(locate(repo)).resolves.toBeTruthy();
+  }
+  // (d) Control: git's own, unlinked directory is exempt, so a branch literally named seed,
+  // wallet.db or password/main (a ref, not a credential) does not refuse.
+  {
+    const { repo } = repository();
+    git(repo, 'branch', 'seed');
+    git(repo, 'branch', 'wallet.db');
+    git(repo, 'branch', 'password/main');
+    await expect(locate(repo)).resolves.toBeTruthy();
+  }
 });
 
 it('githist-audit/alias a link whose target text is unprotected but whose canonical name is protected is refused', async () => {
@@ -270,4 +333,70 @@ it('githist-audit/gitfile a gitfile is read as git reads it: "gitdir: " on the f
   await expect(locate(repo)).rejects.toThrow(NOT_WORK_TREE);
   writeFileSync(join(repo, '.git'), `gitdir: ${moved}\r\n`);
   await expect(locate(repo)).resolves.toMatchObject({ workTree: await fs.realpath(repo) });
+});
+
+it('githist-audit/gitfile a .git that is a symlink to a gitfile is followed like the gitfile itself, and its target is checked', async () => {
+  // git accepts .git → pointer (a symlink to a gitfile): rev-parse reads through the link and
+  // resolves the relative gitdir: against the directory holding .git, not the link target's.
+  const { repo, gitDir } = repository();
+  const metadata = join(repo, 'metadata');
+  renameSync(gitDir, metadata);
+  writeFileSync(join(repo, 'pointer'), 'gitdir: metadata\n');
+  try { symlinkSync('pointer', join(repo, '.git'), 'file'); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EPERM') throw error;
+    console.warn('githist-audit/gitfile: symlink creation is not permitted here; the .git symlink case was not exercised');
+    return;
+  }
+  expect(git(repo, 'rev-parse', '--is-inside-work-tree')).toBe('true');
+  const workTree = await fs.realpath(repo);
+  await expect(locate(repo)).resolves.toEqual({ gitDir: join(workTree, 'metadata'), workTree });
+  // The same link to a gitfile naming a UNC path: refused before anything touches the network
+  // (elsewhere //attacker.invalid/s/x is an ordinary absent local path).
+  writeFileSync(join(repo, 'pointer'), 'gitdir: //attacker.invalid/s/x\n');
+  const { io, calls } = recording();
+  if (windows) await expect(locate(repo, io)).rejects.toThrow(NOT_LOCAL);
+  else await expect(locate(repo, io)).rejects.toThrow(NOT_WORK_TREE);
+  expect(networkCalls(calls)).toEqual([]);
+  // A .git symlink whose target is a protected file is refused before the file is read.
+  rmSync(join(repo, '.git'));
+  writeFileSync(join(repo, 'wallet.db'), 'gitdir: metadata\n');
+  symlinkSync('wallet.db', join(repo, '.git'), 'file');
+  const guarded = recording();
+  await expect(locate(repo, guarded.io)).rejects.toThrow(PROTECTED);
+  expect(guarded.calls.filter(path => /wallet\.db$/i.test(path))).toEqual([]);
+});
+
+it('githist-audit/gitfile a rooted, drive-less gitfile, commondir or alternates target (/x) is on the work tree\'s drive, not the process drive', async () => {
+  // git resolves `gitdir: /x`, a `commondir` of /x and an alternates entry /x in its working
+  // directory, the work tree, whatever drive macwarden was started from; includes already did so (1.3.1).
+  const { absoluteLocation } = await import('../src/scan/git-history.js');
+  if (!windows) {
+    // Elsewhere a rooted path is simply absolute.
+    expect(absoluteLocation('/wt', '/x/y', '/wt')).toBe('/x/y');
+    expect(absoluteLocation('/wt/.git', 'rel', '/wt')).toBe('/wt/.git/rel');
+    return;
+  }
+  // Computed: a work tree on a drive that is not the process drive (no I/O on it).
+  const letter = win32.parse(process.cwd()).root.toUpperCase().startsWith('Q') ? 'R' : 'Q';
+  const tree = `${letter}:\\wt`;
+  expect(absoluteLocation(tree, '/x/y', tree)).toBe(`${letter}:\\x\\y`);
+  expect(absoluteLocation(`${tree}\\.git`, '\\x', tree)).toBe(`${letter}:\\x`);
+  expect(absoluteLocation(`${tree}\\.git`, 'rel', tree)).toBe(`${letter}:\\wt\\.git\\rel`);
+  expect(absoluteLocation(tree, 'D:\\abs', tree)).toBe('D:\\abs');
+  // Observed: a gitfile written without the drive, read from another drive when one exists.
+  const { root, repo, gitDir } = repository();
+  const moved = join(root, 'moved.git');
+  renameSync(gitDir, moved);
+  const driveless = moved.slice(win32.parse(moved).root.length - 1).replaceAll('\\', '/');
+  expect(driveless.startsWith('/')).toBe(true);
+  writeFileSync(join(repo, '.git'), `gitdir: ${driveless}\n`);
+  const elsewhere = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').map(drive => `${drive}:\\`)
+    .find(drive => drive[0] !== win32.parse(moved).root[0]!.toUpperCase() && existsSync(drive));
+  const cwd = process.cwd();
+  try {
+    if (elsewhere) process.chdir(elsewhere);
+    const located = await locate(repo);
+    expect(await fs.realpath(located.gitDir)).toBe(await fs.realpath(moved));
+  } finally { process.chdir(cwd); }
 });

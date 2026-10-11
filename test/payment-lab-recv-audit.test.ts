@@ -7,9 +7,11 @@ import { preimageFor, tempDirectory, type Invoice, type Payment, type RawDb } fr
  * and its analysis commands (src/analysis): a lookup or create answer for another payment hash, an
  * invoice LND deleted, a late invoice LND deleted, the deliveries log growing with every repeat, payment
  * preimages and requests in `analysis payments`, a paged scan that stopped early reported complete, a
- * hold invoice LND returned from ACCEPTED to OPEN, an underpaid order that could never be paid, and a
- * SETTLED report with nothing paid. The lab's real stores and workflows run against a scripted invoice
- * API; no node, no Docker, no credential.
+ * stale OPEN answer after ACCEPTED, an underpaid order that could never be paid, and a SETTLED report
+ * with nothing paid; and of the 1.4 audit: a settle whose lookup answer lands after the record was
+ * decided not-created, a creating hold invoice LND canceled and deleted, and two semantics of the
+ * harness's scripted LND (a held HTLC timing out, SettleInvoice on a settled invoice). The lab's real
+ * stores and workflows run against a scripted invoice API; no node, no Docker, no credential.
  */
 
 /** Where the lab's modules are loaded from (a computed specifier, as in helpers/payment-lab-modules.ts). */
@@ -32,6 +34,7 @@ interface ReceiverStore {
     { outcome: string; reason?: string };
   markCreated(paymentHash: string, paymentRequest: string, addIndex: bigint): string | undefined;
   markNotCreated(paymentHash: string, createdBefore?: string): boolean;
+  settleRefusal(paymentHash: string): string | undefined;
   applyInvoice(invoice: Invoice, source: string): string;
   cursor(): { addIndex: bigint; settleIndex: bigint };
   setCursor(settleIndex: bigint, addIndex: bigint): void;
@@ -68,6 +71,27 @@ interface Lab {
   analysis: Analysis;
   diagnose: Diagnose;
 }
+
+/** The harness's scripted LND (examples/payment-lab/test/harness/lnd.ts), as far as these tests drive it. */
+interface ScriptedCall { kind: string; hash: string }
+interface ScriptedLnd {
+  readonly invoices: Map<string, { state: string; amtPaidMsat: bigint }>;
+  readonly calls: ScriptedCall[];
+  invoiceApi(proc: 'p0' | 'p1'): FakeInvoiceApi;
+  invoiceEvent(hash: string, what: string): boolean;
+  answer(call: ScriptedCall, mode: string): boolean;
+}
+interface ScriptedHooks {
+  settleCalled(proc: string, hash: string): void;
+  progress(): void;
+  currentWorkflow(): undefined;
+  callCreated(call: ScriptedCall): void;
+  alive(): boolean;
+}
+type ScriptedLndClass = new (lab: Pick<Lab, 'LndError' | 'TransportError'>, hooks: ScriptedHooks) => ScriptedLnd;
+
+/** Lets pending promise callbacks run (no timers). */
+const turns = async (): Promise<void> => { for (let turn = 0; turn < 20; turn += 1) await new Promise(resolve => setImmediate(resolve)); };
 
 let lab: Lab;
 const dir = tempDirectory();
@@ -310,6 +334,31 @@ describe('payment lab receiver audit: invoices LND deleted', () => {
     expect(deps.store.invoice(hash)?.state).toBe('canceled');
   });
 
+  it('a hold invoice still creating whose CancelInvoice LND accepted, then deleted it, is canceled; one LND never had stays creating', async () => {
+    // LND held it (the create call had reached it; its answer was lost) and accepted the cancel. LND answers an error for a
+    // hash it does not hold, so a successful CancelInvoice proves it held the invoice: NotFound after it means canceled and
+    // deleted, as for an open or accepted record. The order is canceled, and a replacement can be issued for it.
+    const deps = receiver();
+    const { preimage, paymentHash } = preimageFor('recv-audit-02d');
+    expect(deps.store.recordInvoiceIntent({ orderId: 'O-02D', amountMsat: 4000n, kind: 'hold', preimage, paymentHash }).outcome).toBe('recorded');
+    deps.api.invoices.set(paymentHash, lndInvoice(paymentHash, 'OPEN'));
+    deps.api.deleteOnCancel = true;
+    expect(await lab.receiver.cancelHoldInvoice(deps, 'O-02D')).toEqual({ kind: 'canceled' });
+    expect(deps.store.invoice(paymentHash)?.state).toBe('canceled');
+    expect(deps.store.order('O-02D')?.state).toBe('canceled');
+    expect(deps.events).toContainEqual(expect.objectContaining({ event: 'invoice-not-found', paymentHash }));
+    // Control: LND never had it (CancelInvoice itself fails with NotFound): nothing is proved, the record stays creating, and
+    // the creation window decides it, as before.
+    const control = receiver();
+    const never = preimageFor('recv-audit-02d-control');
+    expect(control.store.recordInvoiceIntent({ orderId: 'O-02D', amountMsat: 4000n, kind: 'hold', ...never }).outcome).toBe('recorded');
+    expect(await lab.receiver.cancelHoldInvoice(control, 'O-02D')).toEqual({ kind: 'unresolved', reason: 'lookup not-found' });
+    expect(control.store.invoice(never.paymentHash)?.state).toBe('creating');
+    expect(control.store.order('O-02D')?.state).toBe('awaiting-payment');
+    expect(control.api.calls).toEqual(['CancelInvoice', 'LookupInvoice']);
+    expect(control.events.map(event => event.event)).not.toContain('invoice-not-found');
+  });
+
   it('a creating invoice LND has no record of stays creating inside the creation window (unchanged rule)', async () => {
     const deps = receiver();
     const { preimage, paymentHash } = preimageFor('recv-audit-02c');
@@ -423,7 +472,10 @@ describe('payment lab receiver audit: the settle cursor', () => {
 });
 
 describe('payment lab receiver audit: hold invoice ACCEPTED then OPEN', () => {
-  it('LND returning a hold invoice from ACCEPTED to OPEN makes the record open with nothing paid; canceled and settled stay final', async () => {
+  // lnd never returns a hold invoice from ACCEPTED to OPEN (a held HTLC that times out cancels the invoice; a single HTLC is
+  // canceled only on an OPEN invoice): an OPEN after an ACCEPTED is a stale or reordered answer. The record still takes it,
+  // open with nothing paid, so that LND's latest word wins whichever order two answers land in.
+  it('an OPEN answer after ACCEPTED (a stale or reordered answer) makes the record open with nothing paid; canceled and settled stay final', async () => {
     const deps = receiver();
     const hash = await created(deps, 'O-07', true);
     expect(deps.store.applyInvoice(lndInvoice(hash, 'ACCEPTED'), 'lookup')).toBe('state-updated');
@@ -569,8 +621,6 @@ describe('payment lab receiver audit (1.3.1, F07): a late lookup answer for an i
     }
   }
 
-  const turns = async (): Promise<void> => { for (let turn = 0; turn < 20; turn += 1) await new Promise(resolve => setImmediate(resolve)); };
-
   it('an OPEN answer reaching the pass after NotFound decided the invoice not-created and a replacement was issued cancels it in that pass', async () => {
     const api = new DeferredApi();
     const deps = receiver(receiverStore(), api);
@@ -610,5 +660,159 @@ describe('payment lab receiver audit (1.3.1, F07): a late lookup answer for an i
     expect(deps.events.map(event => event.event)).toContain('late-invoice-canceled');
     // The late OPEN was recorded once, as late-invoice.
     expect(deps.store.deliveries(A).filter(item => item.lndState === 'OPEN').map(item => item.outcome)).toEqual(['late-invoice']);
+  });
+});
+
+describe('payment lab receiver audit (1.4, RECV-A): a settle whose lookup answer lands after the record was decided not-created', () => {
+  /** The scripted API with AddHoldInvoice stalling for its first call and every lookup answered by the test, in the order it chooses. */
+  class DeferredHoldApi extends FakeInvoiceApi {
+    deferLookups = true;
+    adds = 0;
+    readonly pending: { paymentHash: string; resolve(invoice: Invoice): void; reject(error: Error): void }[] = [];
+
+    override addHoldInvoice(request: { paymentHash: string; valueMsat: bigint }): Promise<{ paymentRequest: string; addIndex: bigint }> {
+      this.adds += 1;
+      if (this.adds > 1) return super.addHoldInvoice(request);
+      this.calls.push('AddHoldInvoice');
+      return new Promise(() => undefined); // A: the call stalls for good
+    }
+
+    override lookupInvoice(paymentHash: string): Promise<Invoice> {
+      if (!this.deferLookups) return super.lookupInvoice(paymentHash);
+      this.calls.push('LookupInvoice');
+      return new Promise((resolve, reject) => { this.pending.push({ paymentHash, resolve, reject }); });
+    }
+  }
+
+  it('an ACCEPTED answer reaching "receiver settle" after NotFound decided the invoice not-created and a replacement was issued cancels it; nothing is settled', async () => {
+    const api = new DeferredHoldApi();
+    const store = receiverStore();
+    const path = dir.path(`recv-audit-${files}.db`);
+    const deps = receiver(store, api);
+    // 1. Hold invoice A stays creating: its AddHoldInvoice call stalls.
+    void lab.receiver.createInvoice(deps, { orderId: 'O-10', amountMsat: 4000n, hold: true, memo: 'O-10', expirySeconds: 3600 });
+    await turns();
+    const A = String(deps.store.db.prepare(`SELECT payment_hash FROM invoices WHERE order_id = 'O-10'`).all()[0]?.payment_hash);
+    expect(deps.store.invoice(A)?.state).toBe('creating');
+    // 2. An older reconciliation looks A up; its answer is delayed.
+    const earlier = lab.receiver.reconcileInvoices(deps);
+    await turns();
+    // The creation window passes.
+    store.db.exec(`UPDATE invoices SET created_at = strftime('%Y-%m-%dT%H:%M:%fZ', created_at, '-180 seconds')`);
+    // 3. LND created A after all and the customer paid it: ACCEPTED in LND. "receiver settle" on another connection selects A
+    //    (the order's live hold invoice) and looks it up; that answer is delayed too.
+    api.invoices.set(A, lndInvoice(A, 'ACCEPTED'));
+    const other = new lab.ReceiverStore(path);
+    opened.push(other);
+    const settling = receiver(other, api);
+    const settle = lab.receiver.settleHoldInvoice(settling, 'O-10');
+    await turns();
+    expect(api.pending.map(item => item.paymentHash)).toEqual([A, A]);
+    // 4. The older NotFound arrives: A is decided not-created.
+    api.pending[0]?.reject(new lab.LndError('unable to locate invoice', 5, 404));
+    expect(await earlier).toEqual({ resolved: 1, open: 0, unknown: 0 });
+    expect(deps.store.invoice(A)?.state).toBe('not-created');
+    // 5. Replacement B is issued, OPEN in LND.
+    api.deferLookups = false;
+    const B = await created(deps, 'O-10', true);
+    expect(api.invoices.get(B)?.state).toBe('OPEN');
+    // 6. The ACCEPTED answer for A reaches the settle. A is a late invoice (B is the order's live one): it is canceled in LND and
+    //    never settled (README: a late invoice is canceled, never actively settled); B stays payable, the order still awaits payment.
+    api.pending[1]?.resolve(lndInvoice(A, 'ACCEPTED'));
+    const outcome = await settle;
+    expect(outcome.kind).toBe('refused');
+    expect(outcome.reason).toMatch(/after it was recorded as not created/);
+    expect(api.calls.filter(call => call === 'SettleInvoice')).toHaveLength(0);
+    expect(api.calls.filter(call => call === 'CancelInvoice')).toHaveLength(1);
+    expect(api.invoices.get(A)?.state).toBe('CANCELED');
+    expect(api.invoices.get(B)?.state).toBe('OPEN');
+    expect(deps.store.invoice(A)).toMatchObject({ state: 'not-created', lateLndState: 'CANCELED' });
+    expect(deps.store.invoice(B)?.state).toBe('open');
+    expect(deps.store.order('O-10')?.state).toBe('awaiting-payment');
+    expect(deps.store.journal('O-10')).toEqual([]);
+    expect(settling.events.map(event => event.event)).toContain('late-invoice-canceled');
+    expect(settling.events.map(event => event.event)).not.toContain('settle-called');
+    // The late ACCEPTED was recorded once, as late-invoice.
+    expect(deps.store.deliveries(A).filter(item => item.lndState === 'ACCEPTED').map(item => item.outcome)).toEqual(['late-invoice']);
+  });
+
+  it('settleRefusal refuses an invoice that is no longer open or accepted (the transactional re-check before SettleInvoice)', async () => {
+    const store = receiverStore();
+    const hash = await created(receiver(store), 'O-10B', true);
+    expect(store.settleRefusal(hash)).toBeUndefined();
+    const displaced = preimageFor('recv-audit-10b-displaced');
+    expect(store.recordInvoiceIntent({ orderId: 'O-10C', amountMsat: 4000n, kind: 'hold', ...displaced }).outcome).toBe('recorded');
+    expect(store.settleRefusal(displaced.paymentHash)).toMatch(/is creating/);
+    expect(store.markNotCreated(displaced.paymentHash)).toBe(true);
+    expect(store.settleRefusal(displaced.paymentHash)).toMatch(/is not-created/);
+    expect(store.applyInvoice(lndInvoice(hash, 'CANCELED'), 'lookup')).toBe('state-updated');
+    expect(store.settleRefusal(hash)).toMatch(/is canceled/);
+  });
+});
+
+describe('payment lab fake LND (test model, 1.4 audit): lnd semantics the harness relies on', () => {
+  let FakeLnd: ScriptedLndClass;
+  beforeAll(async () => {
+    const HARNESS = '../examples/payment-lab/test/harness/';
+    ({ FakeLnd } = await import(/* @vite-ignore */ `${HARNESS}lnd.ts`) as { FakeLnd: ScriptedLndClass });
+  });
+
+  /** The scripted LND with every call answered `ok` at once while `auto.on`, else left for the test to answer. */
+  function scriptedLnd(): { fake: ScriptedLnd; auto: { on: boolean } } {
+    const auto = { on: true };
+    const hooks: ScriptedHooks = { settleCalled: () => undefined, progress: () => undefined, currentWorkflow: () => undefined,
+      callCreated: call => { if (auto.on) queueMicrotask(() => { fake.answer(call, 'ok'); }); }, alive: () => true };
+    const fake = new FakeLnd({ LndError: lab.LndError, TransportError: lab.TransportError }, hooks);
+    return { fake, auto };
+  }
+
+  it('C: a held HTLC timing out cancels an ACCEPTED hold invoice (lnd force-cancels an accepted invoice at its block expiry, never returns it to OPEN); on an OPEN one it is no event', async () => {
+    const { fake } = scriptedLnd();
+    const deps = receiver(receiverStore(), fake.invoiceApi('p0'));
+    const A = await created(deps, 'O-12', true);
+    // OPEN: a single HTLC of a partial payment timing out leaves the invoice open; with one HTLC per payment and no HTLCs in
+    // lookups, this receiver cannot see it.
+    expect(fake.invoiceEvent(A, 'htlc-timeout')).toBe(false);
+    expect(fake.invoices.get(A)?.state).toBe('OPEN');
+    expect(fake.invoiceEvent(A, 'pay')).toBe(true);
+    expect(fake.invoices.get(A)?.state).toBe('ACCEPTED');
+    expect(fake.invoiceEvent(A, 'htlc-timeout')).toBe(true);
+    expect(fake.invoices.get(A)).toMatchObject({ state: 'CANCELED', amtPaidMsat: 0n });
+    // It cannot be paid again, and the receiver learns of the cancel as of any other: by lookup.
+    expect(fake.invoiceEvent(A, 'pay')).toBe(false);
+    expect(await lab.receiver.reconcileInvoices(deps)).toEqual({ resolved: 1, open: 0, unknown: 0 });
+    expect(deps.store.invoice(A)?.state).toBe('canceled');
+    expect(deps.store.order('O-12')?.state).toBe('canceled');
+  });
+
+  it('D: SettleInvoice for an invoice LND already settled succeeds (lnd: "If the invoice is already settled, this call will succeed"): a second settle after a lost answer settles without a settle-call-error', async () => {
+    const { fake, auto } = scriptedLnd();
+    const deps = receiver(receiverStore(), fake.invoiceApi('p0'));
+    const A = await created(deps, 'O-13', true);
+    expect(fake.invoiceEvent(A, 'pay')).toBe(true);
+    auto.on = false;
+    // Two operators run "receiver settle" at once; both lookups answer ACCEPTED, so both call SettleInvoice.
+    const first = lab.receiver.settleHoldInvoice(deps, 'O-13');
+    await turns();
+    expect(fake.answer(fake.calls.at(-1) as ScriptedCall, 'ok')).toBe(true);
+    await turns();
+    const second = lab.receiver.settleHoldInvoice(deps, 'O-13');
+    await turns();
+    expect(fake.answer(fake.calls.at(-1) as ScriptedCall, 'ok')).toBe(true);
+    await turns();
+    const settles = fake.calls.filter(call => call.kind === 'settle');
+    expect(settles).toHaveLength(2);
+    // The first SettleInvoice reaches LND, which settles the invoice, but its answer is lost; the second reaches an invoice
+    // already settled, which LND's SettleInvoice treats as success.
+    expect(fake.answer(settles[0] as ScriptedCall, 'lost-answer')).toBe(true);
+    expect(fake.answer(settles[1] as ScriptedCall, 'ok')).toBe(true);
+    auto.on = true; // the lookups after the calls
+    expect((await first).kind).toBe('settled');
+    expect((await second).kind).toBe('settled');
+    expect(deps.events.filter(event => event.event === 'settle-call-error')).toHaveLength(1); // the lost answer only
+    expect(deps.events.filter(event => event.event === 'settle-called')).toHaveLength(1);
+    expect(deps.store.journal('O-13').map(entry => entry.event)).toEqual(['invoice-settled']);
+    expect(deps.store.order('O-13')?.state).toBe('fulfilled');
+    expect(deps.store.invoice(A)?.state).toBe('settled');
   });
 });
