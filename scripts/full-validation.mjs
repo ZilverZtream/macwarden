@@ -2,6 +2,8 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
+import { assignShards, readDurations } from './oracle-shards.mjs';
+import { runNode } from './run-node.mjs';
 import { fileURLToPath } from 'node:url';
 import { createPrivateDirectory } from './private-scratch.mjs';
 import { findLeaks, sentinelRedactor } from './leak-check.mjs';
@@ -9,6 +11,12 @@ import { run, runNpm, commandTimeout, oracleCommandTimeout, fullSuite, skippedSo
 
 const scriptRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const vitestCli = join(scriptRoot, 'node_modules', 'vitest', 'vitest.mjs');
+
+// LND fixture owners for the oracle shards, one regtest node each. Owners 3 and 4 stay free:
+// CP-050/fixture-shard-isolation (test/oracle/cp050-policy.test.ts) starts them itself.
+// Six start in parallel in about 15 s and pass reliably; more cannot help much, since the host
+// CPU, not Docker, bounds the oracle files. The plan drops owners it has no files for.
+export const lndOwners = ['1', '2', '5', '6', '7', '8'];
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const readJson = path => JSON.parse(readFileSync(path, 'utf8'));
@@ -71,15 +79,16 @@ async function validate(args) {
     const env = { ...process.env, MACWARDEN_TEST_TMP: scratch, MACWARDEN_SENTINEL_DIR: sentinels };
     delete env.MACWARDEN_FIXTURE_SHARD;
     // LND fixture shards are numbered; the Core Lightning fixture has its own fixed project.
-    if (/^[1-4]$/.test(owner)) env.MACWARDEN_FIXTURE_SHARD = owner;
+    if (/^[1-8]$/.test(owner)) env.MACWARDEN_FIXTURE_SHARD = owner;
     const ctx = { owner, scratch, sentinels, env, output: '' };
     contexts.push(ctx);
     result.lifecycle.owners.push({ owner, scratch, sentinels, createdAt: new Date().toISOString() });
     return ctx;
   };
   const perform = async (ctx, argv, deadline = timeout, directVitest = false) => {
+    // Asynchronous either way: the unit and oracle phases share this event loop.
     const invocation = directVitest
-      ? run(process.execPath, [vitestCli, ...argv], root, ctx.env, undefined, deadline)
+      ? await runNode([vitestCli, ...argv], root, ctx.env, deadline)
       : await runNpm(argv, root, ctx.env, deadline);
     result.commands.push({ owner: ctx.owner, argv, exitCode: invocation.exitCode, timedOut: invocation.timedOut,
       ...(directVitest ? { program: process.execPath, cli: vitestCli } : {}) });
@@ -145,72 +154,101 @@ async function validate(args) {
     };
     oracleFileCoverage(oracles.map(item => item.file), 'oracle-collection');
     oracleFileCoverage(clnOracles.map(item => item.file), 'oracle-cln-collection', 'cln-oracle');
-    const unitReport = join(unit.scratch, 'unit-report.json');
-    await perform(unit, ['run', '--config', unitConfig, '--cache=false', '--reporter=json', `--outputFile=${unitReport}`], timeout, true);
-    report(unit, unitReport, 'unit', units);
-    let unitData = readJson(unitReport);
-    if (harnessConfig) {
-      const harness = await inventory(unit, harnessConfig, 'harness');
-      const harnessReport = join(unit.scratch, 'harness-report.json');
-      await perform(unit, ['run', 'test:harness', '--', ...npmVitestConfigArgs(root, 'test:harness', harnessConfig), '--cache=false', '--reporter=json', `--outputFile=${harnessReport}`]);
-      report(unit, harnessReport, 'harness', harness);
-      const data = readJson(harnessReport);
-      unitData = { success: unitData.success && data.success,
-        testResults: [...unitData.testResults, ...data.testResults],
-        numTotalTests: unitData.numTotalTests + data.numTotalTests,
-        numPassedTests: unitData.numPassedTests + data.numPassedTests,
-        numFailedTests: unitData.numFailedTests + data.numFailedTests,
-        numPendingTests: unitData.numPendingTests + data.numPendingTests,
-        numFailedTestSuites: unitData.numFailedTestSuites + data.numFailedTestSuites };
-    }
-    fullSuite(root, 'unit', unitData, result.checks);
-    const oracleObserved = [];
-    // The Core Lightning rune comparison runs beside the LND shards against its own disposable
-    // regtest fixture (fixture:cln:up, test:cln-oracle, fixture:cln:down), recorded like them.
-    const clnShard = async () => {
-      const ctx = await context('cln');
-      const path = join(ctx.scratch, 'cln-oracle-report.json');
+    // Explicit per-owner file lists, balanced by measured duration: each oracle file has
+    // exactly one owner, so stateful files never share a node, and the plan check proves it.
+    const relativeFile = file => relative(root, resolve(root, file)).replaceAll('\\', '/');
+    const oracleFiles = [...new Set(oracles.map(item => relativeFile(item.file)))].sort();
+    const plan = assignShards(oracleFiles, readDurations(root), lndOwners.length)
+      .map((shard, index) => ({ owner: lndOwners[index], files: shard.files, predictedSeconds: Math.round(shard.seconds) }));
+    const planned = plan.flatMap(shard => shard.files).sort();
+    result.checks.push({ name: 'oracle-shard-plan', status: plan.length > 0 && new Set(planned).size === planned.length &&
+      JSON.stringify(planned) === JSON.stringify(oracleFiles) ? 'PASS' : 'FAIL', detail: JSON.stringify(plan) });
+    // The phases run side by side, each with its own owners: the Core Lightning shard and the LND
+    // fixture startups overlap the unit and harness commands, gitleaks overlaps the LND oracle
+    // files. The LND files themselves wait for the unit and harness commands: they compete for
+    // the host CPU (they spawn the CLI constantly), and measured on 24 threads they pushed the
+    // unit command past its 600000 ms deadline (646 s beside six shards, 398 s alone) while
+    // saving only a tenth of the wall time.
+    let releaseOracleFiles;
+    const unitCommandsDone = new Promise(resolveGate => { releaseOracleFiles = resolveGate; });
+    const unitPhase = async () => {
+      let unitData;
+      // Released however the unit commands end, so a unit failure never strands the oracle phase.
       try {
-        if (await perform(ctx, ['run', 'fixture:cln:up'])) {
-          await perform(ctx, ['run', 'test:cln-oracle', '--', ...npmVitestConfigArgs(root, 'test:cln-oracle', clnConfig), '--cache=false', '--reporter=json', `--outputFile=${path}`], oracleTimeout);
+        const unitReport = join(unit.scratch, 'unit-report.json');
+        await perform(unit, ['run', '--config', unitConfig, '--cache=false', '--reporter=json', `--outputFile=${unitReport}`], timeout, true);
+        report(unit, unitReport, 'unit', units);
+        unitData = readJson(unitReport);
+        if (harnessConfig) {
+          const harness = await inventory(unit, harnessConfig, 'harness');
+          const harnessReport = join(unit.scratch, 'harness-report.json');
+          await perform(unit, ['run', 'test:harness', '--', ...npmVitestConfigArgs(root, 'test:harness', harnessConfig), '--cache=false', '--reporter=json', `--outputFile=${harnessReport}`]);
+          report(unit, harnessReport, 'harness', harness);
+          const data = readJson(harnessReport);
+          unitData = { success: unitData.success && data.success,
+            testResults: [...unitData.testResults, ...data.testResults],
+            numTotalTests: unitData.numTotalTests + data.numTotalTests,
+            numPassedTests: unitData.numPassedTests + data.numPassedTests,
+            numFailedTests: unitData.numFailedTests + data.numFailedTests,
+            numPendingTests: unitData.numPendingTests + data.numPendingTests,
+            numFailedTestSuites: unitData.numFailedTestSuites + data.numFailedTestSuites };
         }
-      } finally {
-        await perform(ctx, ['run', 'fixture:cln:down']);
-      }
-      if (!existsSync(path)) throw new Error('cln oracle report missing');
-      const observed = report(ctx, path, 'oracle-cln', clnOracles);
-      oracleFileCoverage(observed.map(item => item.file), 'oracle-cln-aggregate', 'cln-oracle');
+      } finally { releaseOracleFiles(); }
+      fullSuite(root, 'unit', unitData, result.checks);
+      const gitleaksCommand = readJson(join(root, 'package.json')).scripts?.['test:gitleaks'];
+      const gitleaksConfig = typeof gitleaksCommand === 'string'
+        ? /(?:^|\s)--config\s+([\w./-]+)(?:\s|$)/.exec(gitleaksCommand)?.[1] : null;
+      if (!gitleaksConfig || !existsSync(join(root, gitleaksConfig))) throw new Error('gitleaks inventory configuration unavailable');
+      const gitleaks = await inventory(unit, gitleaksConfig, 'gitleaks');
+      const gitleaksReport = join(unit.scratch, 'gitleaks-report.json');
+      await perform(unit, ['run', 'test:gitleaks', '--', '--cache=false', '--reporter=json', `--outputFile=${gitleaksReport}`], oracleTimeout);
+      report(unit, gitleaksReport, 'gitleaks', gitleaks);
     };
-    // Built-in Vitest file sharding keeps each stateful file with one owner.
-    const shards = await Promise.allSettled([clnShard(), ...['1', '2'].map(async owner => {
-      const ctx = await context(owner);
-      const path = join(ctx.scratch, 'oracle-report.json');
-      try {
-        if (await perform(ctx, ['run', 'fixture:up'])) {
-          await perform(ctx, ['run', 'test:oracle', '--', ...npmVitestConfigArgs(root, 'test:oracle', oracleConfig), `--shard=${owner}/2`, '--cache=false', '--reporter=json', `--outputFile=${path}`], oracleTimeout);
+    const oraclePhase = async () => {
+      const oracleObserved = [];
+      // The Core Lightning rune comparison runs beside the LND shards against its own disposable
+      // regtest fixture (fixture:cln:up, test:cln-oracle, fixture:cln:down), recorded like them.
+      const clnShard = async () => {
+        const ctx = await context('cln');
+        const path = join(ctx.scratch, 'cln-oracle-report.json');
+        try {
+          if (await perform(ctx, ['run', 'fixture:cln:up'])) {
+            await perform(ctx, ['run', 'test:cln-oracle', '--', ...npmVitestConfigArgs(root, 'test:cln-oracle', clnConfig), '--cache=false', '--reporter=json', `--outputFile=${path}`], oracleTimeout);
+          }
+        } finally {
+          await perform(ctx, ['run', 'fixture:cln:down']);
         }
-      } finally {
-        await perform(ctx, ['run', 'fixture:down']);
-      }
-      if (!existsSync(path)) throw new Error('shard report missing');
-      const data = readJson(path);
-      const files = new Set((data.testResults || []).map(suite => resolve(root, suite.name)));
-      oracleObserved.push(...report(ctx, path, `oracle-${owner}`, oracles.filter(item => files.has(resolve(root, item.file)))));
-    })]);
-    if (shards.some(shard => shard.status === 'rejected')) throw new Error('shard validation failed');
-    const keys = items => items.map(item => `${resolve(root, item.file)}\0${item.inventoryName ?? item.name}`).sort();
-    const actual = keys(oracleObserved);
-    result.checks.push({ name: 'oracle-union', status: new Set(actual).size === actual.length &&
-      JSON.stringify(actual) === JSON.stringify(keys(oracles)) ? 'PASS' : 'FAIL' });
-    oracleFileCoverage(oracleObserved.map(item => item.file), 'oracle-aggregate');
-    const gitleaksCommand = readJson(join(root, 'package.json')).scripts?.['test:gitleaks'];
-    const gitleaksConfig = typeof gitleaksCommand === 'string'
-      ? /(?:^|\s)--config\s+([\w./-]+)(?:\s|$)/.exec(gitleaksCommand)?.[1] : null;
-    if (!gitleaksConfig || !existsSync(join(root, gitleaksConfig))) throw new Error('gitleaks inventory configuration unavailable');
-    const gitleaks = await inventory(unit, gitleaksConfig, 'gitleaks');
-    const gitleaksReport = join(unit.scratch, 'gitleaks-report.json');
-    await perform(unit, ['run', 'test:gitleaks', '--', '--cache=false', '--reporter=json', `--outputFile=${gitleaksReport}`], oracleTimeout);
-    report(unit, gitleaksReport, 'gitleaks', gitleaks);
+        if (!existsSync(path)) throw new Error('cln oracle report missing');
+        const observed = report(ctx, path, 'oracle-cln', clnOracles);
+        oracleFileCoverage(observed.map(item => item.file), 'oracle-cln-aggregate', 'cln-oracle');
+      };
+      const shards = await Promise.allSettled([clnShard(), ...plan.map(async ({ owner, files }) => {
+        const ctx = await context(owner);
+        const path = join(ctx.scratch, 'oracle-report.json');
+        try {
+          if (await perform(ctx, ['run', 'fixture:up'])) {
+            await unitCommandsDone;
+            await perform(ctx, ['run', 'test:oracle', '--', ...npmVitestConfigArgs(root, 'test:oracle', oracleConfig), '--cache=false', '--reporter=json', `--outputFile=${path}`, ...files], oracleTimeout);
+          }
+        } finally {
+          await perform(ctx, ['run', 'fixture:down']);
+        }
+        if (!existsSync(path)) throw new Error('shard report missing');
+        // Expected cases come from the plan, not from the report: a file the shard skipped or
+        // one it ran without owning both fail this shard's completeness check.
+        const owned = new Set(files);
+        oracleObserved.push(...report(ctx, path, `oracle-${owner}`, oracles.filter(item => owned.has(relativeFile(item.file)))));
+      })]);
+      if (shards.some(shard => shard.status === 'rejected')) throw new Error('shard validation failed');
+      const keys = items => items.map(item => `${resolve(root, item.file)}\0${item.inventoryName ?? item.name}`).sort();
+      const actual = keys(oracleObserved);
+      result.checks.push({ name: 'oracle-union', status: new Set(actual).size === actual.length &&
+        JSON.stringify(actual) === JSON.stringify(keys(oracles)) ? 'PASS' : 'FAIL' });
+      oracleFileCoverage(oracleObserved.map(item => item.file), 'oracle-aggregate');
+    };
+    // Both phases always finish (fixtures torn down, reports recorded) before either failure counts.
+    const phases = await Promise.allSettled([unitPhase(), oraclePhase()]);
+    if (phases.some(phase => phase.status === 'rejected')) throw new Error('phase validation failed');
     result.checks.push({ name: 'no-skipped-source', status: skippedSourceCount(root) ? 'FAIL' : 'PASS' });
     const unchanged = git(root, ['rev-parse', 'HEAD']) === candidate &&
       candidateInputsClean(root, [evidence, runtime]) &&
