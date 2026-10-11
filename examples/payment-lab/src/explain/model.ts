@@ -126,8 +126,8 @@ export class Timeline {
   }
 
   sorted(): TimelineItem[] {
-    return this.#items.map((item, index) => ({ item, index }))
-      .sort((a, b) => (a.item.at < b.item.at ? -1 : a.item.at > b.item.at ? 1 : a.index - b.index)).map(entry => entry.item);
+    // Array.prototype.sort is stable (ES2019): items with equal times keep the order they were added in.
+    return [...this.#items].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
   }
 }
 

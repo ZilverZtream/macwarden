@@ -29,6 +29,20 @@ const INVISIBLE = /[\p{Cf}\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u3164\ufe0
 /** A BOLT 11 string (group 1); a hex run of 64 or more; a standalone base64 run of 43 or 44 characters (group 2), 32 bytes. */
 const SECRET_SHAPED = /(ln(?:bcrt|bc|tb|sb)[0-9a-z]{20,})|[0-9a-f]{64,}|(?<![A-Za-z0-9+/])([A-Za-z0-9+/]{43,44}={0,2})(?![A-Za-z0-9+/=])/gi;
 const HASHED_NAME = '=sha256-';
+/**
+ * Whether `value` has a run of 24 or more of [A-Za-z0-9+/]: every SECRET_SHAPED match is one
+ * (BOLT 11: 4 + 20; hex: 64; base64: 43). One pass, no backtracking.
+ */
+function hasSecretRun(value: string): boolean {
+  let run = 0;
+  for (let at = 0; at < value.length; at += 1) {
+    const code = value.charCodeAt(at);
+    if ((code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || code === 43 || code === 47) {
+      if (++run >= 24) return true;
+    } else run = 0;
+  }
+  return false;
+}
 
 /** A string with every payment hash fingerprinted and anything else secret-shaped removed (see the header). */
 export function scrub(value: string, known: ReadonlySet<string>): string {
@@ -39,6 +53,8 @@ export function scrub(value: string, known: ReadonlySet<string>): string {
       : known.has(text.toLowerCase()) || visible.slice(Math.max(0, start - HASHED_NAME.length), start) === HASHED_NAME ? fingerprint(text)
         : '[redacted]');
   if (!INVISIBLE.test(value)) {
+    // No run long enough for any secret shape: nothing to replace (most timeline details).
+    if (!hasSecretRun(value)) return value;
     return value.replace(SECRET_SHAPED, (text: string, invoice: string | undefined, base64: string | undefined, start: number) =>
       replace(text, invoice, base64, start, value));
   }

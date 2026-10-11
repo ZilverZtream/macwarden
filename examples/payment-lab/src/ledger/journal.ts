@@ -218,7 +218,16 @@ export interface JournalEntry {
 /** The entries of one operation (payer) or order (receiver), with their lines, in posting order. */
 export function entriesFor(db: DatabaseSync, operationId: string): JournalEntry[] {
   const entries = db.prepare('SELECT * FROM journal_entries WHERE operation_id = ? ORDER BY entry_id').all(operationId);
-  const lines = db.prepare('SELECT * FROM journal_lines WHERE entry_id = ? ORDER BY line_no');
+  // Every line of those entries in one query (one per entry took seconds at 50,000 entries), grouped by entry.
+  const lines = new Map<number, JournalLine[]>();
+  for (const item of db.prepare(`SELECT l.* FROM journal_lines l JOIN journal_entries e ON e.entry_id = l.entry_id
+      WHERE e.operation_id = ? ORDER BY l.entry_id, l.line_no`).all(operationId)) {
+    const entryId = Number(int(item, 'entry_id'));
+    let list = lines.get(entryId);
+    if (list === undefined) lines.set(entryId, list = []);
+    list.push({ lineNo: Number(int(item, 'line_no')), account: text(item, 'account'), direction: text(item, 'direction') as Direction,
+      amountMsat: int(item, 'amount_msat'), leg: optionalText(item, 'leg') as Leg | undefined });
+  }
   return entries.map(row => ({
     entryId: Number(int(row, 'entry_id')),
     event: text(row, 'event') as LedgerEvent,
@@ -227,8 +236,7 @@ export function entriesFor(db: DatabaseSync, operationId: string): JournalEntry[
     paymentHash: optionalText(row, 'payment_hash'),
     origin: text(row, 'origin') as JournalEntry['origin'],
     postedAt: text(row, 'posted_at'),
-    lines: lines.all(int(row, 'entry_id')).map(item => ({ lineNo: Number(int(item, 'line_no')), account: text(item, 'account'),
-      direction: text(item, 'direction') as Direction, amountMsat: int(item, 'amount_msat'), leg: optionalText(item, 'leg') as Leg | undefined })),
+    lines: lines.get(Number(int(row, 'entry_id'))) ?? [],
   }));
 }
 
