@@ -235,6 +235,31 @@ function scrubStrings(value, redact) {
   return value;
 }
 
+const collectScript = join(dirname(fileURLToPath(import.meta.url)), 'collect-test-names.mjs');
+
+/**
+ * The duplicate-name condition of fullSuite (`new Set(titles).size === titles.length` over
+ * the reporter's fullName, or title, of every unit and harness test), from a collection
+ * before any test runs. Returns the collection commands, whether every collection succeeded,
+ * the number of names and the duplicated names.
+ */
+export function collectedNameDuplicates(root, env, scratch, timeout) {
+  const configs = [resolveVitestConfig(root), resolveVitestConfig(root, 'harness', true)].filter(Boolean);
+  const commands = [];
+  const titles = [];
+  for (const [index, config] of configs.entries()) {
+    const output = join(scratch, `collected-names-${index}.json`);
+    const argv = [collectScript, config, output];
+    const result = run(process.execPath, argv, root, env, undefined, timeout);
+    commands.push({ argv, exitCode: result.exitCode, timedOut: result.timedOut, output: result.output });
+    if (result.exitCode !== 0) return { collected: false, commands, count: titles.length, duplicates: [] };
+    titles.push(...JSON.parse(readFileSync(output, 'utf8')).map(test => test.fullName || test.title));
+  }
+  const seen = new Set();
+  const duplicates = titles.filter(title => seen.has(title) || !seen.add(title));
+  return { collected: true, commands, count: titles.length, duplicates };
+}
+
 export function safeSerialize(value, options) {
   const scrubbed = scrubStrings(value, sentinelRedactor(options));
   const serialized = JSON.stringify(scrubbed, null, 2);
