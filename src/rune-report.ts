@@ -55,7 +55,10 @@ export function shownRuneText(bytes: string): string {
   let text: string;
   try { text = fatal.decode(raw); }
   catch { text = [...raw].map(byte => byte < 0x80 ? String.fromCharCode(byte) : `\\x${byte.toString(16).padStart(2, '0')}`).join(''); }
-  text = redactDecoded(text.replace(TOKEN, token => NODE_ID.test(token) || token.replace(/[.:~]/g, '').length < TOKEN_LENGTH ? token : '[redacted]'));
+  // Recognised credentials first: replacing long tokens first would cut an encoded macaroon
+  // (hex groups, wrapped base64) into pieces no longer recognised, and its short tail would
+  // be shown (audit 1.3.2).
+  text = redactDecoded(text).replace(TOKEN, token => NODE_ID.test(token) || token.replace(/[.:~]/g, '').length < TOKEN_LENGTH ? token : '[redacted]');
   const points = Array.from(text);
   return points.length <= RUNE_SHOWN_LENGTH ? text
     : `${points.slice(0, RUNE_SHOWN_LENGTH).join('')}…[+${points.length - RUNE_SHOWN_LENGTH}]`;

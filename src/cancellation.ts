@@ -10,7 +10,10 @@ export function cancellable<T>(operation: () => Promise<T>): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const cancel = () => reject(new Cancelled());
     signal.addEventListener('abort', cancel, { once: true });
-    operation().then(resolve, reject).finally(() => signal.removeEventListener('abort', cancel));
+    let started: Promise<T>;
+    // An operation that throws before returning its promise still removes the listener (audit 1.3.2).
+    try { started = operation(); } catch (error) { started = Promise.reject(error); }
+    started.then(resolve, reject).finally(() => signal.removeEventListener('abort', cancel));
   });
 }
 

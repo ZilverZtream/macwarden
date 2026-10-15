@@ -1,7 +1,7 @@
 import { Cancelled, withCancellation } from './cancellation.js';
 import { nodeVersionWarning, unsafeNodeFlags } from './environment.js';
-import { readFileSync } from 'node:fs';
 import { handlers } from './commands/handlers.js';
+import { macwardenVersion } from './version.js';
 import { error, render, renderChunks, warning, type Mode, type OutputResult } from './output/index.js';
 import { fdWriter } from './watch/output-queue.js';
 import { internalErrorMessage, withProcessErrorContext, type ProcessErrorContext } from './process-error-context.js';
@@ -50,8 +50,8 @@ const commandUsage = (name: string) => synopses[name].map((line, index) =>
   `${index ? '       ' : 'Usage: '}macwarden ${line}`).join('\n');
 const textResult = (text: string): OutputResult => ({ command: null, ok: true, warnings: [], result: { text }, error: null });
 
-const packageVersion = (): string =>
-  (JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version;
+// One reader of the installed version, which never throws (audit 1.3.2).
+const packageVersion = macwardenVersion;
 
 function failure(code: number, step: string | null, message: string, command: string | null = null): OutputResult {
   return {
@@ -218,10 +218,14 @@ function installProcessHandlers(): void {
 
 installProcessHandlers();
 
+/** `macwarden --json <command> …` is `macwarden <command> --json …`. */
+export function normalizedArgv(rawArgv: readonly string[]): string[] {
+  return rawArgv[0] === '--json' && rawArgv.length > 1 && Object.hasOwn(handlers, rawArgv[1])
+    ? [rawArgv[1], '--json', ...rawArgv.slice(2)] : [...rawArgv];
+}
+
 export async function main(rawArgv: string[], runtime: { execArgv?: readonly string[]; nodeVersion?: string } = {}): Promise<number> {
-  // `macwarden --json <command> …` is `macwarden <command> --json …`.
-  const argv = rawArgv[0] === '--json' && rawArgv.length > 1 && Object.hasOwn(handlers, rawArgv[1])
-    ? [rawArgv[1], '--json', ...rawArgv.slice(2)] : rawArgv;
+  const argv = normalizedArgv(rawArgv);
   const boundary = argv.indexOf('--');
   const flagsEnd = boundary < 0 ? argv.length : boundary;
   const flags = argv.slice(0, flagsEnd);

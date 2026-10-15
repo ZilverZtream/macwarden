@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { main, completionStatus, flushStandardStreams, interruptedCompletion } from './cli.js';
+import { main, completionStatus, flushStandardStreams, interruptedCompletion, normalizedArgv } from './cli.js';
 import { alertCleanupDone } from './watch/alert.js';
 
 // watch runs unattended (systemd, CI). If its output can no longer be delivered (a pipe
@@ -22,11 +22,13 @@ process.exitCode = completionStatus(status);
 // result was printed. The command has already released its locks and removed unwritten output,
 // so once that result has reached stdout and stderr the process ends with its code (1.2.1).
 // Every other exit is left to Node as before.
-if (interruptedCompletion() && process.argv[2] !== 'watch') {
+// The command as main resolved it: `macwarden --json watch` is watch too (audit 1.3.2).
+const watch = normalizedArgv(process.argv.slice(2))[0] === 'watch';
+if (interruptedCompletion() && !watch) {
   await flushStandardStreams();
   process.exit(completionStatus(status));
 }
-if (process.argv[2] === 'watch') {
+if (watch) {
   await alertCleanupDone();
   setTimeout(() => process.kill(process.pid, 'SIGKILL'), WATCH_EXIT_GRACE_MS).unref();
 }

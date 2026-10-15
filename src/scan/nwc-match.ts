@@ -60,7 +60,7 @@ export function nwcMatches(text: string, open?: number[]): NwcMatch[] {
 
 /**
  * Replaces every match of the published `nwc` regex exactly as `text.replace(/nwc/gi, replacer)`
- * would, in linear time. Used by output redaction and scan's secret collection.
+ * would, in linear time. Output redaction and secret collection use nwcSpans and redactNwc below.
  */
 export function replaceNwc(text: string, replacer: (match: string) => string): string {
   if (!/walletconnect:/i.test(text)) return text;
@@ -98,4 +98,54 @@ export function nwcUnescaped(points: readonly string[], line: string): { points:
       && out.slice(i + 1, i + 14).join('').toLowerCase() === 'walletconnect') out[i] = '+';
   }
   return { points: out, origin };
+}
+
+/** A URI matched in the original text or its escaped form; `delimiter` is the original text of the consumed delimiter. */
+export type NwcSpan = { index: number; end: number; secret: string; delimiter: string };
+
+const MATCH_SECRET = /secret=([0-9a-f]{64})[^0-9a-f]?$/i;
+
+/**
+ * Every NWC URI the scanner reports, plain and escaped (nwcUnescaped), as spans of `text` in
+ * code units, in no particular order and possibly overlapping. Output redaction and secret
+ * collection use it, so an escaped URI the scanner finds is also redacted (audit 1.3.2). Linear.
+ */
+export function nwcSpans(text: string): NwcSpan[] {
+  if (!/walletconnect/i.test(text)) return [];
+  const spans: NwcSpan[] = [];
+  const add = (match: string, index: number, end: number, last: number) => spans.push({ index, end,
+    secret: MATCH_SECRET.exec(match)![1].toLowerCase(), delimiter: /[^0-9a-f]$/i.test(match) ? text.slice(last, end) : '' });
+  for (const match of nwcMatches(text)) add(match.text, match.index, match.index + match.text.length, match.index + match.text.length - 1);
+  // Code units, not code points: every escape is ASCII, so origin indexes the string directly.
+  const unescaped = nwcUnescaped(text.split(''), text);
+  if (unescaped) {
+    const { origin } = unescaped;
+    const copy = unescaped.points.join('');
+    for (const match of nwcMatches(copy)) {
+      const last = match.index + match.text.length - 1;
+      add(match.text, origin[match.index], last + 1 < origin.length ? origin[last + 1] : text.length, origin[last]);
+    }
+  }
+  return spans;
+}
+
+/**
+ * Replaces every NWC URI, plain or escaped, by "[redacted]" followed by its consumed delimiter
+ * (kept as written). Overlapping spans are joined, so no part of either URI remains.
+ */
+export function redactNwc(text: string): string {
+  const spans = nwcSpans(text);
+  if (!spans.length) return text;
+  spans.sort((a, b) => a.index - b.index || b.end - a.end);
+  let output = '';
+  let cursor = 0;
+  for (let i = 0; i < spans.length;) {
+    const start = spans[i].index;
+    let { end, delimiter } = spans[i];
+    for (i++; i < spans.length && spans[i].index < end; i++)
+      if (spans[i].end > end) ({ end, delimiter } = spans[i]);
+    output += `${text.slice(cursor, start)}[redacted]${delimiter}`;
+    cursor = end;
+  }
+  return output + text.slice(cursor);
 }

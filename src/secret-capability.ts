@@ -23,16 +23,28 @@ export class Secret {
     revealSecret = (secret: Secret): Buffer => bufferFrom(secret.#bytes);
   }
 
-  readonly fingerprint: string;
+  #fingerprint: string | undefined;
 
   constructor(bytes: Uint8Array) {
-    const stored = bufferFrom(bytes);
-    this.#bytes = stored;
-    // A valid macaroon hashes its canonical form (see canonicalMacaroonForm), anything else its bytes.
-    const canonical = canonicalMacaroonForm(stored);
-    const hash = newHash('sha256');
-    hashUpdate(hash, canonical?.reencoded ?? subarray(stored, 0, canonical?.length ?? stored.length));
-    this.fingerprint = `fp:${hashDigest(hash, 'hex').slice(0, 16)}`;
+    this.#bytes = bufferFrom(bytes);
+  }
+
+  /**
+   * Computed on first read and kept: watch wraps every intercepted macaroon in a Secret while it
+   * answers LND, and needs only its identifier (macaroonId reads the header alone). Parsing every
+   * caveat and hashing up to 64 KiB there cost a padded macaroon about 50 times the header read,
+   * outside the attribution budget (audit 1.3.2).
+   */
+  get fingerprint(): string {
+    if (this.#fingerprint === undefined) {
+      // A valid macaroon hashes its canonical form (see canonicalMacaroonForm), anything else its bytes.
+      const stored = this.#bytes;
+      const canonical = canonicalMacaroonForm(stored);
+      const hash = newHash('sha256');
+      hashUpdate(hash, canonical?.reencoded ?? subarray(stored, 0, canonical?.length ?? stored.length));
+      this.#fingerprint = `fp:${hashDigest(hash, 'hex').slice(0, 16)}`;
+    }
+    return this.#fingerprint;
   }
 
   toString(): string {

@@ -3,7 +3,7 @@ import { parseLndconnect } from '../input/lndconnect.js';
 import { macaroonEnds } from '../decode/recognition.js';
 import { types } from 'node:util';
 import { lndconnect } from '../scan/patterns.js';
-import { replaceNwc } from '../scan/nwc-match.js';
+import { redactNwc } from '../scan/nwc-match.js';
 import { redactEncodedCredentials } from '../credential-recognition.js';
 import { collectNwcSecrets, redactKnownSecrets, redactL402Text } from '../scan/redact.js';
 import { redactRuneContexts } from '../scan/rune-context.js';
@@ -165,8 +165,20 @@ export function revokePlanResult(plan: RevokePlan, warnings: OutputWarning[], al
 const lndconnectAll = new RegExp(lndconnect.source, `${lndconnect.flags}g`);
 
 function hasCredentialInLndconnect(value: string): boolean {
-  const bytes = parseLndconnect(value);
+  const bytes = parseLndconnect(value, { standardBase64: true });
   return bytes !== null && macaroonEnds(bytes)(0) !== null;
+}
+
+// The scanner's reading of a matched lndconnect URI (src/scan/index.ts lndconnectCredential):
+// the macaroon may be in standard base64, and punctuation after the URI in prose, JSON or YAML
+// is matched with it. A URI the scanner confirms is replaced whole; the punctuation is kept
+// (audit 1.3.2: only the macaroon parameter was redacted, the URI around it kept).
+const LNDCONNECT_TRAILING = new Set('`)]}>.,;:!?\'"*');
+function redactLndconnect(match: string): string {
+  if (hasCredentialInLndconnect(match)) return '[redacted]';
+  let end = match.length;
+  while (end > 0 && LNDCONNECT_TRAILING.has(match[end - 1])) end -= 1;
+  return end < match.length && hasCredentialInLndconnect(match.slice(0, end)) ? `[redacted]${match.slice(end)}` : match;
 }
 
 // A complete macaroon is at least SHORTEST_MACAROON bytes: a version byte, an identifier
@@ -203,11 +215,11 @@ export function redactCredentialText(text: string): string { return redact(text)
 
 function redactUncached(text: string): string {
   lndconnectAll.lastIndex = 0;
-  const withLndconnectRedacted = redactRuneContexts(text).replace(lndconnectAll, match => hasCredentialInLndconnect(match) ? '[redacted]' : match);
+  const withLndconnectRedacted = redactRuneContexts(text).replace(lndconnectAll, redactLndconnect);
   // NWC URIs through the linear matcher: the published regex backtracks quadratically on
   // repeated prefixes. The match consumes one delimiter after the secret, which is kept.
-  const withUrisRedacted = replaceNwc(withLndconnectRedacted,
-    match => `[redacted]${/[^0-9a-f]$/i.test(match) ? match.slice(-1) : ''}`);
+  // Escaped URIs the scanner reports (JSON-escaped, percent-encoded, "+" as a space) too (audit 1.3.2).
+  const withUrisRedacted = redactNwc(withLndconnectRedacted);
   // L402 Authorization credentials and macaroon:preimage pairs, which carry a preimage.
   return redactEncodedCredentials(redactL402Text(withUrisRedacted));
 }

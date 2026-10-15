@@ -2,9 +2,15 @@
 
 ## Unreleased
 
-Fixes from three external audits of 1.3.1, each claim verified with a probe before it was fixed; every fix has a test that fails on 1.3.1. Claims that were refuted, or that describe behaviour the specification prescribes, are not changed.
+Fixes from an external audit of every source file of 1.3.1, each claim verified with a probe before it was fixed; every fix has a test that fails on 1.3.1. Claims that were refuted, or that describe behaviour the specification prescribes, are not changed.
 
 ### Security
+
+- `scan` paths and decoded facts: encoded macaroons were redacted before L402 values, so a `<macaroon>:<preimage>` pair or L402 header in a path or caveat lost its macaroon and kept its preimage, in every output format. Structured forms are now redacted first, as in the output.
+- Rune facts: the long-token scrub ran before macaroon redaction and cut a macaroon held in a rune restriction (hex in groups, wrapped base64), so its signature tail was printed. Known NWC secrets and L402 preimages inside rune restrictions were not redacted in `scan --json`, and NWC secrets there were not collected.
+- NWC: a wallet secret after an HTML-escaped separator (`&amp;secret=`) or `;secret=` was not collected, so it was printed where it appeared elsewhere; JSON-escaped, percent-encoded and `+`-as-space NWC URIs were not redacted in output. A known secret inside a longer base64 run is now redacted at any byte alignment.
+- Output redaction: a grouped base64 macaroon joined to a key or suffix by a separator (`mac:AgED:bG5k:…`) was read as irregular groups and printed in full. An lndconnect URI followed by punctuation, or with its macaroon in standard base64, kept its host and certificate around a redacted macaroon; it is now replaced whole.
+- `scan --json`: `summary.agentConfigs` paths were not redacted against known secrets.
 
 - `scan --git-history`: git opened the scanned repository's `diff.orderFile` (on Windows a network path made an SMB connection; a protected file was read). The history read now pins the order file.
 - Output redaction: an escape-like prefix (`%2`, `\x2`, `\u000`) before a base64, base64url or base32 macaroon was decoded together with its leading `A` and hid the whole macaroon, which was then printed in full (for example in a scanned file's path). Every form is now also recognised in the literal text.
@@ -28,6 +34,12 @@ Fixes from three external audits of 1.3.1, each claim verified with a probe befo
 - A repeated `--json` is refused (exit 2) like every other repeated flag.
 - `reconcile`: `--since` after now (no `--until`) dropped the warnings collected before the window was checked.
 - Payment journal: a BOLT11 invoice with a multiplier letter but no digits (`lnbcm1…`), which LND refuses, was read as an amountless invoice and its hash journaled.
+- `watch`: every intercepted macaroon's fingerprint (a parse of every caveat and a hash of up to 64 KiB) was computed while answering LND, outside the attribution budget, although only its identifier is needed; it is now computed when first read.
+- `watch`: `macwarden --json watch` skipped the alert cleanup and the exit deadline that `macwarden watch --json` has. An alert command whose process group is already empty when it exits is no longer killed by group a second later (its group ID could have been reused). A write that reports no progress backs off instead of being retried at once.
+- `bake --canary`, `watch`: a failed write of `<registry>.canary.json` left an empty file that made every later run fail; the configuration is now written to a temporary file and linked into place.
+- `scan --agent-configs --git-history`: history was read for the discovered agent locations, which are usually outside a git work tree, so the scan failed (exit 3). History is read for path arguments only; without one the combination is a usage error.
+- `scan`: a repeated `--format` said "takes one of …"; it now says the flag was given more than once. The unsafe `NODE_OPTIONS` check also runs when a programmatic caller passes no environment.
+- `--version` reads the installed version without failing.
 
 ## 1.3.1 (2026-10-11)
 

@@ -22,7 +22,10 @@ import { assertWorkTree, blobSizes, GitHistoryError, historyEntries, isShallowRe
 import { Cancelled, cancellable, checkCancellation } from '../cancellation.js';
 import { readBounded } from '../bounded-file.js';
 import { runeFindings } from './runes.js';
+import { runeCandidates } from './rune-context.js';
+import { decodeRuneText, RUNE_TEXT_LIMIT } from '../decode/rune.js';
 import type { RuneInvalidReport, RuneReport } from '../rune-report.js';
+import type { AgentConfigDiscovery } from './agent-configs.js';
 
 /** An unexpected exception while analysing a file's bytes: a bug, reported as exit 8 (internal). */
 class ScanAnalysisFailure extends Error {
@@ -91,6 +94,8 @@ export type ScanOptions = {
   gitHistory?: boolean;
   /** Scan a shallow clone's fetched history instead of refusing it. */
   allowShallow?: boolean;
+  /** --agent-configs: the found locations are scanned after `paths` (never their git history) and both lists reported. */
+  agentConfigs?: AgentConfigDiscovery;
 };
 
 type FileStat = Stats | BigIntStats;
@@ -271,6 +276,38 @@ function withFacts(path: string, line: number | null, column: number | null, kin
     ctx.facts.set(facts.fingerprint, shared);
   }
   return { path, line, column, kind, ...shared };
+}
+
+// NWC secrets in a rune's restrictions join the known secrets as those in macaroon caveats do
+// (audit 1.3.2): the rune report shows the URI redacted, but not another form of its secret
+// (spaced hex, raw bytes) elsewhere in the output. Called only for text that has rune findings;
+// each distinct value is decoded once per scan, and also as one level of standard base64.
+const runeValuesSeen = new WeakMap<ScanContext, Set<string>>();
+function collectRuneNwcSecrets(text: string, ctx: ScanContext): void {
+  let seen = runeValuesSeen.get(ctx);
+  if (!seen) runeValuesSeen.set(ctx, seen = new Set());
+  for (const line of text.split(/\r\n|\n|\r/)) {
+    if (!/rune|commando|lightning-cli/i.test(line)) continue;
+    for (const candidate of runeCandidates(line)) {
+      if (candidate.text.length > RUNE_TEXT_LIMIT || seen.has(candidate.text)) continue;
+      seen.add(candidate.text);
+      for (const value of [candidate.text, Buffer.from(candidate.text, 'base64').toString('latin1').trim()]) {
+        const decoded = decodeRuneText(value);
+        if (!decoded.ok) continue;
+        for (const alternative of decoded.facts.restrictions.flat())
+          collectNwcSecrets(`${alternative.field}${alternative.condition}${alternative.value}`, ctx.secrets);
+      }
+    }
+  }
+}
+
+function redactRune(report: RuneReport | RuneInvalidReport, redact: (text: string) => string): RuneReport | RuneInvalidReport {
+  if (report.recognition === 'invalid') return report;
+  const text = (value: string | null) => value === null ? null : redact(value);
+  return { ...report, uniqueId: text(report.uniqueId), version: text(report.version),
+    restrictions: report.restrictions.map(restriction => restriction.map(alternative =>
+      ({ ...alternative, field: redact(alternative.field), value: redact(alternative.value) }))),
+    allowedMethods: report.allowedMethods.map(redact), sensitiveMethods: report.sensitiveMethods.map(redact) };
 }
 
 function byteCompare(left: string, right: string): number {
@@ -935,7 +972,9 @@ function scanBytes(safePath: string, bytes: Buffer, macaroonFile: boolean, now: 
   }
   const text = decodeText(bytes);
   const outcome = scanText(safePath, text, now, ctx);
-  for (const finding of runeFindings(text, now, ctx)) outcome.findings.push({ ...finding, path: safePath });
+  const runes = runeFindings(text, now, ctx);
+  if (runes.length) collectRuneNwcSecrets(text, ctx);
+  for (const finding of runes) outcome.findings.push({ ...finding, path: safePath });
   if (outcome.findings.length && /\.jsonc?$/i.test(name)) tagMcpContext(name, text, outcome.findings);
   return outcome;
 }
@@ -1623,7 +1662,8 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
     }
   }
 
-  for (const arg of paths) {
+  const historyArgs = paths.length;
+  for (const arg of [...paths, ...(opts.agentConfigs?.found.map(item => item.path) ?? [])]) {
     currentArg++;
     if (isProtectedPath(arg)) { skip(arg, 'never-open'); continue; }
     let stat: FileStat;
@@ -1646,7 +1686,8 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
     // The argument was resolved above; the walk starts from that resolved path.
     await walk(arg, true, stat, undefined, undefined, target);
     await settle();
-    if (opts.gitHistory) await scanHistory(arg, stat);
+    // An agent location is a file in the user's home or project, not a work tree to read history of (audit 1.3.2).
+    if (opts.gitHistory && currentArg < historyArgs) await scanHistory(arg, stat);
     if (entries.length) {
       const isIgnored = ignoreDecider(entries, ignoreBudget);
       const listed = new Set(entries.map(entry => entry.fingerprint));
@@ -1694,9 +1735,18 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
       }
       finding.unassessed = array(finding.unassessed);
       if (finding.l402) finding.l402 = redactL402(finding.l402, redact);
+      // Rune facts are shown as UTF-8 and short tokens stay visible, so a known secret's raw or
+      // spaced-hex form there is caught only here (audit 1.3.2).
+      if (finding.rune) finding.rune = redactRune(finding.rune, redact);
     }
     for (const item of skipped) item.path = redact(item.path);
   }
+  // Agent locations are reported like skipped paths: through the path and known-secret redaction (audit 1.3.2).
+  const agentConfigs = opts.agentConfigs && (() => {
+    const redact = knownSecretRedactor(secrets);
+    const safe = (items: AgentConfigDiscovery['found']) => items.map(item => ({ ...item, path: redact(redactPath(item.path)) }));
+    return { found: safe(opts.agentConfigs.found), absent: safe(opts.agentConfigs.absent) };
+  })();
   findings.sort((a, b) => byteCompare(a.path, b.path) || (a.line ?? -1) - (b.line ?? -1) ||
     (a.column ?? -1) - (b.column ?? -1) || byteCompare(a.commit ?? '', b.commit ?? ''));
   skipped.sort((a, b) => byteCompare(a.path, b.path));
@@ -1714,6 +1764,7 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
     summary: {
     filesScanned, filesSkipped, dropped, ignored,
     findings: findings.length, distinct: new Set(findings.map(finding => finding.fingerprint)).size,
-    ...(opts.gitHistory ? { blobsScanned } : {}), ...(shallowHistory ? { shallowHistory: true as const } : {}), byGrade,
+    ...(opts.gitHistory ? { blobsScanned } : {}), ...(shallowHistory ? { shallowHistory: true as const } : {}),
+    byGrade, ...(agentConfigs ? { agentConfigs } : {}),
   }, failOn: null };
 }

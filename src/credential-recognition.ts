@@ -56,6 +56,32 @@ function regularGroups(run: string): boolean {
   return size % 4 === 0 && lengths.slice(0, -1).every(length => length === size) && lengths.at(-1)! <= size;
 }
 
+/**
+ * The regular groups of a grouped run. A word joined to the run by a separator (a key before
+ * it, "mac:AgED:bG5k:...", or a suffix after it) is a group of another length, which made
+ * the whole run irregular and left the credential in it unredacted (audit 1.3.2): the first
+ * and last groups are each also tried without. Linear: at most four checks of the run.
+ */
+function regularRun(run: { index: number; value: string }): { index: number; value: string } | null {
+  const body = run.value.replace(/=+$/, '');
+  const padding = run.value.slice(body.length);
+  let first = -1, last = -1;
+  for (let at = 0; at < body.length; at++) {
+    if (/[A-Za-z0-9+/_-]/.test(body[at])) continue;
+    if (first < 0) first = at;
+    last = at;
+  }
+  if (first < 0) return null;
+  for (const [dropFirst, dropLast] of [[false, false], [true, false], [false, true], [true, true]]) {
+    const start = dropFirst ? first + 1 : 0;
+    const end = dropLast ? last : body.length;
+    if (end <= start || (dropFirst && dropLast && first === last)) continue;
+    const value = body.slice(start, end) + (dropLast ? '' : padding);
+    if (/[^A-Za-z0-9+/_=-]/.test(value) && regularGroups(value)) return { index: run.index + start, value };
+  }
+  return null;
+}
+
 function isByteSeparator(character: string | undefined): boolean {
   return character !== undefined && character !== '\\' && /^[^0-9A-Za-z]$/u.test(character);
 }
@@ -257,8 +283,9 @@ function spans(text: string, source?: NormalizedText, backslashPairs = true, dec
     ? [...source.text.matchAll(/[A-Za-z0-9+/_-]{12,}={0,2}/g)].map(match => ({ index: match.index, value: match[0] }))
     : source.delimiter === 'other' ? groupedBase64.other(source.text)
     : source.delimiter === '_' ? groupedBase64.underscore(source.text) : groupedBase64.dash(source.text);
-  for (const run of base64Runs) {
-    if (source.delimiter === 'other' && !regularGroups(run.value)) continue;
+  for (const matched of base64Runs) {
+    const run = source.delimiter === 'other' ? regularRun(matched) : matched;
+    if (!run) continue;
     const positions = [...run.value].flatMap((char, index) => source.grouped && (source.delimiter === 'other'
       ? !/[A-Za-z0-9+/_=-]/.test(char) : char === source.delimiter) ? [] : [run.index + index]);
     const data = positions.map(index => source.text[index]).join('');
