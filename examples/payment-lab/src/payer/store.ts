@@ -488,6 +488,8 @@ export class PayerStore {
         }
         const refusedKind = differentKind(this.operation(input.operationId) as OperationRecord);
         if (refusedKind !== undefined) return refusedKind;
+        const refusedTerms = this.#differentTerms(existingPayment, input);
+        if (refusedTerms !== undefined) return { outcome: 'refused', reason: refusedTerms };
         return { outcome: 'existing', payment: existingPayment };
       }
       const operation = this.operation(input.operationId);
@@ -538,6 +540,33 @@ export class PayerStore {
         feeLimitMsat: input.feeLimitMsat, budgetId: input.budgetId ?? null });
       return { outcome: 'recorded', payment: this.payment(hash) as PaymentRecord };
     });
+  }
+
+  /**
+   * Why an intent for a payment already recorded is refused, or undefined when it names the recorded terms. The record
+   * is what gets sent (an intent back from a NotFound revert is submitted with its stored fee limit and parts), so an
+   * intent with another --fee-limit-msat, --max-parts or --budget was answered `existing` and silently sent on the old
+   * terms: an intent recorded without a budget then went out with no reservation held (audit 1.3.2). The budget is the
+   * one the payment's held reservation is against; a payment that holds none (unbudgeted, or resolved: its reservation
+   * consumed or released) is compared with its latest reservation's budget, except an intent, which would be sent with
+   * no reservation at all.
+   */
+  #differentTerms(payment: PaymentRecord, input: { feeLimitMsat: bigint; maxParts: number; budgetId?: string }): string | undefined {
+    const hash = payment.paymentHash;
+    if (input.feeLimitMsat !== payment.feeLimitMsat) {
+      return `--fee-limit-msat ${input.feeLimitMsat} differs from payment ${hash}'s recorded fee limit ${payment.feeLimitMsat} msat`;
+    }
+    if (input.maxParts !== payment.maxParts) {
+      return `--max-parts ${input.maxParts} differs from payment ${hash}'s recorded ${payment.maxParts}`;
+    }
+    const held = this.db.prepare(`SELECT budget_id FROM reservations WHERE payment_hash = ? AND state = 'held'`).get(hash);
+    const latest = held ?? (payment.state === 'intent' ? undefined
+      : this.db.prepare('SELECT budget_id FROM reservations WHERE payment_hash = ? ORDER BY reservation_id DESC LIMIT 1').get(hash));
+    const recorded = latest === undefined ? undefined : text(latest, 'budget_id');
+    if (input.budgetId === recorded) return undefined;
+    if (recorded === undefined) return `--budget ${input.budgetId} differs from payment ${hash}, which holds no budget reservation`;
+    return `${input.budgetId === undefined ? 'no --budget' : `--budget ${input.budgetId}`} differs from payment ${hash}'s reservation `
+      + `against budget ${recorded}`;
   }
 
   /**
@@ -770,22 +799,33 @@ export class PayerStore {
       consumedMsat: status.consumedMsat, overMsat: -status.availableMsat });
   }
 
-  #upsertAttempts(payment: Payment): void {
-    // A new attempt is tagged with the record's current submission, not with the submission the stream was
-    // opened for: the payment LND holds now is the current submission's, and a stream opened for an earlier
-    // submission can observe it (a TrackPaymentV2 request that reaches LND after the retry's SendPaymentV2
-    // did). Tagged with the stream's submission, such an attempt would make the current submission's own
-    // FAILED look like an earlier one's (#beforeLiveSubmission) for good. An update to a known attempt keeps its tag.
+  /**
+   * The submission a new HTLC attempt or creation time from this update belongs to. A TrackPaymentV2 update: the record's
+   * current submission, not the one the stream was opened for, because the payment LND holds now is the current
+   * submission's and a stream opened for an earlier submission can observe it (a TrackPaymentV2 request that reaches LND
+   * after the retry's SendPaymentV2 did); tagged with the stream's submission, such an attempt would make the current
+   * submission's own FAILED look like an earlier one's (#beforeLiveSubmission) for good. A SendPaymentV2 update: the
+   * stream's own submission, because that stream reports only on its own request. Submission 1's request can reach LND
+   * after a NotFound revert and submission 2's claim; tagged as submission 2's, its attempts and creation time would make
+   * the FAILED it leaves in LND pass for submission 2's own, releasing the reservation while submission 2 may still pay
+   * (audit 1.3.2).
+   */
+  #ownerOf(record: PaymentRecord, source: 'SendPaymentV2' | 'TrackPaymentV2', submission: number | undefined): number {
+    return source === 'SendPaymentV2' && submission !== undefined ? submission : record.submissions;
+  }
+
+  /** Records the update's HTLC attempts; a new one under `owner` (#ownerOf). An update to a known attempt keeps its tag. */
+  #upsertAttempts(payment: Payment, owner: number): void {
     const statement = this.db.prepare(`INSERT INTO htlc_attempts (payment_hash, attempt_id, status, principal_msat, fee_msat, hops, route,
         failure_code, failure_source_index, attempt_time_ns, resolve_time_ns, submission)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT submissions FROM payments WHERE payment_hash = ?))
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (payment_hash, attempt_id) DO UPDATE SET status = excluded.status, failure_code = excluded.failure_code,
         failure_source_index = excluded.failure_source_index, resolve_time_ns = excluded.resolve_time_ns
         WHERE htlc_attempts.status NOT IN ('SUCCEEDED', 'FAILED')`);
     for (const attempt of payment.htlcs) {
       statement.run(payment.paymentHash, attempt.attemptId, attempt.status, attempt.principalMsat, attempt.route.totalFeesMsat,
         attempt.route.hops.length, attempt.route.hops.map(hop => hop.chanId).join('>'), attempt.failureCode ?? null,
-        attempt.failureSourceIndex ?? null, attempt.attemptTimeNs, attempt.resolveTimeNs, payment.paymentHash);
+        attempt.failureSourceIndex ?? null, attempt.attemptTimeNs, attempt.resolveTimeNs, owner);
     }
   }
 
@@ -818,9 +858,8 @@ export class PayerStore {
   }
 
   /**
-   * Keeps the highest creation time LND reported while `submission` was the record's current one (see
-   * #beforeLiveSubmission): the payment LND holds then is that submission's, whichever stream showed it (as for
-   * #upsertAttempts, a stream opened for an earlier submission can observe the current submission's payment).
+   * Keeps the highest creation time LND reported for `submission` (see #beforeLiveSubmission): the owner #ownerOf names,
+   * the stream's own submission for SendPaymentV2 and the record's current one for TrackPaymentV2.
    */
   #recordCreation(payment: Payment, submission: number): void {
     this.db.prepare(`INSERT INTO payment_creations (payment_hash, submission, creation_time_ns) VALUES (?, ?, ?)
@@ -854,11 +893,11 @@ export class PayerStore {
       // Judged before this snapshot's attempts are recorded, so they never count as recorded earlier.
       const earlier = source === 'TrackPaymentV2' && payment.status !== 'SUCCEEDED' && !superseded(record, submission)
         && this.#beforeLiveSubmission(record, payment, submission);
-      // Under the record's current submission, whatever submission the update was read for (an update read for a
-      // superseded one is logged below, but what it shows of LND's payment is still what LND holds now): a later
-      // submission judges its snapshots against these.
-      this.#upsertAttempts(payment);
-      this.#recordCreation(payment, record.submissions);
+      // Recorded also for an update read for a superseded submission (logged below): what it shows of LND's payment is
+      // still what LND holds, and a later submission judges its snapshots against these. #ownerOf says under which submission.
+      const owner = this.#ownerOf(record, source, submission);
+      this.#upsertAttempts(payment, owner);
+      this.#recordCreation(payment, owner);
       const now = nowIso();
       if (payment.status !== 'SUCCEEDED' && superseded(record, submission)) {
         this.#stale(record, 'update', submission, { source, status: payment.status });

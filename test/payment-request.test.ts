@@ -154,6 +154,9 @@ it('PAYJ/bolt11 a checksum, character, case or padding error, or a missing p fie
   expect(decodeBolt11(text.replace(/1(?=[^1]*$)/, 'b'))).toBeNull();
   expect(decodeBolt11(invoice({ hash: null }))).toBeNull();
   expect(decodeBolt11(invoice({ network: 'bc', hashGroups: [...toGroups(paymentHash).slice(0, 51), 1] }))).toBeNull();
+  // A multiplier without digits is no amount: zpay32 refuses lnbcm..., lnbcrtu..., lntbn... and lnbcp...
+  for (const network of ['bcm', 'bcrtu', 'tbn', 'bcp']) expect(decodeBolt11(invoice({ network, hash: paymentHash })), network).toBeNull();
+  expect(decodeBolt11(invoice({ network: 'bc', amount: '1m', hash: paymentHash }))).toMatchObject({ paymentHash: paymentHash.toString('hex') });
   expect(decodeBolt11('lnbc1qqqq')).toBeNull();
   expect(decodeBolt11(bech32('xxbc', Array<number>(140).fill(0)))).toBeNull();
   // A p field of another length is skipped; the first one of 52 groups is the hash.

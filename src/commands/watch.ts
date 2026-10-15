@@ -309,8 +309,11 @@ export async function acquireLock(path: string, deps: Deps): Promise<() => Promi
         onDisk = await deps.fs.lstat(path, { bigint: true }).catch(() => null);
       }
       if (!onDisk || !onDisk.isFile() || onDisk.isSymbolicLink() || onDisk.dev !== identity.dev || onDisk.ino !== identity.ino) {
+        // Only the file this watch created is removed: the target is unlinked only when it is that
+        // regular file (same device and inode), never another watch's lock or a file a link names.
         const target = await deps.fs.realpath(path).catch(() => null);
-        if (target && resolvePath(target) !== key) await deps.fs.unlink(target).catch(() => undefined);
+        const made = target && resolvePath(target) !== key ? await deps.fs.lstat(target, { bigint: true }).catch(() => null) : null;
+        if (made && made.isFile() && made.dev === identity.dev && made.ino === identity.ino) await deps.fs.unlink(target!).catch(() => undefined);
         throw new OwnerlessLock('watch lock path is a symbolic link', `the watch lock path ${path} is a symbolic link; remove it and start watch again`);
       }
       heldLocks.add(key);
@@ -332,7 +335,14 @@ export async function acquireLock(path: string, deps: Deps): Promise<() => Promi
       try {
         // The owner record is read only as a plain file: never through a symlink (SAFE-02),
         // through one descriptor bound to the checked file and at most LOCK_FILE_LIMIT + 1 bytes.
-        stale = await readPlainFile(path, deps.fs, LOCK_FILE_LIMIT); owner = JSON.parse(stale) as typeof owner;
+        // An empty lock may be one another watch has just created and not yet written: it is
+        // read again (at most LOCK_ASIDE_WAITS x 10 ms) before it counts as ownerless.
+        for (let wait = 0; ; wait++) {
+          stale = await readPlainFile(path, deps.fs, LOCK_FILE_LIMIT);
+          if (stale !== '' || wait >= LOCK_ASIDE_WAITS) break;
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        owner = JSON.parse(stale) as typeof owner;
       }
       catch { throw ownerless(path); }
       if (typeof owner.hostname !== 'string' || !Number.isSafeInteger(owner.pid)) throw ownerless(path);

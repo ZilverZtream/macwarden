@@ -196,6 +196,23 @@ it('CLI-AUDIT/leading-json a lone --json is a missing command and a leading --js
   expect(documents(sink.out)).toEqual([expect.objectContaining({ command: null, error: { code: 2, step: null, message: 'unknown flag' } })]);
 });
 
+it('CLI-AUDIT/repeated-json a second --json is refused like any repeated flag (audit 1.3.2)', async () => {
+  const { cli, handlers } = await load();
+  for (const args of [['inspect', vector, '--json', '--json'], ['--json', 'inspect', '--json', vector], ['recommend', '--json', 'app', '--json']]) {
+    const sink = capture();
+    expect(await cli.main(args), args.join(' ')).toBe(2);
+    expect(documents(sink.out)).toEqual([{ schema: 1, command: args.find(arg => arg !== '--json'), ok: false, warnings: [], result: null,
+      error: { code: 2, step: null, message: '--json was given more than once' } }]);
+    vi.restoreAllMocks();
+  }
+  // watch parses --json itself: both reach it, and it keeps its own refusal.
+  capture();
+  const watch = vi.spyOn(handlers, 'watch');
+  expect(await cli.main(['watch', '--json', '--json'])).toBe(2);
+  expect(watch).toHaveBeenCalledWith(['--json', '--json']);
+  await expect(watch.mock.results[0].value).resolves.toMatchObject({ error: { code: 2, message: 'repeated flag --json' } });
+});
+
 it('CLI-AUDIT/flush-limit the output flush limit holds when the wall clock does not advance', async () => {
   const { cli } = await load();
   vi.spyOn(Date, 'now').mockReturnValue(1_000_000);

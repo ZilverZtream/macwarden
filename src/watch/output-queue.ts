@@ -19,7 +19,10 @@ const PRIORITY_FACTOR = 4;
 export const OUTPUT_LIMIT_BYTES = 1 << 20;
 const BATCH_BYTES = 1 << 16;
 
-/** Writes a chunk and resolves with the number of bytes written. */
+/**
+ * Writes a chunk and resolves with the number of bytes written: at least one for a non-empty
+ * chunk, or it rejects. A writer that waits for a full reader retries itself (fdWriter).
+ */
 export type ChunkWriter = (chunk: Buffer) => Promise<number>;
 
 export type OutputQueue = {
@@ -51,6 +54,10 @@ export function retryable(error: NodeJS.ErrnoException): boolean {
 /**
  * Writes to a file descriptor. EAGAIN, EWOULDBLOCK and EINTR are retried with a capped
  * backoff (timers, never a busy loop); any other error rejects, which closes the queue.
+ * A write that moved no byte of a non-empty chunk is retried the same way (audit 1.3.2): it
+ * was retried at once and forever. It is backed off rather than rejected because a
+ * rejection closes output for good, canary alerts included, and nothing shows the reader
+ * gone; close() still ends the retries through `stopped`.
  */
 export function fdWriter(fd: number, write: RawWrite = rawWrite,
   // Retry timers are unref'd: on their own they never keep the process alive.
@@ -59,8 +66,8 @@ export function fdWriter(fd: number, write: RawWrite = rawWrite,
   return chunk => new Promise((resolve, reject) => {
     let delay = RETRY_MIN_MS;
     const attempt = (): void => write(fd, chunk, (error, written) => {
-      if (!error) { resolve(written); return; }
-      if (!retryable(error) || stopped()) { reject(error); return; }
+      if (!error && (written > 0 || !chunk.length)) { resolve(written); return; }
+      if ((error && !retryable(error)) || stopped()) { reject(error ?? new Error('write made no progress')); return; }
       const ms = delay;
       delay = Math.min(delay * 2, RETRY_MAX_MS);
       void wait(ms).then(attempt);
@@ -88,7 +95,12 @@ export function createOutputQueue(writeChunk: ChunkWriter, limitBytes = OUTPUT_L
       size += part.length;
     }
     const chunk = parts.length === 1 ? parts[0] : Buffer.concat(parts, size);
+    // A writer that made no progress broke its contract: requeued at once, the batch would be
+    // retried on microtasks forever, starving the event loop. It fails like a write error (audit 1.3.2).
     writeChunk(chunk).then(written => {
+      if (!(written > 0) && chunk.length) throw new Error('write made no progress');
+      return written;
+    }).then(written => {
       busy = false;
       const count = Math.max(0, Math.min(written, chunk.length));
       if (count < chunk.length) {

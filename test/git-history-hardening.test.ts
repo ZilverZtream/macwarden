@@ -77,6 +77,22 @@ it('git-history/environment network transport is disabled on every git command l
     expect(settings.find(setting => setting.startsWith(`${key}=`)), key).toMatch(/=\/nonexistent\//);
 });
 
+// The repository's diff.orderFile names a file git log --raw opens (a UNC path would make a
+// network connection); -c cannot pin it empty, so the scan passes -O/dev/null.
+it('git-history/order-file a repository diff.orderFile is never opened', async () => {
+  const dir = repository();
+  writeFileSync(join(dir, 's.env'), `TOKEN=${adminHex}
+`);
+  const added = commit(dir, 'add');
+  rmSync(join(dir, 's.env'));
+  commit(dir, 'remove');
+  git(dir, 'config', 'diff.orderFile', join(dir, 'missing-order-file'));
+  // Sanity: git itself opens the order file and fails without it.
+  expect(spawnSync('git', ['log', '--raw', '--format=%H'], { cwd: dir }).status).not.toBe(0);
+  const result = await scan(dir);
+  expect(result.findings).toEqual([expect.objectContaining({ fingerprint: admin.fingerprint, commit: added })]);
+});
+
 it('git-history/replace-refs a replacement object cannot hide a credential blob from the history scan', async () => {
   const dir = repository();
   writeFileSync(join(dir, 's.env'), `TOKEN=${adminHex}\n`);

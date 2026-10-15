@@ -56,6 +56,32 @@ function regularGroups(run: string): boolean {
   return size % 4 === 0 && lengths.slice(0, -1).every(length => length === size) && lengths.at(-1)! <= size;
 }
 
+/**
+ * The regular groups of a grouped run. A word joined to the run by a separator (a key before
+ * it, "mac:AgED:bG5k:...", or a suffix after it) is a group of another length, which made
+ * the whole run irregular and left the credential in it unredacted (audit 1.3.2): the first
+ * and last groups are each also tried without. Linear: at most four checks of the run.
+ */
+function regularRun(run: { index: number; value: string }): { index: number; value: string } | null {
+  const body = run.value.replace(/=+$/, '');
+  const padding = run.value.slice(body.length);
+  let first = -1, last = -1;
+  for (let at = 0; at < body.length; at++) {
+    if (/[A-Za-z0-9+/_-]/.test(body[at])) continue;
+    if (first < 0) first = at;
+    last = at;
+  }
+  if (first < 0) return null;
+  for (const [dropFirst, dropLast] of [[false, false], [true, false], [false, true], [true, true]]) {
+    const start = dropFirst ? first + 1 : 0;
+    const end = dropLast ? last : body.length;
+    if (end <= start || (dropFirst && dropLast && first === last)) continue;
+    const value = body.slice(start, end) + (dropLast ? '' : padding);
+    if (/[^A-Za-z0-9+/_=-]/.test(value) && regularGroups(value)) return { index: run.index + start, value };
+  }
+  return null;
+}
+
 function isByteSeparator(character: string | undefined): boolean {
   return character !== undefined && character !== '\\' && /^[^0-9A-Za-z]$/u.test(character);
 }
@@ -115,14 +141,12 @@ function hexSpans(value: string, starts: number[], ends: number[], found: [numbe
 }
 
 // A backslash, "%" and "&" start the escapes the decoding layers interpret. An escape-like prefix
-// ("\0201...", "%0201...") must not hide a hex credential by being decoded together with its
-// first digits, so hex is also recognised in the literal text (whitespace compacted only).
-function literalHexSpans(text: string): [number, number][] {
-  if (!/[\\%&]/.test(text)) return [];
-  const { value, starts, ends } = normalized(text, true, undefined, false);
-  const found: [number, number][] = [];
-  hexSpans(value, starts, ends, found);
-  return found;
+// ("\0201...", "%0201...", "%2AgEDb...", "\x2AIBQ...") must not hide a credential by being
+// decoded together with its first character (a hex digit, as is the 'A' every base64 and base32
+// macaroon starts with), so every form is also recognised in the literal text (audit 1.3.2;
+// whitespace compacted only).
+function literalSpans(text: string): [number, number][] {
+  return /[\\%&]/.test(text) ? spans(text, undefined, true, false) : [];
 }
 
 // Raw bytes rendered as UTF-8 (Buffer#toString('utf8'), TextDecoder, Go's string printing)
@@ -183,10 +207,10 @@ function utf8RenderingSpans(text: string, starts: number[], ends: number[], foun
   }
 }
 
-function spans(text: string, source?: NormalizedText, backslashPairs = true): [number, number][] {
-  const { value, starts, ends } = normalized(text, true, source, true, backslashPairs);
+function spans(text: string, source?: NormalizedText, backslashPairs = true, decode = true): [number, number][] {
+  const { value, starts, ends } = normalized(text, true, source, decode, backslashPairs);
   const found: [number, number][] = [];
-  const raw = normalized(text, false, source, true, backslashPairs);
+  const raw = normalized(text, false, source, decode, backslashPairs);
   // Decode each decimal byte array once, then redact only confirmed macaroon
   // spans. Ordinary arrays and any surrounding values retain their source text.
   const decimalArrays = /(?:0x[0-9a-f]{2}(?:[^0-9A-Za-z\\]{1,3}0x[0-9a-f]{2})+|\d{1,3}(?:[^0-9A-Za-z\\]{1,3}\d{1,3})+)/gi;
@@ -259,8 +283,9 @@ function spans(text: string, source?: NormalizedText, backslashPairs = true): [n
     ? [...source.text.matchAll(/[A-Za-z0-9+/_-]{12,}={0,2}/g)].map(match => ({ index: match.index, value: match[0] }))
     : source.delimiter === 'other' ? groupedBase64.other(source.text)
     : source.delimiter === '_' ? groupedBase64.underscore(source.text) : groupedBase64.dash(source.text);
-  for (const run of base64Runs) {
-    if (source.delimiter === 'other' && !regularGroups(run.value)) continue;
+  for (const matched of base64Runs) {
+    const run = source.delimiter === 'other' ? regularRun(matched) : matched;
+    if (!run) continue;
     const positions = [...run.value].flatMap((char, index) => source.grouped && (source.delimiter === 'other'
       ? !/[A-Za-z0-9+/_=-]/.test(char) : char === source.delimiter) ? [] : [run.index + index]);
     const data = positions.map(index => source.text[index]).join('');
@@ -325,7 +350,7 @@ function spans(text: string, source?: NormalizedText, backslashPairs = true): [n
 }
 
 export function redactEncodedCredentials(text: string): string {
-  const matches: [number, number][] = literalHexSpans(text);
+  const matches: [number, number][] = literalSpans(text);
   // A stray backslash before an escaped credential (a backslash, then \x02\x01...) pairs with
   // the first escape's backslash and hides its byte: text holding two adjacent backslashes is
   // read once more with every backslash starting an escape on its own.

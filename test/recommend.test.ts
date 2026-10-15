@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync
 import { join, resolve } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
 import { narrowLabel, run as recommend } from '../src/commands/recommend.js';
+import { run as bake } from '../src/commands/bake/index.js';
 import { LndError } from '../src/errors.js';
 import { shellQuote } from '../src/online.js';
 import { expectSchemaValid } from './helpers/output-schema.js';
@@ -486,4 +487,45 @@ it('RECOMMEND/schema refusals at every step and a recommendation validate agains
     await run(['nobody', ...s.args], s.deps),
   ];
   expect(refusals.map(result => result.error?.step)).toEqual(['R1', 'R1', 'R3', 'R5', 'R6']);
+});
+
+/** Runs a printed bake command through bake up to its output path, which is protected, so it stops at B4 with nothing written. */
+async function bakeAccepts(command: string, dir: string) {
+  const tokens = [...command.replace(/^macwarden bake /, '').matchAll(/'((?:[^']|'')*)'|(\S+)/g)]
+    .map(match => match[1] !== undefined ? match[1].replaceAll("''", "'") : match[2])
+    .map(token => token === '<file>' ? join(dir, 'seed.txt') : token);
+  return bake(tokens, { fs, env: {}, clock: () => new Date('2026-10-08T12:00:00Z') });
+}
+
+it('RECOMMEND/bake-grade the printed bake passes bake B3: ADMIN methods carry --allow-admin (audit 1.3.2)', async () => {
+  const s = setup([entry('admin1', '4294967341', ['info:read', 'macaroon:generate'])], [
+    record('id:1111111111111111', '4294967341', '/lnrpc.Lightning/GetInfo', 3),
+    record('id:1111111111111111', '4294967341', '/lnrpc.Lightning/BakeMacaroon', 1),
+  ]);
+  const result = await run(['admin1', ...s.args], s.deps);
+  const command = (result.result as { commands: string[] }).commands[0];
+  expect(command).toMatch(/^macwarden bake --label admin1-narrow --uri \S+ --allow-admin --out <file> /);
+  expect(await bakeAccepts(command, s.dir)).toMatchObject({ ok: false, error: { step: 'B4', message: 'protected output path' } });
+  // A non-ADMIN set gets no --allow-admin.
+  const read = setup([entry('app1', '4294967341', ['info:read'])], [record('id:1111111111111111', '4294967341', '/lnrpc.Lightning/GetInfo', 3)]);
+  const plain = ((await run(['app1', ...read.args], read.deps)).result as { commands: string[] }).commands[0];
+  expect(plain).not.toContain('--allow-admin');
+  expect(await bakeAccepts(plain, read.dir)).toMatchObject({ ok: false, error: { step: 'B4' } });
+});
+
+it('RECOMMEND/bake-grade a method LND lists live but the bundled snapshot does not withholds the command (audit 1.3.2)', async () => {
+  const s = setup([entry('app1', '4294967341', ['info:read'])], [
+    record('id:1111111111111111', '4294967341', '/lnrpc.Lightning/GetInfo', 3),
+    record('id:1111111111111111', '4294967341', '/lnrpc.Lightning/GetNewThing', 2),
+  ]);
+  const live = { ...snapshot.methods, '/lnrpc.Lightning/GetNewThing': ['info:read'] };
+  const deps = { ...s.deps, lnd: { ...(s.deps.lnd as object), listPermissions: async () => live } as never };
+  const result = await run(['app1', ...s.args], deps);
+  expect(result.result).toMatchObject({ unmapped: [], recommendedUris: ['uri:/lnrpc.Lightning/GetInfo', 'uri:/lnrpc.Lightning/GetNewThing'], commands: [] });
+  const warning = result.warnings.find(item => typeof item !== 'string' && item.code === 'recommendation-unassessed') as { message: string } | undefined;
+  expect(warning?.message).toContain('/lnrpc.Lightning/GetNewThing');
+  // The command it would have printed is one bake refuses at B3.
+  expect(await bakeAccepts(`macwarden bake --label app1-narrow --uri '/lnrpc.Lightning/GetInfo,/lnrpc.Lightning/GetNewThing' --out <file> `
+    + `--lnd-rest localhost:18080 --tls-cert ${join(s.dir, 'tls.cert')} --macaroon ${join(s.dir, 'own.macaroon')}`, s.dir))
+    .toMatchObject({ ok: false, error: { step: 'B3', message: 'unassessed permissions: uri:/lnrpc.Lightning/GetNewThing' } });
 });

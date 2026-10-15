@@ -241,6 +241,34 @@ describe('payer explain', () => {
     assertClean(result, payerSecrets('s3'));
   });
 
+  it('the failed submission\'s HTLC attempts are shown at its failure, before the retry line, not after it (audit 1.3.2)', async () => {
+    const file = dir.path('retry-attempts-payer.db');
+    const store = payerStore(file);
+    const { paymentHash } = preimageFor('retry-attempts');
+    store.recordIntent({ operationId: 'PAYOUT-RA', kind: 'payout', paymentRequest: requestFor('retry-attempts'), invoice: decoded(paymentHash, 1000n),
+      feeLimitMsat: 100n, maxParts: 1 });
+    expect(store.claimForSubmission(paymentHash)).toBe(true);
+    store.applyUpdate(payment('retry-attempts', 'IN_FLIGHT', [attempt('1', 'IN_FLIGHT')]), 'SendPaymentV2', 1);
+    store.applyUpdate(payment('retry-attempts', 'FAILED', [attempt('1', 'FAILED')]), 'SendPaymentV2', 1);
+    expect(store.prepareRetry('PAYOUT-RA').outcome).toBe('recorded');
+    expect(store.claimForSubmission(paymentHash)).toBe(true);
+    store.applyUpdate(payment('retry-attempts', 'SUCCEEDED', [attempt('2', 'SUCCEEDED')]), 'SendPaymentV2', 2);
+    store.close();
+
+    const result = await run(['payer', 'explain', '--as', 'customer-payer', '--operation', 'PAYOUT-RA'], services({ payer: file }));
+    expect(result.code).toBe(0);
+    const timeline = result.doc.result?.timeline ?? [];
+    const at = (kind: string, text?: string): number => timeline.findIndex(item => item.kind === kind && (text === undefined || item.detail.includes(text)));
+    const first = at('htlc-attempt', 'attempt 1 (submission 1)');
+    const second = at('htlc-attempt', 'attempt 2 (submission 2)');
+    expect(first).toBeGreaterThan(at('failed'));
+    expect(first).toBeLessThan(at('retry'));
+    expect(timeline[first]?.at).toBe(timeline[at('failed')]?.at);
+    expect(second).toBeGreaterThan(at('retry'));
+    expect(second).toBeGreaterThan(timeline.map(item => item.kind).lastIndexOf('submission'));
+    assertClean(result, payerSecrets('retry-attempts'));
+  });
+
   it('stale updates and a NotFound revert: each named with its rule', async () => {
     const file = dir.path('stale-payer.db');
     const store = payerStore(file);

@@ -1,7 +1,8 @@
-import { isAbsolute } from 'node:path';
+import { existsSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { isAbsolute, join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  loadLab, preimageFor, tempDirectory,
+  loadLab, loadLabModule, preimageFor, tempDirectory,
   type DecodedPayReq, type FakeInvoiceApi, type FakePayerApi, type HtlcAttempt, type Invoice, type Lab, type Payment, type PayerDeps, type PayerStore,
   type ReceiverDeps, type ReceiverStore, type StreamDecision,
 } from './helpers/payment-lab-modules.js';
@@ -1435,5 +1436,142 @@ describe('payment lab audit 9245e00', () => {
     expect(store.prepareRetry('OP-AUDIT-F01')).toMatchObject({ outcome: 'recorded', payment: { paymentHash: hash, state: 'intent', submissions: 2 } });
     expect(store.events(hash).map(item => item.kind)).toEqual(['intent-recorded', 'submit', 'not-initiated', 'submit', 'stale-update', 'in-flight', 'failed',
       'retry-prepared']);
+  });
+});
+
+describe('payment lab audit 1.3.2: LND\'s answer is held to the payment hash the request carries', () => {
+  const CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+  /** A synthetic, checksum-valid BOLT11-shaped string carrying `hash` in its `p` field (as test/payment-lab-payer-audit.test.ts builds it). */
+  function synthetic(hash: string): string {
+    const hrp = 'lnbcrt';
+    let bits = BigInt(`0x${hash}`) << 4n;
+    const hashWords: number[] = [];
+    for (let index = 0; index < 52; index += 1) { hashWords.unshift(Number(bits & 31n)); bits >>= 5n; }
+    const words = [...Array<number>(7).fill(22), 1, 1, 20, ...hashWords, ...Array<number>(104).fill(22)];
+    const GENERATOR = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+    const polymod = (values: number[]): number => {
+      let checksum = 1;
+      for (const value of values) {
+        const top = checksum >>> 25;
+        checksum = ((checksum & 0x1ffffff) << 5) ^ value;
+        for (let bit = 0; bit < 5; bit += 1) if ((top >>> bit) & 1) checksum ^= GENERATOR[bit] ?? 0;
+      }
+      return checksum;
+    };
+    const expanded = [...hrp].map(char => char.charCodeAt(0) >> 5).concat([0], [...hrp].map(char => char.charCodeAt(0) & 31));
+    const mod = polymod([...expanded, ...words, 0, 0, 0, 0, 0, 0]) ^ 1;
+    const checksum = Array.from({ length: 6 }, (_unused, index) => (mod >> (5 * (5 - index))) & 31);
+    return `${hrp}1${[...words, ...checksum].map(word => CHARSET[word]).join('')}`;
+  }
+
+  type Client = { call(method: string, path: string, body?: unknown): Promise<unknown>; stream(): Promise<void> };
+  type ApiModule = {
+    PayerApi: new (client: Client) => { decodePayReq(paymentRequest: string): Promise<DecodedPayReq> };
+    InvoiceApi: new (client: Client) => { addInvoice(request: { preimage: string; valueMsat: bigint; memo: string; expirySeconds: number }):
+      Promise<{ paymentHash: string }> };
+  };
+  /** A REST client that answers every call with `answer` and counts the calls. */
+  function client(answer: unknown): Client & { calls: string[] } {
+    const calls: string[] = [];
+    return { calls, call: async (method, path) => { calls.push(`${method} ${path}`); return answer; }, stream: () => Promise.reject(new Error('no stream')) };
+  }
+
+  const realHash = preimageFor('audit-132-real').paymentHash;
+  const fakeHash = preimageFor('audit-132-fake').paymentHash;
+
+  it('payer pay: a DecodePayReq answer for another payment hash is refused before an intent is recorded or anything is sent', async () => {
+    const stdout: string[] = [];
+    vi.spyOn(process.stdout, 'write').mockImplementation(chunk => { stdout.push(String(chunk)); return true; });
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const file = dir.path('audit-132-lying-payreq.db');
+      const api = new ScriptedPayerApi();
+      api.invoice = decoded(fakeHash, 1000n);
+      let sent = 0;
+      api.send.push(async () => { sent += 1; });
+      const run = { payer: () => ({ api, store: payerStore(file), emit: quiet }), receiver: (): ReceiverDeps => { throw new Error('not used'); } };
+      expect(await lab.main(['payer', 'pay', '--as', 'customer-payer', '--operation', 'OP-132', '--kind', 'payout', '--invoice', synthetic(realHash),
+        '--fee-limit-msat', '100'], run)).toBe(3);
+      expect(sent).toBe(0);
+      const refused = stdout.flatMap(chunk => chunk.split('\n')).filter(line => line !== '').map(line => JSON.parse(line) as Record<string, unknown>)
+        .find(event => event.event === 'invoice-refused');
+      expect(String(refused?.reason)).toContain(fakeHash);
+      expect(String(refused?.reason)).toContain(realHash);
+      const after = payerStore(file);
+      expect(after.payment(fakeHash)).toBeUndefined();
+      expect(after.payment(realHash)).toBeUndefined();
+      expect(after.operation('OP-132')).toBeUndefined();
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('PayerApi.decodePayReq: an answer for another payment hash is a ProtocolError; the request\'s own hash, or one not readable offline, is accepted', async () => {
+    const { PayerApi } = await loadLabModule<ApiModule>('lnd/api.ts');
+    const answer = (hash: string) => ({ destination: DESTINATION, payment_hash: hash, num_msat: '1000', timestamp: '1', expiry: '3600', description: '' });
+    await expect(new PayerApi(client(answer(fakeHash))).decodePayReq(synthetic(realHash))).rejects.toBeInstanceOf(lab.ProtocolError);
+    await expect(new PayerApi(client(answer(realHash))).decodePayReq(synthetic(realHash))).resolves.toMatchObject({ paymentHash: realHash });
+    // Not BOLT11 offline (no valid checksum): left to LND, as the receiver's foreignAnswer leaves it.
+    await expect(new PayerApi(client(answer(fakeHash))).decodePayReq('lnbcrt1notreadable')).resolves.toMatchObject({ paymentHash: fakeHash });
+  });
+
+  it('InvoiceApi.addInvoice: a malformed or short r_hash is a ProtocolError, not some other hex hash', async () => {
+    const { InvoiceApi } = await loadLabModule<ApiModule>('lnd/api.ts');
+    const request = { preimage: preimageFor('audit-132-add').preimage, valueMsat: 1000n, memo: '', expirySeconds: 3600 };
+    const answer = (rHash: string) => ({ r_hash: rHash, payment_request: 'lnbcrt1x', add_index: '1' });
+    for (const rHash of ['not base64!', Buffer.alloc(16, 1).toString('base64'), '']) {
+      await expect(new InvoiceApi(client(answer(rHash))).addInvoice(request), JSON.stringify(rHash)).rejects.toBeInstanceOf(lab.ProtocolError);
+    }
+    const good = Buffer.from(realHash, 'hex').toString('base64');
+    await expect(new InvoiceApi(client(answer(good))).addInvoice(request)).resolves.toMatchObject({ paymentHash: realHash });
+  });
+});
+
+describe('payment lab audit 1.3.2: store/sqlite.ts opens', () => {
+  interface Handle { prepare(sql: string): { get(): Record<string, unknown> | undefined }; exec(sql: string): void; close(): void }
+  type Sqlite = { openDatabase(path: string, migrations: readonly string[]): Handle; readOnly<T>(open: () => T): T };
+  const MIGRATIONS = ['CREATE TABLE t (x INTEGER)', 'CREATE TABLE u (y INTEGER)'];
+  const version = (db: Handle): number => Number(db.prepare('PRAGMA user_version').get()?.user_version);
+
+  it('\':memory:\' and \'\' are SQLite\'s in-memory and temporary databases: no file is pre-created for them', async () => {
+    const sqlite = await loadLabModule<Sqlite>('store/sqlite.ts');
+    const stray = join(process.cwd(), ':memory:');
+    const before = existsSync(stray);
+    try {
+      for (const path of [':memory:', '']) {
+        const db = sqlite.openDatabase(path, MIGRATIONS);
+        expect(version(db)).toBe(2);
+        db.close();
+      }
+      // On Windows the pre-create failed with ENOENT (':' is not allowed in a name); on POSIX it left a file named ':memory:'.
+      expect(existsSync(stray)).toBe(before);
+    } finally {
+      if (!before && existsSync(stray)) rmSync(stray);
+    }
+  });
+
+  it('a read-only open of a database at schema version 0 with no tables (an interrupted first open) reads it as missing', async () => {
+    const sqlite = await loadLabModule<Sqlite>('store/sqlite.ts');
+    const empty = dir.path('sqlite-132-empty.db');
+    writeFileSync(empty, '');
+    const walOnly = dir.path('sqlite-132-wal-only.db');
+    const { DatabaseSync } = await import('node:sqlite');
+    const raw = new DatabaseSync(walOnly);
+    raw.exec('PRAGMA journal_mode = WAL');
+    raw.close();
+    for (const path of [empty, walOnly]) {
+      const size = statSync(path).size;
+      const db = sqlite.readOnly(() => sqlite.openDatabase(path, MIGRATIONS));
+      expect(version(db)).toBe(2);
+      expect(db.prepare('SELECT COUNT(*) AS n FROM t').get()?.n).toBe(0n);
+      db.close();
+      expect(statSync(path).size).toBe(size);
+    }
+    // A version-0 database that has tables is not an interrupted first open: it is still refused, unchanged.
+    const tables = dir.path('sqlite-132-tables.db');
+    const other = new DatabaseSync(tables);
+    other.exec('CREATE TABLE legacy (z INTEGER)');
+    other.close();
+    expect(() => sqlite.readOnly(() => sqlite.openDatabase(tables, MIGRATIONS))).toThrow(/schema version 0 is older than this code's \(2\)/);
   });
 });

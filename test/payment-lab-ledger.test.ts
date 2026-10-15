@@ -870,6 +870,9 @@ describe('payment lab ledger: principal plus fee above 2^63 - 1', () => {
 
 /** ledger-verify's capped lists: the first 100 entries per category, and the totals. */
 type CountedVerification = LedgerVerification & { unbalancedEntryCount: number; invalidEntryCount: number };
+/** ledger-verify's per-payment LND differences (the first 100, and their total). */
+type LndListedVerification = LedgerVerification & { lndDifferences: { account: string; paymentHash?: string; reason: string }[];
+  lndDifferenceCount: number };
 
 /** Recomputes every line's balance_after and the balances table, as post() would have: tampering only the records can catch. */
 function rebuildBalances(db: PayerStore['db']): void {
@@ -1106,6 +1109,129 @@ describe('payment lab ledger: the payer\'s double-payment entries against its re
       const result = await lab.verifyLedger(store);
       expect(result.balanced).toBe(false);
       expect(result.accounts.map(item => item.firstEntry?.reason ?? '').join('\n')).toMatch(reason);
+    });
+  });
+
+  // Audit 1.3.2: success order comes from the payment records, not from the entries being checked.
+  it('the first payment\'s payment-succeeded entry deleted: that payment is named, the second\'s valid double-payment entry is not', async () => {
+    const file = 'paid-twice-first-deleted.db';
+    const store = await paidTwice(file);
+    store.db.exec('DELETE FROM journal_lines WHERE entry_id = 1; DELETE FROM journal_entries WHERE entry_id = 1');
+    rebuildBalances(store.db);
+    const result = await lab.verifyLedger(store);
+    expect(result.balanced).toBe(false);
+    const reasons = result.accounts.map(item => item.firstEntry?.reason ?? '').join('\n');
+    expect(reasons).toMatch(new RegExp(`payment ${preimageFor(`${file}-a`).paymentHash} is succeeded in the record but has no payment-succeeded entry`));
+    expect(reasons).not.toMatch(/first succeeded payment of operation OP-D/);
+    expect(result.accounts.find(item => item.account === 'suspense-double-payment')?.firstEntry).toBeUndefined();
+  });
+
+  // Audit 1.3.2: LND's amounts for every known hash are in the LND totals, also when the posted side or the record is unreadable.
+  const unreadable: [string, (hash: string) => string, string[]][] = [
+    ['the second payment\'s principal line deleted', () => 'DELETE FROM journal_lines WHERE entry_id = 2 AND line_no = 1',
+      ['lnd-wallet-outgoing', 'routing-fees']],
+    ['the second payment\'s record damaged (its lines readable)', hash => `${UNCHECKED}; UPDATE payments SET value_msat = 'abc' WHERE payment_hash = '${hash}'`, []],
+  ];
+  unreadable.forEach(([name, change, listedAccounts], index) => {
+    it(`${name}: LND's amounts are in the totals${listedAccounts.length > 0 ? ' and the hash is listed' : ''}`, async () => {
+      const file = `paid-twice-lnd-${index}.db`;
+      const store = await paidTwice(file);
+      const b = preimageFor(`${file}-b`).paymentHash;
+      store.db.exec(change(b));
+      const source: LndLedgerSource = { listPaymentsPage: async offset => offset === 0n
+        ? { payments: ['a', 'b', 's'].map(label => lndPayment(`${file}-${label}`, 'SUCCEEDED')), lastIndexOffset: 3n }
+        : { payments: [], lastIndexOffset: offset } };
+      const result = await lab.verifyLedger(store, source) as LndListedVerification;
+      expect(result.balanced).toBe(false);
+      expect(result.accounts.find(item => item.account === 'lnd-wallet-outgoing')?.lnd).toBe(-3n * (VALUE + FEE));
+      expect(result.accounts.find(item => item.account === 'routing-fees')?.lnd).toBe(3n * FEE);
+      expect(result.lndDifferences.map(item => [item.account, item.paymentHash])).toEqual(listedAccounts.map(account => [account, b]));
+      expect(result.lndDifferenceCount).toBe(listedAccounts.length);
+    });
+  });
+});
+
+describe('payment lab ledger: the receiver\'s fulfillments and late settlements against the books (audit 1.3.2)', () => {
+  /** A not-created invoice x of `orderId` and its replacement y, open: x's settlement reported now is a blocked late one. */
+  function lateAndReplacement(store: ReceiverStore, orderId: string, file: string): { x: string; y: string } {
+    const { preimage, paymentHash: x } = preimageFor(`${file}-x`);
+    expect(store.recordInvoiceIntent({ orderId, amountMsat: VALUE, kind: 'standard', preimage, paymentHash: x }).outcome).toBe('recorded');
+    expect(store.markNotCreated(x)).toBe(true);
+    return { x, y: openInvoice(store, orderId, `${file}-y`) };
+  }
+
+  const reasonsOf = (result: LedgerVerification): string => result.accounts.map(item => item.firstEntry?.reason ?? '').join('\n');
+  const invoices = (...items: Invoice[]): LndLedgerSource => ({ listInvoicesPage: async offset => offset === 0n
+    ? { invoices: items, lastIndexOffset: BigInt(items.length) } : { invoices: [], lastIndexOffset: offset } });
+
+  it('an order fulfilled twice (two invoice-settled entries, no double-payment entry) is named', async () => {
+    const store = receiverStore('fulfilled-twice.db');
+    const { x, y } = lateAndReplacement(store, 'ORD-T', 'fulfilled-twice');
+    expect(store.applyInvoice(invoice(y, 'SETTLED', VALUE, 1n), 'subscription')).toBe('fulfilled');
+    // y's fulfillment hidden while x settles, then put back: x is booked as a sale where a double payment belongs.
+    const saved = store.db.prepare('SELECT fulfilled_at FROM fulfillments WHERE payment_hash = ?').all(y)[0] as { fulfilled_at: string };
+    store.db.prepare('DELETE FROM fulfillments WHERE payment_hash = ?').run(y);
+    expect(store.applyInvoice(invoice(x, 'SETTLED', VALUE, 2n), 'lookup')).toBe('fulfilled');
+    store.db.prepare('INSERT INTO fulfillments (payment_hash, order_id, fulfilled_at) VALUES (?, ?, ?)').run(y, 'ORD-T', saved.fulfilled_at);
+    expect(store.journal('ORD-T').map(entry => entry.event)).toEqual(['invoice-settled', 'invoice-settled']);
+    const result = await lab.verifyLedger(store, invoices(invoice(x, 'SETTLED', VALUE, 2n), invoice(y, 'SETTLED', VALUE, 1n)));
+    expect(result.balanced).toBe(false);
+    expect(result.accounts.find(item => item.account === 'suspense-double-payment')?.firstEntry?.reason)
+      .toMatch(/^order ORD-T is fulfilled by 2 invoices .*an order is fulfilled once/);
+  });
+
+  const unsettled: [string, (store: ReceiverStore, hash: string) => void, RegExp][] = [
+    ['an open invoice', () => undefined, /fulfilled order ORD-U but has no invoice-settled entry \(record open\)/],
+    ['an underpaid invoice', (store, hash) => { expect(store.applyInvoice(invoice(hash, 'SETTLED', 400n, 1n), 'subscription')).toBe('underpaid'); },
+      /fulfilled order ORD-U but has no invoice-settled entry \(record settled, entry 1 is underpaid-settlement\)/],
+    ['a canceled invoice', (store, hash) => { expect(store.applyInvoice(invoice(hash, 'CANCELED'), 'lookup')).toBe('state-updated'); },
+      /fulfilled order ORD-U but has no invoice-settled entry \(record canceled\)/],
+  ];
+  unsettled.forEach(([name, settle, reason], index) => {
+    it(`a fulfillments row for ${name} is named`, async () => {
+      const store = receiverStore(`fulfilled-unsettled-${index}.db`);
+      const hash = openInvoice(store, 'ORD-U', `fulfilled-unsettled-${index}`);
+      settle(store, hash);
+      store.db.prepare(`INSERT INTO fulfillments (payment_hash, order_id, fulfilled_at) VALUES (?, 'ORD-U', '2026-10-15T00:00:00.000Z')`).run(hash);
+      const result = await lab.verifyLedger(store);
+      expect(result.balanced).toBe(false);
+      expect(reasonsOf(result)).toMatch(reason);
+    });
+  });
+
+  it('a blocked late settlement keeps LND\'s amount and settle index, and a changed entry amount is named without LND', async () => {
+    const store = receiverStore('late-settled-amount.db');
+    const { x } = lateAndReplacement(store, 'ORD-L', 'late-settled-amount');
+    expect(store.applyInvoice(invoice(x, 'SETTLED', VALUE, 7n), 'lookup')).toBe('fulfilled');
+    expect(store.invoice(x)).toMatchObject({ state: 'not-created', lateLndState: 'SETTLED', amtPaidMsat: VALUE, settleIndex: 7n });
+    expectBalanced(await lab.verifyLedger(store));
+    store.db.exec(`UPDATE journal_lines SET amount_msat = 5000 WHERE entry_id = (SELECT entry_id FROM journal_entries WHERE reference = '${x}')`);
+    rebuildBalances(store.db);
+    const result = await lab.verifyLedger(store);
+    expect(result.balanced).toBe(false);
+    expect(result.lnd).toBe('not-requested');
+    expect(result.accounts.find(item => item.account === 'lnd-wallet-incoming')?.firstEntry?.reason)
+      .toMatch(/^entry 1 settles 5000 msat; the invoice record's amt_paid_msat 1000/);
+    // A book an earlier store wrote keeps no amount for a late settlement: its amount is compared with LND only, as before.
+    store.db.prepare('UPDATE invoices SET amt_paid_msat = NULL, settle_index = NULL WHERE payment_hash = ?').run(x);
+    expectBalanced(await lab.verifyLedger(store));
+  });
+
+  // LND's amount for every known hash is in the LND total, also when the settlement's amount or the record is unreadable.
+  const unreadable: [string, (hash: string) => string, boolean][] = [
+    ['the settlement\'s line 1 deleted', () => 'DELETE FROM journal_lines WHERE entry_id = 1 AND line_no = 1', true],
+    ['the invoice record damaged (its lines readable)', hash => `${UNCHECKED}; UPDATE invoices SET amount_msat = 'abc' WHERE payment_hash = '${hash}'`, false],
+  ];
+  unreadable.forEach(([name, change, listed], index) => {
+    it(`${name}: LND's amount is in the total${listed ? ' and the hash is listed' : ''}`, async () => {
+      const store = receiverStore(`receiver-lnd-unreadable-${index}.db`);
+      const hash = openInvoice(store, 'ORD-R', `receiver-lnd-unreadable-${index}`);
+      expect(store.applyInvoice(invoice(hash, 'SETTLED', VALUE, 1n), 'subscription')).toBe('fulfilled');
+      store.db.exec(change(hash));
+      const result = await lab.verifyLedger(store, invoices(invoice(hash, 'SETTLED', VALUE, 1n))) as LndListedVerification;
+      expect(result.balanced).toBe(false);
+      expect(result.accounts.find(item => item.account === 'lnd-wallet-incoming')?.lnd).toBe(VALUE);
+      expect(result.lndDifferences.map(item => [item.account, item.paymentHash])).toEqual(listed ? [['lnd-wallet-incoming', hash]] : []);
     });
   });
 });

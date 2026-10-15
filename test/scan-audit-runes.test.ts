@@ -35,3 +35,14 @@ it('a quoted word that is not a rune option does not open rune context', () => {
     `["--rune", ${SPEND_RUNE}]`, `["--rune", x, "${SPEND_RUNE}"]`])
     expect(runeCandidates(text), text).toEqual([]);
 });
+
+// Audit 1.3.2: a rune key whose value is too short to be a rune moved the key search past a rune
+// key inside that value, so the rune after it was neither found nor redacted.
+it('a rune key after a short value of another rune key is still found', async () => scratch(async dir => {
+  for (const text of [`rune=a/b/cln_rune="${SPEND_RUNE}"`, `rune: cln_rune: "${SPEND_RUNE}"`, `rune=x CLN_RUNE='${SPEND_RUNE}'`]) {
+    expect(runeCandidates(text).map(candidate => candidate.text), text).toEqual([SPEND_RUNE]);
+    writeFileSync(join(dir, 'app.env'), `${text}\n`);
+    const findings = (await scan([dir], { clock })).findings;
+    expect(findings.map(finding => [finding.kind, finding.fingerprint]), text).toEqual([['rune', runeFingerprint(SPEND_TEXT)]]);
+  }
+}));

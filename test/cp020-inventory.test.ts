@@ -5,6 +5,9 @@ import * as fs from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { expect, it, vi } from 'vitest';
 import { render } from './helpers/render-adversarial.js';
+import { decodeMacaroon } from '../src/decode/index.js';
+import { Secret } from '../src/secret.js';
+import { register, responseBytes } from './helpers/cp038-online.js';
 
 type Entry = {
   nodePubkey: string; label: string; rootKeyId: string; permissions: string[]; caveats: unknown[];
@@ -48,6 +51,14 @@ function entry(id: string, outPath: string | null, name = 'default-readonly', ch
     fingerprint: facts(name).fingerprint, outPath, createdAt: '2026-10-02T09:00:00Z',
     verified: true, status: 'active', revokedAt: null, revokeEvidence: null,
     replaces: null, replacedBy: null, ...changes };
+}
+// A row's file is baked on the row's own root key ID: inventory --verify checks a file only when
+// both its root key ID and its fingerprint are the row's (audit 1.3.2).
+function issued(dir: string, id: string, name = 'default-readonly', changes: Partial<Entry> = {}): Entry {
+  const bytes = responseBytes(BigInt(id), printed(name).permissions);
+  const path = join(dir, `${id}.macaroon`);
+  writeFileSync(path, bytes, { mode: 0o600 });
+  return entry(id, path, name, { fingerprint: decodeMacaroon(new Secret(bytes)).fingerprint, ...changes });
 }
 function registry(dir: string, entries: Entry[]): string {
   const path = join(dir, 'registry.json');
@@ -93,7 +104,7 @@ function count(calls: string[]) { return calls.filter(value => value === 'CheckM
 
 it('CP-020/B1 valid, root-missing and signature-mismatch reject while other and auth failures error', async () => temp(async dir => {
   const ids = ['9', '10', '11', '12', '13', '14'];
-  const entries = ids.map(id => entry(id, credential(dir, 'default-readonly', id)));
+  const entries = ids.map(id => issued(dir, id));
   const path = registry(dir, entries);
   // LND reports a missing root key consistently: ID 10 is absent from ListMacaroonIDs too.
   const { calls, deps } = fixture(['0', ...ids.filter(id => id !== '10')], index => {
@@ -117,7 +128,7 @@ it('CP-020/B1 valid, root-missing and signature-mismatch reject while other and 
 it('CP-020/B2 ineligible rows never send a verification request', async () => temp(async dir => {
   const good = credential(dir, 'default-readonly', 'eligible');
   const mismatch = credential(dir, 'default-invoice', 'mismatch');
-  const entries = [entry('9', good), entry('10', null), entry('11', join(dir, 'absent.macaroon')),
+  const entries = [issued(dir, '9'), entry('10', null), entry('11', join(dir, 'absent.macaroon')),
     entry('12', mismatch), entry('13', good, 'default-readonly', { status: 'revoked',
       revokedAt: '2026-10-03T00:00:00Z', revokeEvidence: 'rejected' }),
     entry('14', good, 'default-readonly', { nodePubkey: otherPubkey })];
@@ -132,7 +143,7 @@ it('CP-020/B2 ineligible rows never send a verification request', async () => te
 }));
 
 it('CP-020/B3 a failed row does not stop later checks or mutate registry and LND IDs', async () => temp(async dir => {
-  const entries = ['9', '10', '11'].map(id => entry(id, credential(dir, 'default-readonly', id)));
+  const entries = ['9', '10', '11'].map(id => issued(dir, id));
   const path = registry(dir, entries);
   const before = readFileSync(path), mtime = statSync(path).mtimeMs;
   const ids = ['0', '9', '10', '11'];
@@ -150,8 +161,7 @@ it('CP-020/B3 a failed row does not stop later checks or mutate registry and LND
 
 it('CP-020/B4 verification uses the file decoded ordinary and exact URI permissions', async () => temp(async dir => {
   const name = 'grade-invoice-send';
-  const path = registry(dir, [entry('9', credential(dir, name), name,
-    { permissions: ['info:read'] })]);
+  const path = registry(dir, [issued(dir, '9', name, { permissions: ['info:read'] })]);
   const { verification, deps } = fixture(['0', '9']);
   const output = await invoke(path, deps);
   expect(row(output, '9').verify).toBe('accepted');
@@ -177,9 +187,9 @@ it('CP-020/B5 credential forms and request headers stay absent in accepted, reje
   const sentinelDir = process.env.MACWARDEN_SENTINEL_DIR;
   if (!sentinelDir) throw new Error('MACWARDEN_SENTINEL_DIR is required');
   mkdirSync(sentinelDir, { recursive: true, mode: 0o700 });
-  const sentinel = join(sentinelDir, 'cp020-unit.macaroon');
-  copyFileSync(join(repo, 'test/vectors/default-readonly.macaroon'), sentinel);
-  const path = registry(dir, ['9', '10', '11'].map(id => entry(id, sentinel)));
+  const sentinels = new Map(['9', '10', '11'].map(id => [id, register(responseBytes(BigInt(id), printed('default-readonly').permissions))]));
+  const path = registry(dir, [...sentinels].map(([id, sentinel]) => entry(id, sentinel, 'default-readonly',
+    { fingerprint: decodeMacaroon(new Secret(readFileSync(sentinel))).fingerprint })));
   // ID 10's root key is missing, so ListMacaroonIDs does not list it either.
   const { deps } = fixture(['0', '9', '11'], index => {
     if (index === 0) return { valid: true as const };
@@ -189,8 +199,7 @@ it('CP-020/B5 credential forms and request headers stay absent in accepted, reje
   const output = await invoke(path, deps);
   const rendered = render(output as Parameters<typeof render>[0], 'json') +
     render(output as Parameters<typeof render>[0], 'text');
-  const bytes = readFileSync(sentinel);
-  for (const form of [bytes.toString('utf8'), bytes.toString('latin1'),
+  for (const bytes of [...sentinels.values()].map(sentinel => readFileSync(sentinel))) for (const form of [bytes.toString('utf8'), bytes.toString('latin1'),
     bytes.toString('hex'), bytes.toString('hex').toUpperCase(), bytes.toString('base64'),
     bytes.toString('base64url'), bytes.toString('base64').replace(/=+$/, ''),
     bytes.toString('base64url').replace(/=+$/, '')]) expect(rendered).not.toContain(form);
@@ -199,7 +208,7 @@ it('CP-020/B5 credential forms and request headers stay absent in accepted, reje
 }));
 
 it('CP-020/B6 previously accepted rows become rejected after a simulated root-key-missing response', async () => temp(async dir => {
-  const path = registry(dir, ['9', '10'].map(id => entry(id, credential(dir, 'default-readonly', id))));
+  const path = registry(dir, ['9', '10'].map(id => issued(dir, id)));
   let regenerated = false;
   const listed = ['0', '9', '10'];
   const { deps } = fixture(listed, () => {
@@ -220,7 +229,7 @@ it('CP-020/B6 previously accepted rows become rejected after a simulated root-ke
 
 // Audit 1.4.0 (as verify, 1.2.1): "root key missing" contradicted by ListMacaroonIDs is an error, never a rejection.
 it('CP-020/B1 root-key-missing while ListMacaroonIDs still lists the ID is an error, not rejected', async () => temp(async dir => {
-  const path = registry(dir, [entry('9', credential(dir, 'default-readonly', '9'))]);
+  const path = registry(dir, [issued(dir, '9')]);
   const { deps } = fixture(['0', '9'], () => ({ valid: false, reason: 'root-key-missing', message: "root key with id 9 doesn't exist" }));
   const output = await invoke(path, deps);
   expect(row(output, '9')).toMatchObject({ inLnd: true, verify: 'error' });
@@ -228,7 +237,7 @@ it('CP-020/B1 root-key-missing while ListMacaroonIDs still lists the ID is an er
 }));
 
 it('CP-020/B7 repeated verification has identical result and leaves registry bytes and mtime unchanged', async () => temp(async dir => {
-  const path = registry(dir, [entry('9', credential(dir, 'default-readonly'))]);
+  const path = registry(dir, [issued(dir, '9')]);
   const before = readFileSync(path), mtime = statSync(path).mtimeMs;
   const { calls, deps } = fixture(['0', '9']);
   const first = await invoke(path, deps), second = await invoke(path, deps);

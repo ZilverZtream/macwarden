@@ -1,7 +1,8 @@
 // Access-review evidence for `inventory --report`. Built only from registry entries and
 // LND's root key ID list, which never hold credential bytes; every text field still passes
 // credential recognition before it is written.
-import { redactEncodedCredentials } from '../credential-recognition.js';
+import { redactCredentialText } from '../output/index.js';
+import { collectNwcSecrets, redactKnownSecrets } from '../scan/redact.js';
 import { parseTimeBefore } from '../decode/index.js';
 import type { RegistryEntry } from '../registry/index.js';
 import { secondsInstant } from '../instant.js';
@@ -157,9 +158,12 @@ const INVISIBLE = /[\xa0\u034f\u115f\u1160\u1680\u17b4\u17b5\u180b-\u180f\u2000-
  * reports are plain text. The legacy '##[' CI command marker, recognised anywhere in a line,
  * is escaped as in the text output.
  */
-function clean(value: string): string {
+function clean(value: string, secrets: ReadonlySet<string>): string {
+  // The output's whole redaction, not encoded macaroons alone: the report file is written past the
+  // output module, and redacting a macaroon first left an L402 value's preimage unrecognised
+  // (audit 1.3.2). A wallet secret named in any field is redacted in every field.
   // eslint-disable-next-line no-control-regex
-  return redactEncodedCredentials(value).replace(/[\x00-\x1f\x7f-\x9f]/g, ' ').replace(INVISIBLE, character => {
+  return redactKnownSecrets(redactCredentialText(value), secrets).replace(/[\x00-\x1f\x7f-\x9f]/g, ' ').replace(INVISIBLE, character => {
     const code = character.codePointAt(0)!;
     return code <= 0xffff ? `\\u${code.toString(16).padStart(4, '0')}` : `\\u{${code.toString(16)}}`;
   }).replace(/##\[/g, '##\\x5b');
@@ -167,7 +171,13 @@ function clean(value: string): string {
 
 /** The review as every report format holds it: each string passed through clean(). */
 export function cleanReview(review: AccessReview): AccessReview {
-  const walk = (value: unknown): unknown => typeof value === 'string' ? clean(value)
+  const secrets = new Set<string>();
+  const collect = (value: unknown): void => {
+    if (typeof value === 'string') collectNwcSecrets(value, secrets);
+    else if (value && typeof value === 'object') for (const item of Object.values(value)) collect(item);
+  };
+  collect(review);
+  const walk = (value: unknown): unknown => typeof value === 'string' ? clean(value, secrets)
     : Array.isArray(value) ? value.map(walk)
       : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, walk(item)])) : value;
   return walk(review) as AccessReview;

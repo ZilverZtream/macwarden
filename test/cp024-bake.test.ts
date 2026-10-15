@@ -448,6 +448,20 @@ for (const mode of ['text', 'json'] as const) {
   }));
 }
 
+// Audit 1.3.2: as rotate and revoke, an unexpected failure after the send names the allocated root key ID and its recovery.
+it('CP-024/B10 audit-1.3.2 unexpected exception after bake send names the allocated root key ID and its revoke command', async () => scratch(async path => {
+  const f = fixture(path);
+  f.deps.clock = () => {
+    if (f.state.chosen) throw new TypeError('unexpected clock fault after issuance');
+    return fixedClock();
+  };
+  const result = await invoke(f, ['--expires', '90d']);
+  stopped(f, result, 8, 'internal');
+  expect(result.error?.message).toContain(`LND may have changed; root key ID ${f.state.chosen}`);
+  expect(result.error?.message).toContain('macwarden inventory');
+  expect(result.error?.message).toContain(`recover with macwarden revoke ${f.state.chosen}`);
+}));
+
 it('CP-024/B4 ninety-day expiry drops fractional seconds, records request and is visible in inspect', async () => scratch(async path => {
   const f = fixture(path);
   const result = await invoke(f, ['--expires', '90d']);

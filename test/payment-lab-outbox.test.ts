@@ -898,3 +898,96 @@ describe('payment lab outbox: the 1.3.1 audit (F04: an expired lease and the rec
     expect(jsonFiles(effects)).toEqual([`${lab.outbox.fileBase('ORD-H')}.json`]);
   }, 120_000);
 });
+
+describe('payment lab outbox: the 1.3.2 audit (a row edited in the database is not signed)', () => {
+  const jsonFiles = (effects: EffectTarget): string[] => (existsSync(effects.dir) ? readdirSync(effects.dir).filter(name => name.endsWith('.json')) : []);
+
+  /** Runs one pass and expects the one row to fail as ledger-entry-mismatch, stay pending, and leave no file. */
+  function expectRefused(store: PayerStore | ReceiverStore, name: string): void {
+    const effects = target(name);
+    const events: Record<string, unknown>[] = [];
+    expect(lab.outbox.runPass(store.db, effects, { emit: event => events.push(event) })).toMatchObject({ performed: 0, failed: 1, remaining: 1 });
+    expect(events.filter(event => event.event === 'outbox-failed').map(event => event.reason)).toEqual(['ledger-entry-mismatch']);
+    expect(store.outbox()[0]).toMatchObject({ state: 'pending' });
+    expect(store.outbox()[0]?.lastError).toMatch(/^ledger-entry-mismatch: /);
+    expect(jsonFiles(effects)).toEqual([]);
+  }
+
+  function succeededOperation(file: string): PayerStore {
+    const store = payerStore(file);
+    submitted(store, file, 'OP-T', 'payout');
+    store.applyUpdate(lndPayment(file, 'SUCCEEDED'), 'SendPaymentV2', 1);
+    expect(store.outbox()).toHaveLength(1);
+    return store;
+  }
+
+  for (const [label, edit] of [
+    ['valueMsat', `payload = json_set(payload, '$.valueMsat', '999999')`],
+    ['feeMsat', `payload = json_set(payload, '$.feeMsat', '0')`],
+    ['operationId', `payload = json_set(payload, '$.operationId', 'OP-EVIL')`],
+    ['subject', `subject = 'OP-EVIL'`],
+  ] as const) {
+    it(`payer: a confirm-operation row whose ${label} was edited fails as ledger-entry-mismatch and no file is written`, () => {
+      const store = succeededOperation(`tamper-payer-${label}.db`);
+      store.db.exec(`UPDATE outbox SET ${edit}`);
+      expectRefused(store, `tamper-payer-${label}-confirmations`);
+    });
+  }
+
+  for (const [label, edit] of [
+    ['orderId', `payload = json_set(payload, '$.orderId', 'ORD-EVIL')`],
+    ['subject', `subject = 'ORD-EVIL'`],
+  ] as const) {
+    it(`receiver: a fulfill-order row whose ${label} was edited fails as ledger-entry-mismatch and no file is written`, () => {
+      const { store } = settledOrder(`tamper-receiver-${label}.db`, 'ORD-T');
+      store.db.exec(`UPDATE outbox SET ${edit}`);
+      expectRefused(store, `tamper-receiver-${label}-receipts`);
+    });
+  }
+
+  it('an entry column of an unexpected type is a ledger-entry-mismatch, not a plain error', () => {
+    const { store } = settledOrder('tamper-entry-type.db', 'ORD-T');
+    // The journal's CHECKs keep operation_id text or NULL: a NULL one (an entry that names no order) is the reachable wrong type.
+    store.db.exec('UPDATE journal_entries SET operation_id = NULL');
+    expectRefused(store, 'tamper-entry-type-receipts');
+  });
+
+  it('untouched rows of both kinds are still performed', () => {
+    const payer = succeededOperation('tamper-control-payer.db');
+    expect(lab.outbox.runPass(payer.db, target('tamper-control-confirmations'), { emit: quiet })).toMatchObject({ performed: 1, failed: 0 });
+    const { store } = settledOrder('tamper-control-receiver.db', 'ORD-T');
+    expect(lab.outbox.runPass(store.db, target('tamper-control-receipts'), { emit: quiet })).toMatchObject({ performed: 1, failed: 0 });
+  });
+});
+
+describe('payment lab outbox: the 1.3.2 audit (outbox-status reads one snapshot)', () => {
+  it('a worker\'s ack committed between outbox-status\'s queries does not make the counts and the overdue list disagree', () => {
+    const { store } = settledOrder('status-snapshot.db', 'ORD-S');
+    const other = receiverStore('status-snapshot.db'); // a second connection to the file, as a worker in another process
+    // The status's connection, with a hook after its first query (the counts): the other connection then marks the row done.
+    const db = store.db as typeof store.db & { readonly isTransaction: boolean };
+    let acked = false;
+    const hooked = {
+      get isTransaction(): boolean { return db.isTransaction; },
+      exec: (sql: string): void => { db.exec(sql); },
+      prepare: (sql: string) => {
+        const statement = db.prepare(sql);
+        if (!sql.includes('GROUP BY state')) return statement;
+        return { all: (...params: never[]) => {
+          const rows = statement.all(...params);
+          other.db.exec(`UPDATE outbox SET state = 'done', acknowledged_at = created_at`);
+          acked = true;
+          return rows;
+        } };
+      },
+    };
+    const status = lab.outbox.outboxStatus(hooked as unknown as typeof db, Date.now() + 600_000, 300);
+    expect(acked).toBe(true);
+    // One snapshot: the row is pending in the counts and overdue in the list, both as it was before the ack.
+    expect(status).toMatchObject({ pending: 1, done: 0, overdueCount: 1 });
+    expect(status.overdue.map(row => row.state)).toEqual(['pending']);
+    expect(db.isTransaction).toBe(false);
+    // The next status sees the ack.
+    expect(lab.outbox.outboxStatus(db, Date.now() + 600_000, 300)).toMatchObject({ pending: 0, done: 1, overdueCount: 0, oldestPendingAgeS: null });
+  });
+});

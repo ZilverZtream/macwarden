@@ -103,7 +103,8 @@ async function explainOrFail(input: ExplainInput, options: ExplainOptions, finis
   const warnings: Warning[] = [];
   let error: ExplainError | null = null;
   if (options.refresh) {
-    const refreshOptions = options.refreshDeadlineMs === undefined ? {} : { deadlineMs: options.refreshDeadlineMs };
+    // The subject's own ID goes with the hashes, so the refresh fingerprints it as the records' part does (audit 1.3.2).
+    const refreshOptions = options.refreshDeadlineMs === undefined ? { subject: target } : { deadlineMs: options.refreshDeadlineMs, subject: target };
     const refreshed = input.component === 'payer' ? await refreshPayer(explanation, hashes, input.api, refreshOptions)
       : await refreshReceiver(explanation, hashes, input.api, refreshOptions);
     for (const fact of refreshed.facts) explanation.timeline.push(scrubAll(fact, known));

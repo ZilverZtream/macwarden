@@ -55,8 +55,10 @@ const str = (value: unknown): string => (value === null || value === undefined ?
  * The attempts of a submission are shown once its last event is: at the next submission's start, or after the payment's
  * last event. The records keep each attempt's last state only, so it is shown no earlier than the last thing the records
  * learned about its submission: never as a terminal state before a disconnect or an update that came before it.
+ * `payer retry` ends the failed submission too (prepareRetry closes it): its attempts are shown at its failure, before the
+ * retry line, not after it as if they belonged to the retry (audit 1.3.2).
  */
-const ENDS_SUBMISSION = new Set(['submit']);
+const ENDS_SUBMISSION = new Set(['submit', 'retry-prepared']);
 
 function paymentItems(timeline: Timeline, store: PayerStore, payment: PaymentRecord): void {
   const fp = fingerprint(payment.paymentHash);

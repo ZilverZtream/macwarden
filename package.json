@@ -1,6 +1,6 @@
 {
   "name": "macwarden",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "description": "Lightning credential hygiene for LND: inspect, scan (incl. git history), inventory, bake, revoke, rotate and attenuate macaroons",
   "keywords": [
     "lightning",

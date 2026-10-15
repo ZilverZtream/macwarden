@@ -44,3 +44,43 @@ it('DECODE-AUDIT/recognition the parse budget never stops a real credential bein
   // Text that only looks like a macaroon start is left alone.
   expect(macaroonEnds(Buffer.from([2, 2, 1, 3, 0, 0, 6, 32, ...Buffer.alloc(32)]))(0)).toBeNull();
 });
+
+// Audit 1.3.2: a word joined to a grouped base64 macaroon by a separator (a key before it, a
+// suffix after it) was read as one more group of another length, so the run was irregular and
+// the whole macaroon was left unredacted.
+it('DECODE-AUDIT/recognition a key or suffix joined to a grouped base64 macaroon never hides it', () => {
+  for (const name of ['default-readonly', 'default-invoice']) {
+    const encoded = readFileSync(resolve(`test/vectors/${name}.macaroon`)).toString('base64');
+    for (const size of [4, 8]) for (const separator of [':', '.']) {
+      const grouped = encoded.replace(/=+$/, '').match(new RegExp(`.{1,${size}}`, 'g'))!.join(separator) + encoded.slice(encoded.replace(/=+$/, '').length);
+      for (const text of [`mac${separator}${grouped}`, `"mac${separator}${grouped}"`, `macaroon${separator}${grouped}`,
+        `${grouped}${separator}suffixlong`, `mac${separator}${grouped}${separator}suffixlong`, grouped]) {
+        const out = redactEncodedCredentials(`x ${text} y`);
+        const label = `${name} ${size} ${separator} ${text.slice(0, 12)}`;
+        expect(out, label).toContain('[redacted]');
+        expect(out, label).not.toContain(grouped.slice(size * 4, size * 8));
+      }
+    }
+  }
+});
+
+// Audit 1.3.2: every base64 and base32 macaroon starts with 'A', a hex digit, so an escape-like
+// prefix ("%2", "\x2", "\u000") decoded together with it hid the whole macaroon from redaction.
+it('DECODE-AUDIT/recognition an escape-like prefix never hides a base64 or base32 macaroon', () => {
+  const bytes = readFileSync(resolve('test/vectors/default-readonly.macaroon'));
+  const base32 = (data: Buffer) => {
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'; let acc = 0, bits = 0, text = '';
+    for (const byte of data) { acc = ((acc << 8) | byte) & 0xffff; bits += 8;
+      while (bits >= 5) { bits -= 5; text += alphabet[(acc >>> bits) & 31]; } }
+    return bits ? text + alphabet[(acc << (5 - bits)) & 31] : text;
+  };
+  for (const [form, encoded] of [['base64', bytes.toString('base64')], ['base64url', bytes.toString('base64url')], ['base32', base32(bytes)]]) {
+    expect(encoded.startsWith('A'), form).toBe(true);
+    for (const prefix of ['%2', '%0', 'x=%2', '\\x2', '\\x0', '"\\x2', '\\u000', '&#x2', '%u00']) {
+      const out = redactEncodedCredentials(`${prefix}${encoded} tail`);
+      expect(out, `${prefix} ${form}`).not.toContain(encoded.slice(8, 40));
+      expect(out, `${prefix} ${form}`).toContain('[redacted]');
+      expect(out.endsWith(' tail'), `${prefix} ${form}`).toBe(true);
+    }
+  }
+});

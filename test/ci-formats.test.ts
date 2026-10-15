@@ -117,7 +117,7 @@ it('CI-FORMATS/cli --format selects the rendering, --format json equals --json, 
   expect(github.stdout).toMatch(/^::error file=app\/settings\.env,line=2,col=14,/m);
   for (const [args, message] of [[['--format', 'github', '--json'], /--json cannot be combined with --format github/],
     [['--format', 'xml'], /--format takes one of text, json, sarif, github/], [['--format'], /--format takes one of/],
-    [['--format', 'sarif', '--format', 'sarif'], /--format takes one of/]] as const) {
+    [['--format', 'sarif', '--format', 'sarif'], /--format was given more than once/]] as const) {
     const refused = cli('.', ...args);
     expect(refused.status).toBe(2);
     expect(refused.stderr).toMatch(message);

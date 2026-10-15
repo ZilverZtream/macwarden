@@ -750,8 +750,9 @@ describe('payer pay keeps the operation\'s recorded kind', () => {
     // The same kind for the same hash (a replay of the payout's own invoice) is still answered from the record.
     expect(after.recordIntent({ operationId: 'OP-RACE', kind: 'refund', paymentRequest: 'lnbcrt1kindpayout', invoice: decoded(payout.paymentHash),
       feeLimitMsat: 10n, maxParts: 1 })).toEqual({ outcome: 'refused', reason: '--kind refund differs from operation OP-RACE\'s recorded kind payout' });
+    // A replay names the recorded terms: the command recorded --max-parts' default, 16 (another value is refused since audit 1.3.2).
     expect(after.recordIntent({ operationId: 'OP-RACE', kind: 'payout', paymentRequest: 'lnbcrt1kindpayout', invoice: decoded(payout.paymentHash),
-      feeLimitMsat: 10n, maxParts: 1 })).toMatchObject({ outcome: 'existing', payment: { paymentHash: payout.paymentHash, state: 'failed' } });
+      feeLimitMsat: 10n, maxParts: 16 })).toMatchObject({ outcome: 'existing', payment: { paymentHash: payout.paymentHash, state: 'failed' } });
   });
 });
 

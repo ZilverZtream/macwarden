@@ -5,7 +5,8 @@
 // innocuous because `lncli printmacaroon` shows it; each canary has its own condition.
 import * as nodeFs from 'node:fs/promises';
 import { reserveOwnerOnly } from '../private-file.js';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { basename, dirname, join } from 'node:path';
 import type { RegistryEntry } from '../registry/index.js';
 import { readBoundedFile, type BoundedReadIO } from '../bounded-file.js';
 
@@ -59,28 +60,52 @@ export async function readCanaryConfig(path: string, fs: BoundedReadIO = nodeFs)
   return parse(text);
 }
 
-/** Returns the existing configuration or creates it exclusively (owner-only). */
-export async function ensureCanaryConfig(path: string, fs: BoundedReadIO = nodeFs,
+export type CanaryIO = BoundedReadIO & Pick<typeof nodeFs, 'link' | 'unlink'>;
+
+/** Creates `path` owner-only (1.2.1) with `text`, synced; on any failure the file is removed. */
+async function writeNewPrivate(path: string, text: string, fs: CanaryIO): Promise<void> {
+  const { handle } = await reserveOwnerOnly(path, fs);
+  try {
+    await handle.writeFile(text, 'utf8');
+    await handle.sync();
+    await handle.close();
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    await fs.unlink(path).catch(() => undefined);
+    throw error;
+  }
+}
+
+/**
+ * Returns the existing configuration or creates it, never replacing one. Written like the
+ * registry (audit 1.3.2): a complete, synced temp file is put in place with link(), which
+ * fails on an existing name. Writing the file in place left a 0-byte configuration after a
+ * failed write (ENOSPC), and every later watch and bake --canary refused it as invalid.
+ */
+export async function ensureCanaryConfig(path: string, fs: CanaryIO = nodeFs,
   random: (size: number) => Buffer = randomBytes): Promise<CanaryConfig> {
   const existing = await readCanaryConfig(path, fs);
   if (existing) return existing;
   const config = { caveatName: newCaveatName(random) };
-  let handle;
-  // Owner-only from creation on every platform (1.2.1).
-  try { handle = (await reserveOwnerOnly(path, { open: (...args: Parameters<typeof fs.open>) => fs.open(...args), unlink: nodeFs.unlink })).handle; }
-  catch (error) {
-    // Another invocation created it first: use that one.
-    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
-      const raced = await readCanaryConfig(path, fs);
-      if (raced) return raced;
-    }
-    throw new Error('cannot create canary configuration', { cause: error });
-  }
+  const text = `${JSON.stringify({ schema: 1, caveatName: config.caveatName })}\n`;
+  const temp = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`);
+  let code: string | undefined;
   try {
-    await handle.writeFile(`${JSON.stringify({ schema: 1, caveatName: config.caveatName })}\n`, 'utf8');
-    await handle.sync();
-  } finally { await handle.close(); }
-  return config;
+    await writeNewPrivate(temp, text, fs);
+    try { await fs.link(temp, path); return config; }
+    catch (error) {
+      code = (error as NodeJS.ErrnoException).code;
+      // A volume without hard links (FAT, exFAT): created in place exclusively, removed if the write fails.
+      if (code !== 'EEXIST') { await writeNewPrivate(path, text, fs); return config; }
+    }
+  } catch (error) {
+    code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'EEXIST') throw new Error('cannot create canary configuration', { cause: error });
+  } finally { await fs.unlink(temp).catch(() => undefined); }
+  // Another invocation created it first: use that one.
+  const raced = await readCanaryConfig(path, fs);
+  if (raced) return raced;
+  throw new Error('cannot create canary configuration');
 }
 
 /** Active canary entries for this node, keyed by their caveat condition. */

@@ -1,9 +1,9 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
-import { CANARY_FILE_LIMIT, readCanaryConfig } from '../src/watch/canary.js';
+import { CANARY_FILE_LIMIT, ensureCanaryConfig, readCanaryConfig } from '../src/watch/canary.js';
 import { readUsage, USAGE_FILE_LIMIT, UsageFileError, UsageStore, USAGE_LIMIT, CANARY_LIMIT, COVERAGE_LIMIT, SPAN_LIMIT } from '../src/watch/usage.js';
 
 // MW102-07: the usage and canary sidecars next to the registry are read through a bounded
@@ -165,3 +165,36 @@ it('SIDECAR/lock a registry lock or watch lock symlinked to a synthetic seed.jso
   expect(opened.slice(before).filter(path => path.includes('seed'))).toEqual([]);
   expect(reads().filter(path => path === watchLock)).toEqual([]);
 });
+
+// Audit 1.3.2: the canary configuration was written in place, so a failed write (ENOSPC) left a
+// 0-byte file that every later watch (W4) and bake --canary (B6) refused as invalid, for good.
+it('SIDECAR/canary-create a failed write leaves no canary configuration or temp file behind, and a later run creates it', async () => {
+  const dir = scratch();
+  const canary = join(dir, 'r.json.canary.json');
+  const full = { ...fs, open: async (...args: Parameters<typeof fs.open>) => {
+    const handle = await fs.open(...args);
+    handle.writeFile = async () => { throw Object.assign(new Error('no space left on device'), { code: 'ENOSPC' }); };
+    return handle;
+  } } as typeof fs;
+  await expect(ensureCanaryConfig(canary, full)).rejects.toThrow('cannot create canary configuration');
+  expect(readdirSync(dir)).toEqual([]);
+  const created = await ensureCanaryConfig(canary);
+  expect(await readCanaryConfig(canary)).toEqual(created);
+  expect(readdirSync(dir)).toEqual(['r.json.canary.json']);
+}, 60_000);
+
+it('SIDECAR/canary-create a configuration another run created first is used, never replaced; concurrent runs agree', async () => {
+  const dir = scratch();
+  const canary = join(dir, 'r.json.canary.json');
+  const theirs = `${JSON.stringify({ schema: 1, caveatName: 'policy-00112233' })}\n`;
+  // The other run places its file after this one found none and wrote its own temp file.
+  const racing = { ...fs, link: async (...args: Parameters<typeof fs.link>) => { writeFileSync(canary, theirs); return fs.link(...args); } } as typeof fs;
+  expect(await ensureCanaryConfig(canary, racing)).toEqual({ caveatName: 'policy-00112233' });
+  expect(readFileSync(canary, 'utf8')).toBe(theirs);
+  expect(readdirSync(dir)).toEqual(['r.json.canary.json']);
+  const other = join(dir, 'other.json.canary.json');
+  const results = await Promise.all([1, 2, 3, 4].map(() => ensureCanaryConfig(other)));
+  expect(new Set(results.map(result => result.caveatName)).size).toBe(1);
+  expect(await readCanaryConfig(other)).toEqual(results[0]);
+  expect(readdirSync(dir).sort()).toEqual(['other.json.canary.json', 'r.json.canary.json']);
+}, 60_000);

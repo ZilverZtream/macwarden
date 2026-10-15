@@ -109,7 +109,9 @@ function holds(held: Set<string>, [method, permission]: readonly [string, string
 function registryMatch(entries: RegistryEntry[], pubkey: string, facts: MacaroonFacts): VerifyResult['registry'] {
   const local = entries.filter(entry => entry.nodePubkey.toLowerCase() === pubkey);
   const rootKeyId = facts.rootKeyId.toString();
-  const byFingerprint = local.filter(entry => entry.fingerprint === facts.fingerprint);
+  // Only verified bytes are known genuine (audit 1.3.2): revoke --unregistered records any file's
+  // fingerprint with verified:false, an altered copy included, so such a row matches by ID only.
+  const byFingerprint = local.filter(entry => entry.verified === true && entry.fingerprint === facts.fingerprint);
   const sameId = (entry: RegistryEntry) => entry.rootKeyId === rootKeyId;
   // An active entry outranks a revoked record of the same root key ID.
   const pick = (rows: RegistryEntry[]) => rows.find(entry => entry.status === 'active') ?? rows[0];

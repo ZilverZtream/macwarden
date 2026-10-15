@@ -816,3 +816,63 @@ describe('payment lab fake LND (test model, 1.4 audit): lnd semantics the harnes
     expect(deps.store.invoice(A)?.state).toBe('settled');
   });
 });
+
+describe('payment lab receiver audit (1.3.2): explain --refresh on a late invoice and a 64-hex order ID', () => {
+  interface ExplainCommand {
+    explainCommand(input: { component: 'receiver'; store: ReceiverStore; api: { lookupInvoice(hash: string): Promise<Invoice> }; subject: { orderId: string } },
+      options: { json: boolean; refresh: boolean; out(text: string): void; err(text: string): void }): Promise<number>;
+  }
+  const lndInvoice = (paymentHash: string, state: string, memo = ''): Invoice =>
+    ({ paymentHash, state, memo, valueMsat: 1000n, amtPaidMsat: 0n, addIndex: 1n, settleIndex: 0n, paymentRequest: '', htlcs: [] });
+
+  /** The refreshed facts of `receiver explain --refresh --json` for the order, against LND answering from `lnd`. */
+  async function refreshed(store: ReceiverStore, orderId: string, lnd: Record<string, Invoice>): Promise<string[]> {
+    const { explainCommand } = await load<ExplainCommand>('explain/command.ts');
+    const out: string[] = [];
+    const api = { lookupInvoice: async (hash: string): Promise<Invoice> => {
+      const found = lnd[hash];
+      if (found === undefined) throw new lab.LndError('unable to locate invoice', 5, 404);
+      return found;
+    } };
+    expect(await explainCommand({ component: 'receiver', store, api, subject: { orderId } },
+      { json: true, refresh: true, out: text => { out.push(text); }, err: () => undefined })).toBe(0);
+    const doc = JSON.parse(out.join('')) as { result: { timeline: { kind: string; detail: string }[] } };
+    return doc.result.timeline.filter(item => item.kind === 'refreshed').map(item => item.detail);
+  }
+
+  function intent(store: ReceiverStore, orderId: string, label: string): string {
+    const { preimage, paymentHash } = preimageFor(label);
+    expect(store.recordInvoiceIntent({ orderId, amountMsat: 1000n, kind: 'standard', preimage, paymentHash }).outcome).toBe('recorded');
+    return paymentHash;
+  }
+
+  it('a not-created record LND created late names LND\'s late state, and one OPEN or ACCEPTED is still to be canceled', async () => {
+    const store = receiverStore();
+    const late = intent(store, 'O-132', 'recv-132-late');
+    expect(store.markNotCreated(late)).toBe(true);
+    const replacement = intent(store, 'O-132', 'recv-132-replacement');
+    store.markCreated(replacement, 'lnbcrt1replacement', 2n);
+    store.applyInvoice(lndInvoice(late, 'OPEN'), 'lookup');
+    expect(store.invoice(late)).toMatchObject({ state: 'not-created', lateLndState: 'OPEN' });
+
+    const open = await refreshed(store, 'O-132', { [late]: lndInvoice(late, 'OPEN'), [replacement]: lndInvoice(replacement, 'OPEN') });
+    const lateOpen = open.find(detail => detail.includes('agrees with the record (not-created'));
+    expect(lateOpen).toContain('agrees with the record (not-created, LND OPEN); still to be canceled: run receiver reconcile');
+
+    const canceled = await refreshed(store, 'O-132', { [late]: lndInvoice(late, 'CANCELED'), [replacement]: lndInvoice(replacement, 'OPEN') });
+    expect(canceled.find(detail => detail.includes('LookupInvoice now: CANCELED')))
+      .toContain('differs from the record (not-created, LND OPEN); still to be canceled: run receiver reconcile');
+  });
+
+  it('a 64-hex order ID LND echoes in a memo is shown as its fingerprint, not [redacted]', async () => {
+    const { fingerprint } = await load<{ fingerprint(value: string): string }>('explain/format.ts');
+    const store = receiverStore();
+    const orderId = 'ab'.repeat(32);
+    const hash = intent(store, orderId, 'recv-132-hexid');
+    store.markCreated(hash, 'lnbcrt1hexid', 1n);
+    const [detail] = await refreshed(store, orderId, { [hash]: lndInvoice(hash, 'OPEN', orderId) });
+    expect(detail).toContain(`memo "${fingerprint(orderId)}"`);
+    expect(detail).not.toContain('[redacted]');
+    expect(detail).not.toContain(orderId);
+  });
+});

@@ -1,5 +1,61 @@
 # Changelog
 
+## 1.3.2 (2026-10-15)
+
+Fixes from an external audit of every source file of 1.3.1, each claim verified with a probe before it was fixed; every fix has a test that fails on 1.3.1. Claims that were refuted, or that describe behaviour the specification prescribes, are not changed.
+
+### Security
+
+- `scan` paths and decoded facts: encoded macaroons were redacted before L402 values, so a `<macaroon>:<preimage>` pair or L402 header in a path or caveat lost its macaroon and kept its preimage, in every output format. Structured forms are now redacted first, as in the output.
+- Rune facts: the long-token scrub ran before macaroon redaction and cut a macaroon held in a rune restriction (hex in groups, wrapped base64), so its signature tail was printed. Known NWC secrets and L402 preimages inside rune restrictions were not redacted in `scan --json`, and NWC secrets there were not collected.
+- NWC: a wallet secret after an HTML-escaped separator (`&amp;secret=`) or `;secret=` was not collected, so it was printed where it appeared elsewhere; JSON-escaped, percent-encoded and `+`-as-space NWC URIs were not redacted in output. A known secret inside a longer base64 run is now redacted at any byte alignment.
+- Output redaction: a grouped base64 macaroon joined to a key or suffix by a separator (`mac:AgED:bG5k:…`) was read as irregular groups and printed in full. An lndconnect URI followed by punctuation, or with its macaroon in standard base64, kept its host and certificate around a redacted macaroon; it is now replaced whole.
+- `scan --json`: `summary.agentConfigs` paths were not redacted against known secrets.
+
+- `scan --git-history`: git opened the scanned repository's `diff.orderFile` (on Windows a network path made an SMB connection; a protected file was read). The history read now pins the order file.
+- Output redaction: an escape-like prefix (`%2`, `\x2`, `\u000`) before a base64, base64url or base32 macaroon was decoded together with its leading `A` and hid the whole macaroon, which was then printed in full (for example in a scanned file's path). Every form is now also recognised in the literal text.
+- `scan`: an L402 value holding both an L402 and an LND macaroon is reported as its LND macaroon, but its preimage was not redacted, so it appeared in a path or in the other macaroon's caveat (SAFE-01).
+- `inventory --report`: the report redacted encoded macaroons only, and before anything else, so an L402 value's preimage, an NWC secret or a rune in key context in an alias, version or caveat was written as is (to the `--out` file; the preimage also to stdout and `--json`). The report now uses the output's whole redaction.
+- `verify`: a signature mismatch was conclusive on a registry fingerprint match even for a row recorded with `verified: false` (for example the bytes of an altered copy given to `revoke --unregistered --target-file`), so verify could call a live credential dead. Only bytes LND accepted count.
+- `inventory --verify`: a row whose root key ID was edited while it kept another credential's file and fingerprint was checked with that file and reported `accepted`. The file's root key ID must now be the row's.
+
+### Fixed
+
+- `watch`: an oversized macaroon whose header was re-framed as go-macaroon still accepts it (non-minimal varints of 5 to 10 bytes, or v1 framing) lost its identifier and was journaled `id:undecodable`; the header is now found in every framing.
+- `watch` lock: a lock refused because the path no longer named the file this watch created removed the file a link resolved to without checking it was its own, so another watch's lock could be deleted. A watch reading a lock another watch had created but not yet written called it ownerless; it now waits briefly for the owner record.
+- `scan --git-history sub .`: a work-tree file whose finding `sub/.macwardenignore` ignored was reported again from the history of `.` as a commit finding.
+- `scan`: a rune key whose value is too short to be a rune (`rune=a/b/cln_rune="…"`) moved the key search past the rune key inside it, and that rune was neither found nor redacted.
+- `recommend`: the printed `bake` command was refused by bake when the observed methods graded ADMIN (now with `--allow-admin`) or included a method LND lists but the bundled permission table does not (now withheld, warning `recommendation-unassessed`).
+- `inventory --report --out`: an existing file was refused only after every LND request; it is now refused at N7 before any, and the report is written to the path that was checked.
+- `inventory --verify`: an interrupt during the checks was recorded as a row error and the remaining rows were checked; it now stops the command (exit 6).
+- `bake`: an unexpected failure after the bake request was sent no longer omits the allocated root key ID and its recovery command.
+- `respond`: warnings from the rotations it runs (`acl-best-effort`) were dropped.
+- Usage file: records over a bound were ordered as text, so a newer record with a fraction of a second could be dropped before an older one; a duplicate key beyond a bound was accepted.
+- A repeated `--json` is refused (exit 2) like every other repeated flag.
+- `reconcile`: `--since` after now (no `--until`) dropped the warnings collected before the window was checked.
+- Payment journal: a BOLT11 invoice with a multiplier letter but no digits (`lnbcm1…`), which LND refuses, was read as an amountless invoice and its hash journaled.
+- `watch`: every intercepted macaroon's fingerprint (a parse of every caveat and a hash of up to 64 KiB) was computed while answering LND, outside the attribution budget, although only its identifier is needed; it is now computed when first read.
+- `watch`: `macwarden --json watch` skipped the alert cleanup and the exit deadline that `macwarden watch --json` has. An alert command whose process group is already empty when it exits is no longer killed by group a second later (its group ID could have been reused). A write that reports no progress backs off instead of being retried at once.
+- `bake --canary`, `watch`: a failed write of `<registry>.canary.json` left an empty file that made every later run fail; the configuration is now written to a temporary file and linked into place.
+- `scan --agent-configs --git-history`: history was read for the discovered agent locations, which are usually outside a git work tree, so the scan failed (exit 3). History is read for path arguments only; without one the combination is a usage error.
+- `scan`: a repeated `--format` said "takes one of …"; it now says the flag was given more than once. The unsafe `NODE_OPTIONS` check also runs when a programmatic caller passes no environment.
+- `--version` reads the installed version without failing.
+
+### Repository
+
+- A code of conduct (`CODE_OF_CONDUCT.md`, reports through private reporting) and a question issue template beside the bug and feature forms.
+
+### Payment lab
+
+- Payer: an HTLC attempt or creation time learnt from a superseded submission's own SendPaymentV2 stream was recorded under the live submission, so a tracker's FAILED for the live submission, read before that submission reached LND, could fail it, release its budget and admit a replacement while it might still pay. A SendPaymentV2 update now records under its own submission.
+- Payer: `payer pay` on a payment still in intent ignored a different `--budget`, `--fee-limit-msat` or `--max-parts`, and could submit with no reservation held; such a request is now refused.
+- Payer: the payment hash LND's DecodePayReq returned was not checked against the payment request; a different one is refused, as the receiver already refuses one. AddInvoice's hash is checked the same way.
+- Outbox: a row edited in the database was signed with its edited operation, order, subject, value or fee; the worker now checks each against the row's ledger entry.
+- `ledger-verify`: an order fulfilled twice, or fulfilled from an invoice not settled in full, passed; both are now named. A late settlement now keeps LND's amount, so it is checked without LND too. A deleted entry no longer distorts which payment counts as first, and LND's totals include payments whose posted lines cannot be read.
+- REST: a stream dropped by a fault after the server's end arrived resolved instead of failing; an error answer to a stream had no time or size limit.
+- `explain`: a long line starting with `::` was cut by three characters; a failed submission's HTLC attempts are shown at its failure, before the retry; `--refresh` names a late invoice's LND state and when it still has to be canceled, and fingerprints the subject's own ID instead of redacting it.
+- `outbox-status` reads one snapshot. `:memory:` stores and an empty database file left by an interrupted first open are handled. The CLI removes its signal listeners after each command, and the lab removes Node diagnostic variables from macwarden's environment in any case.
+
 ## 1.3.1 (2026-10-11)
 
 Fixes from a section-by-section audit of 1.3.0 and a second external audit. No new features.

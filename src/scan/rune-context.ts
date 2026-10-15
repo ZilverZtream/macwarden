@@ -111,9 +111,11 @@ function keyCandidates(text: string): RuneCandidate[] {
     if (quote) p++;
     const start = p;
     while (p < text.length && isRunCharacter(text.charCodeAt(p))) p++;
-    // A key inside this value is part of the value.
-    KEY.lastIndex = Math.max(KEY.lastIndex, p);
+    // A value too short to be a rune is no candidate, and a key inside it is looked at on its own
+    // (rune=a/cln_rune="…", audit 1.3.2); a key inside a candidate is part of the candidate. A
+    // short value is at most RUNE_SHORTEST_TEXT - 1 characters, so the work stays linear.
     if (p - start < RUNE_SHORTEST_TEXT) continue;
+    KEY.lastIndex = Math.max(KEY.lastIndex, p);
     found.push({ start, end: p, text: text.slice(start, Math.min(p, start + RUNE_TEXT_LIMIT + 1)), quote, context: 'key' });
   }
   return found;

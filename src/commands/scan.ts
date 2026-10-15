@@ -19,12 +19,14 @@ export type ScanFormat = 'text' | 'json' | 'sarif' | 'github';
 const formats: ScanFormat[] = ['text', 'json', 'sarif', 'github'];
 
 type ScanDeps = { fs: typeof fs; agentEnvironment?: () => AgentConfigEnvironment; env?: Record<string, string | undefined> };
-const defaultAgentEnvironment = (): AgentConfigEnvironment =>
-  ({ platform: process.platform, home: homedir(), cwd: process.cwd(), env: { ...process.env } });
+const defaultAgentEnvironment = (env: Record<string, string | undefined>): AgentConfigEnvironment =>
+  ({ platform: process.platform, home: homedir(), cwd: process.cwd(), env });
 
 export async function run(args: string[], deps: ScanDeps = { fs, env: { ...process.env } }): Promise<OutputResult & { exitCode?: number }> {
+  // A caller that injects no env still gets the guard and agent locations from process.env (audit 1.3.2).
+  const env = deps.env ?? { ...process.env };
   // ENV check (1.2.1): a heap snapshot or profile taken through NODE_OPTIONS would hold every credential found here.
-  if (deps.env && unsafeNodeDiagnostics(deps.env)) return fail(2, null, 'unsafe Node diagnostic settings');
+  if (unsafeNodeDiagnostics(env)) return fail(2, null, 'unsafe Node diagnostic settings');
   const paths: string[] = [];
   let format: ScanFormat | undefined;
   let agentConfigs = false;
@@ -41,7 +43,8 @@ export async function run(args: string[], deps: ScanDeps = { fs, env: { ...proce
     if (!endOfFlags && arg === '--include-dirs') { includeDirs = true; continue; }
     if (!endOfFlags && arg === '--format') {
       const value = args[++i];
-      if (format !== undefined || !formats.includes(value as ScanFormat))
+      if (format !== undefined) return fail(2, null, '--format was given more than once');
+      if (!formats.includes(value as ScanFormat))
         return fail(2, null, '--format takes one of text, json, sarif, github');
       format = value as ScanFormat;
       continue;
@@ -79,15 +82,17 @@ export async function run(args: string[], deps: ScanDeps = { fs, env: { ...proce
     paths.push(arg);
   }
   if (allowShallow && !gitHistory) return fail(2, null, '--allow-shallow requires --git-history');
+  // Git history is read only for path arguments, never for agent locations (audit 1.3.2); with
+  // none given there is no history to scan, which a CI gate must not mistake for a clean one.
+  if (gitHistory && agentConfigs && !paths.length) return fail(2, null, '--git-history with --agent-configs needs a path argument');
   try {
     // With --agent-configs and no paths, only the agent locations are scanned.
     const discovery = agentConfigs
-      ? await discoverAgentConfigs(agentConfigCandidates((deps.agentEnvironment ?? defaultAgentEnvironment)()),
+      ? await discoverAgentConfigs(agentConfigCandidates((deps.agentEnvironment ?? (() => defaultAgentEnvironment(env)))()),
         path => deps.fs.lstat(path), path => deps.fs.stat(path))
       : undefined;
-    const targets = [...(paths.length || agentConfigs ? paths : ['.']), ...(discovery?.found.map(item => item.path) ?? [])];
-    const result = await scan(targets, { fs: deps.fs, includeDirs, ignoreFile, gitHistory, allowShallow });
-    if (discovery) result.summary.agentConfigs = { found: discovery.found, absent: discovery.absent };
+    const result = await scan(paths.length || agentConfigs ? paths : ['.'],
+      { fs: deps.fs, includeDirs, ignoreFile, gitHistory, allowShallow, agentConfigs: discovery });
     const warnings = result.summary.shallowHistory ? ['shallow-history'] : [];
     if (threshold) {
       const rung = ladder.indexOf(threshold);

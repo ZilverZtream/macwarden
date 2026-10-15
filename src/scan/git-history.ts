@@ -973,7 +973,9 @@ export async function historyEntries(git: string, cwd: string, repository: Repos
   let pending: RegExpExecArray | null = null;
   await gitTokens(git, cwd, repository, ['log', '--all', '--stdin', '--reverse', '--root', '--diff-merges=separate',
     '--no-renames', '--no-show-signature', '--raw', '--no-abbrev', '-z', '--relative', '--no-color', '--no-ext-diff',
-    '--no-textconv', '--format=%x01%H', '--', ...pathspec], requestLines(stashes), 0, bound.tokenBytes, bytes => {
+    // The diff output order is pinned: the repository's diff.orderFile names a file git opens
+    // (it could be a network path or a protected file); git cannot pin it empty with -c.
+    '--no-textconv', '-O/dev/null', '--format=%x01%H', '--', ...pathspec], requestLines(stashes), 0, bound.tokenBytes, bytes => {
     if (pending) {
       const [, , mode, , blob, status] = pending;
       pending = null;

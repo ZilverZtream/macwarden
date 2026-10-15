@@ -460,6 +460,8 @@ it('RECONCILE/window a --since after now is refused, never a negative window rep
   const s = setup([start(0), line('registered', 1, { session: 1 }), line('alive', 100)]);
   const output = await reconcile([...s.args, '--since', at(7_200)], fakeLnd({}), at(3_600));
   expect(output).toMatchObject({ ok: false, error: { code: 2, step: 'Q1', message: expect.stringContaining('--since must not be after') } });
+  // The warnings collected before the window is checked are kept, as at every other Q1 refusal after Q5.
+  expect(output.warnings).toEqual(['own-root-key-0']);
 });
 
 // 1.2.1 (audit F08): a request journaled after --until never establishes who initiated a payment

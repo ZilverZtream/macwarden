@@ -4,6 +4,7 @@
 // never copied. Serialized RPC payloads are skipped too, except the request payload of a
 // method the caller names in `payloadMethods` (watch --payment-journal: the payment and
 // payment-deletion requests), which is passed on as a view, never copied here.
+import { macaroonSectionRange } from '../decode/index.js';
 import { LndError } from '../errors.js';
 
 export type InterceptKind = 'stream_auth' | 'request' | 'response' | 'reg_complete' | 'none';
@@ -25,7 +26,7 @@ export type MiddlewareRequest = {
   /**
    * The call carried a macaroon larger than MAX_MACAROON_BYTES; only a prefix is passed on (as
    * rawMacaroon), for the header-derived identity: OVERSIZED_MACAROON_PREFIX_BYTES, or the whole
-   * v2 header when it ends later but within OVERSIZED_HEADER_SCAN_BYTES (a padded location).
+   * header (v2 or v1) when it ends later but within OVERSIZED_HEADER_SCAN_BYTES (a padded location).
    */
   oversizedMacaroon: boolean;
   /**
@@ -47,7 +48,7 @@ export const MAX_MACAROON_BYTES = 64 * 1024;
 // LND accepted without copying a caller-sized field (audit 1.4.0: it was journaled id:undecodable).
 export const OVERSIZED_MACAROON_PREFIX_BYTES = 4 * 1024;
 // The location packet is not covered by the signature, so a holder can pad it to push the
-// identifier past that prefix. A v2 header (location, identifier, end of section) ending within
+// identifier past that prefix. A header (location, identifier, end of section) ending within
 // this bound is kept whole instead; it is the same bound as a macaroon that is passed on whole.
 export const OVERSIZED_HEADER_SCAN_BYTES = MAX_MACAROON_BYTES;
 export const MAX_METHOD_BYTES = 256;
@@ -63,34 +64,30 @@ function protocolError(): never {
 const EMPTY = Buffer.alloc(0);
 
 /**
- * The end of a v2 macaroon's header section (version byte, at most a location and an identifier
- * packet, then the end-of-section byte), or null when it is not a v2 header ending within
+ * The end of a macaroon's header (v2: version byte, location and identifier packets, end of
+ * section; v1: location and identifier packets), or null when it does not end within
  * OVERSIZED_HEADER_SCAN_BYTES. Reads only packet types and lengths; copies nothing.
  */
-function v2HeaderEnd(mac: Buffer): number | null {
-  const limit = Math.min(mac.length, OVERSIZED_HEADER_SCAN_BYTES);
-  if (mac[0] !== 2) return null;
-  const small = (at: number): [number, number] | null => {
-    let value = 0;
-    let scale = 1;
-    for (let position = at; position < limit && position < at + 4; position++) {
-      value += (mac[position] & 0x7f) * scale;
-      if ((mac[position] & 0x80) === 0) return [value, position + 1];
-      scale *= 128;
+function headerEnd(mac: Buffer): number | null {
+  const scan = mac.subarray(0, Math.min(mac.length, OVERSIZED_HEADER_SCAN_BYTES));
+  // The decoder's own section reader, so the varints are go-macaroon's (up to 10 bytes,
+  // non-minimal accepted), as macaroonId reads them (audit 1.3.2: 5-byte varints went undecodable).
+  if (scan[0] === 2) return macaroonSectionRange(scan, 1, true)?.end ?? null;
+  // go-macaroon also accepts v1 framing, and macaroonId reads its identity (audit 1.3.2): two
+  // packets, each led by its whole size in 4 lowercase hex digits.
+  let position = 0;
+  for (let packets = 0; packets < 2; packets++) {
+    let size = 0;
+    for (let i = 0; i < 4; i++) {
+      const byte = scan[position + i];
+      const digit = byte >= 0x30 && byte <= 0x39 ? byte - 0x30 : byte >= 0x61 && byte <= 0x66 ? byte - 0x57 : -1;
+      if (digit < 0) return null;
+      size = size * 16 + digit;
     }
-    return null;
-  };
-  let position = 1;
-  for (let packets = 0; packets <= 2; packets++) {
-    const type = small(position);
-    if (!type) return null;
-    if (type[0] === 0) return type[1];
-    if (type[0] !== 1 && type[0] !== 2) return null;
-    const length = small(type[1]);
-    if (!length || length[0] > limit - length[1]) return null;
-    position = length[1] + length[0];
+    if (size < 4 || size > scan.length - position) return null;
+    position += size;
   }
-  return null;
+  return position;
 }
 
 // Every intercepted call is decoded here before its feedback is sent, so this path avoids
@@ -205,7 +202,7 @@ export function decodeMiddlewareRequest(data: Buffer, payloadMethods?: ReadonlyS
         if (wire !== 2) break;
         if (bytes!.length > MAX_MACAROON_BYTES) {
           result.oversizedMacaroon = true;
-          result.rawMacaroon = bytes!.subarray(0, Math.max(OVERSIZED_MACAROON_PREFIX_BYTES, v2HeaderEnd(bytes!) ?? 0));
+          result.rawMacaroon = bytes!.subarray(0, Math.max(OVERSIZED_MACAROON_PREFIX_BYTES, headerEnd(bytes!) ?? 0));
         }
         else result.rawMacaroon = bytes!;
         break;

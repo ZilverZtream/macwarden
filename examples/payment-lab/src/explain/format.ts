@@ -115,6 +115,10 @@ export function wrap(first: string, text: string, indent: string): string[] {
   let empty = true;
   for (let word of words) {
     for (;;) {
+      // A word that starts a line after its indent is escaped as safeText escapes a leading '::'
+      // before the line is measured: escaped after wrapping, it made the line 3 characters longer
+      // than MAX_LINE and the renderer cut its end (audit 1.3.2).
+      if (empty && /^ *$/.test(line)) word = word.replace(/^::/, '\\x3a:');
       const candidate = empty ? `${line}${word}` : `${line} ${word}`;
       if (candidate.length <= MAX_LINE) { line = candidate; empty = false; break; }
       if (empty) {
@@ -131,5 +135,5 @@ export function wrap(first: string, text: string, indent: string): string[] {
     }
   }
   lines.push(line);
-  return lines.map(item => item.replace(/^( *)::/, '$1\\x3a:'));
+  return lines;
 }

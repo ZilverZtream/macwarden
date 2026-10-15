@@ -2,6 +2,8 @@
 
 Thank you for helping. MacWarden handles credentials that can move funds, so changes are held to a strict standard: every behaviour is specified, every fix is tested, and no real credential ever enters the repository, an issue or a pull request.
 
+Everyone taking part follows the [code of conduct](CODE_OF_CONDUCT.md).
+
 Before you start on a larger change, open an issue to discuss it. The [specification](docs/spec.md) is the contract for every command; a change in behaviour starts with a change to the specification.
 
 ## Prerequisites

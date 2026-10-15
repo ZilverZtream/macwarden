@@ -16,6 +16,7 @@ import type { Secret } from '../secret.js';
 import { isRootKeyId } from '../root-key-id.js';
 import { laterInstant } from '../instant.js';
 import { readUsage, usagePath } from '../watch/usage.js';
+import { grade } from '../grade/index.js';
 
 export type Deps = {
   lnd?: LndAdapter;
@@ -300,8 +301,16 @@ async function runSteps(args: string[], deps: Deps): Promise<RecommendOutput> {
   if (unreproducible.length && !canary && observed.length) warnings.push({ code: 'recommendation-caveats', message: 'the credential has '
     + `caveats a narrowing bake cannot reproduce (${unreproducible.join(', ')}); the narrowed credential would lose them, so no `
     + 'narrowing command is printed. An expiry is carried only when the registry recorded the duration it was baked with' });
+  // The printed bake must pass bake's offline grading (B3): a method LND lists live but the
+  // bundled snapshot does not cannot be graded, and bake refuses it (audit 1.3.2).
+  const assessment = grade(recommendedUris);
+  const ungraded = recommendedUris.length > 0
+    && (assessment.grade === 'UNASSESSED' || assessment.warnings.some(warning => warning.startsWith('unassessed-')));
+  if (ungraded && observed.length) warnings.push({ code: 'recommendation-unassessed', message: 'observed methods macwarden '
+    + `cannot grade (not in its bundled LND permission list): ${assessment.unassessed.map(uri => uri.slice(4)).join(', ')}; `
+    + 'bake refuses them, so no narrowing command is printed' });
   const commands: string[] = [];
-  if (observed.length && !unmapped.length && !incomplete && !unverified && !beyond.length && !invalid
+  if (observed.length && !unmapped.length && !ungraded && !incomplete && !unverified && !beyond.length && !invalid
     && !canary && !expired && !unreproducible.length && (!short || acceptShort)) {
     const activeLabels = new Set(ownEntries.filter(item => item.status === 'active' && item.label !== null)
       .map(item => item.label as string));
@@ -312,7 +321,10 @@ async function runSteps(args: string[], deps: Deps): Promise<RecommendOutput> {
       (registryPath ? ` --registry ${quote(recoveryPath(registryPath))}` : '');
     // The method list is quoted like the paths: unquoted, PowerShell (a function or npm's .ps1 shim)
     // splits a,b into an array. <file> is a placeholder the operator replaces with the new path.
+    // An ADMIN set needs --allow-admin at bake B3; the credential already holds it (the
+    // covers guard), so this does not widen it (audit 1.3.2).
     commands.push(`macwarden bake --label ${label} --uri ${quote(methods.join(','))}`
+      + `${assessment.grade === 'ADMIN' ? ' --allow-admin' : ''}`
       + `${expires === null ? '' : ` --expires ${quote(expires)}`} --out <file> ${connection}`);
     // Revoking deletes the whole root key ID: only suggested when the selection covered every
     // credential observed on it (a label or root key ID), never from one credential's usage.

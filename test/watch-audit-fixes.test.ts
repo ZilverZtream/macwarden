@@ -11,7 +11,7 @@ import { withCancellation } from '../src/cancellation.js';
 import { run, type Register } from '../src/commands/watch.js';
 import type { MiddlewareCall, MiddlewareEnd } from '../src/lnd/index.js';
 import type { WatchEvent } from '../src/output/index.js';
-import { macaroonId } from '../src/decode/index.js';
+import { macaroonId, macaroonSectionRange } from '../src/decode/index.js';
 import { decodeMiddlewareRequest, MAX_MACAROON_BYTES, OVERSIZED_MACAROON_PREFIX_BYTES } from '../src/lnd/middleware-proto.js';
 import { Secret } from '../src/secret.js';
 import { bytes, message, middlewareRequest, uint, varint } from './helpers/payment-proto.js';
@@ -671,4 +671,37 @@ it('LND/middleware-proto an oversized macaroon whose location is padded still yi
   expect(decode(unbounded).rawMacaroon.length).toBe(OVERSIZED_MACAROON_PREFIX_BYTES);
   // Not a v2 header: the fixed prefix.
   expect(decode(Buffer.alloc(MAX_MACAROON_BYTES + 1, 0x61)).rawMacaroon.length).toBe(OVERSIZED_MACAROON_PREFIX_BYTES);
+});
+
+it('LND/middleware-proto an oversized macaroon re-framed as go-macaroon accepts it (wide varints, v1) keeps its header identity', () => {
+  const admin = vector('default-admin');
+  const header = macaroonSectionRange(admin, 1, true)!;
+  const identifier = admin.subarray(header.identifier.start, header.identifier.end);
+  const rest = admin.subarray(header.end);
+  // go-macaroon reads kinds and lengths with binary.Uvarint: an encoding of at least `width` bytes
+  // (width 1 is the minimal one).
+  const wide = (value: number, minWidth: number) => {
+    const width = Math.max(minWidth, varint(value).length);
+    const out = Buffer.alloc(width);
+    for (let i = 0; i < width; i++) out[i] = (i < 5 ? Math.floor(value / 2 ** (7 * i)) & 0x7f : 0) | (i < width - 1 ? 0x80 : 0);
+    return out;
+  };
+  const location = Buffer.alloc(5000, 0x78); // past the 4 KiB prefix
+  const v2 = (width: number) => Buffer.concat([Buffer.from([2]), wide(1, width), wide(location.length, width), location,
+    wide(2, width), wide(identifier.length, width), identifier, wide(0, width), rest]);
+  const v1Packet = (field: string, value: Buffer) => {
+    const body = Buffer.concat([Buffer.from(`${field} `), value, Buffer.from('\n')]);
+    return Buffer.concat([Buffer.from((body.length + 4).toString(16).padStart(4, '0')), body]);
+  };
+  const v1 = Buffer.concat([v1Packet('location', location), v1Packet('identifier', identifier), Buffer.from('rest')]);
+  const oversized = (mac: Buffer) => Buffer.concat([mac, Buffer.alloc(MAX_MACAROON_BYTES + 1 - mac.length, 0x61)]);
+  const decode = (mac: Buffer) => decodeMiddlewareRequest(middlewareRequest({ method: '/lnrpc.Lightning/GetInfo', serialized: Buffer.alloc(1), macaroon: mac }));
+  const expected = macaroonId(new Secret(admin)).id;
+  for (const [name, mac] of [['v2 minimal', v2(1)], ['v2 5-byte', v2(5)], ['v2 10-byte', v2(10)], ['v1', v1]] as const) {
+    expect(macaroonId(new Secret(mac)).id, name).toBe(expected);
+    const request = decode(oversized(mac));
+    expect(request.oversizedMacaroon, name).toBe(true);
+    expect(request.rawMacaroon.length, name).toBeLessThanOrEqual(MAX_MACAROON_BYTES);
+    expect(macaroonId(new Secret(request.rawMacaroon)).id, name).toBe(expected);
+  }
 });

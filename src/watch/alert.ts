@@ -117,8 +117,16 @@ export function runAlertCommand(command: string, event: WatchEvent, spawn: Spawn
     child.once('error', () => settle(new Error('alert command failed')));
     if (group && child.pid) liveGroups.add(child.pid);
     child.once('exit', code => {
-      // Leftover members of the group get a short grace, then SIGKILL (POSIX).
-      if (group && child.pid) { const pid = child.pid; setTimeout(() => killGroup(pid), ALERT_GRACE_MS).unref(); }
+      // Leftover members of the group get a short grace, then SIGKILL (POSIX). An empty group
+      // (the usual case) is forgotten at once (audit 1.3.2): kept for the grace, its ID could
+      // be handed to a new group leader in that second and the timer would kill that group.
+      if (group && child.pid) {
+        const pid = child.pid;
+        let members = true;
+        try { process.kill(-pid, 0); } catch (error) { members = (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
+        if (members) setTimeout(() => killGroup(pid), ALERT_GRACE_MS).unref();
+        else liveGroups.delete(pid);
+      }
       settle(code === 0 ? undefined : new Error('alert command failed'));
     });
     /** Signals the command's group (POSIX) or kills its tree (Windows); resolves when that is done. */

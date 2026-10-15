@@ -1,5 +1,5 @@
 import { redactEncodedCredentials } from '../credential-recognition.js';
-import { nwcMatches, replaceNwc } from './nwc-match.js';
+import { nwcSpans, redactNwc } from './nwc-match.js';
 import { l402Header, lndconnect } from './patterns.js';
 import { l402PairMatches } from './l402-match.js';
 import { redactRuneContexts } from './rune-context.js';
@@ -29,12 +29,12 @@ export function redactL402Text(text: string): string {
 }
 
 // The published nwc regex backtracks quadratically on repeated prefixes; the linear matcher
-// returns exactly its matches (src/scan/nwc-match.ts).
+// returns exactly its matches (src/scan/nwc-match.ts). Escaped URIs the scanner reports are
+// redacted too (audit 1.3.2).
 // Rune values in rune context (rune=…, "rune": "…", Rune: …) are redacted too (1.2.0).
 function redactStructured(text: string): string {
   lndconnectAll.lastIndex = 0;
-  return redactL402Text(replaceNwc(redactRuneContexts(text).replace(lndconnectAll, '[redacted]'),
-    match => `[redacted]${/[^0-9a-f]$/i.test(match) ? match.slice(-1) : ''}`));
+  return redactL402Text(redactNwc(redactRuneContexts(text).replace(lndconnectAll, '[redacted]')));
 }
 
 // Same rule as the output renderer: a complete macaroon is at least 36 bytes and every
@@ -51,7 +51,7 @@ export function redactDecoded(text: string): string {
   if (text.length < SHORTEST_MACAROON && PRINTABLE_ASCII.test(text)) return text;
   const memo = text.length <= DECODED_MEMO_MAX_LENGTH ? decodedMemo.get(text) : undefined;
   if (memo !== undefined) return memo;
-  const safe = redactStructured(redactEncodedCredentials(text));
+  const safe = redactPath(text);
   if (text.length <= DECODED_MEMO_MAX_LENGTH) {
     if (decodedMemo.size >= DECODED_MEMO_LIMIT) decodedMemo.clear();
     decodedMemo.set(text, safe);
@@ -59,19 +59,19 @@ export function redactDecoded(text: string): string {
   return safe;
 }
 
+// Structured forms first, as the output renderer does: encoded-credential redaction would turn
+// the macaroon of an L402 header or "<macaroon>:<preimage>" pair into [redacted], and the pair
+// would no longer match, leaving its preimage in the text (audit 1.3.2).
 export function redactPath(text: string): string {
-  return redactStructured(redactEncodedCredentials(text));
+  return redactEncodedCredentials(redactStructured(text));
 }
 
 // A matched NWC URI confirms the identity of its 32-byte secret. Keep only
 // those known identities for redaction; ordinary encoded-looking facts remain
-// unchanged.
+// unchanged. Every URI the scanner reports counts, with its rule for the secret: any
+// separator before secret= ("&amp;", ";") and escaped URIs included (audit 1.3.2).
 export function collectNwcSecrets(text: string, secrets: Set<string>): void {
-  if (!/walletconnect:/i.test(text)) return;
-  for (const match of nwcMatches(text)) {
-    const parameter = /(?:[?&])secret=([0-9a-f]{64})(?=[^0-9a-f]|$)/i.exec(match.text);
-    if (parameter) secrets.add(parameter[1].toLowerCase());
-  }
+  for (const span of nwcSpans(text)) secrets.add(span.secret);
 }
 
 /** Needles grouped by length, each group with the rolling hashes of its members. */
@@ -117,7 +117,8 @@ function isHexOrSpace(code: number): boolean {
  * It replaces, with `[redacted]`, exactly what the per-secret replacement passes did:
  * - the hex form in either case, with any spaces, tabs, CR or LF between its digits;
  * - the base64 and base64url forms, padded or not, with at most one LF or CRLF between
- *   any two characters (line wrapping);
+ *   any two characters (line wrapping), and the characters of either form that depend on the
+ *   secret alone inside a longer run, at each byte alignment, wrapped the same way;
  * - the latin1 form and, when the bytes are valid UTF-8, the UTF-8 form.
  * Work is linear in the text length times the small number of distinct needle lengths,
  * however many secrets there are.
@@ -138,6 +139,15 @@ export function knownSecretRedactor(secrets: ReadonlySet<string>): (text: string
     ]);
     const utf8 = bytes.toString('utf8');
     if (Buffer.from(utf8, 'utf8').equals(bytes)) variants.add(utf8);
+    // Inside a longer base64 run the secret starts at byte alignment 0, 1 or 2 and its first
+    // and last characters mix in neighbouring bits: the 42 characters that depend on the secret's
+    // bytes alone are needles too (audit 1.3.2).
+    for (let alignment = 0; alignment < 3; alignment++) {
+      const padded = Buffer.concat([Buffer.alloc(alignment), bytes, Buffer.alloc(2)]);
+      const first = Math.ceil(alignment * 8 / 6);
+      const last = Math.floor((alignment * 8 + bytes.length * 8) / 6);
+      for (const encoding of ['base64', 'base64url'] as const) variants.add(padded.toString(encoding).slice(first, last));
+    }
     for (const variant of variants) {
       if (!variant || variant === hex) continue;
       // Variants of 40 or more characters may be line-wrapped; shorter ones match exactly.

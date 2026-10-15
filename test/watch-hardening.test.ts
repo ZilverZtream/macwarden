@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterAll, beforeAll, expect, it, vi } from 'vitest';
 import type { WatchEvent } from '../src/output/index.js';
-import { ALERT_KILL_MS, ALERT_TIMEOUT_MS, runAlertCommand } from '../src/watch/alert.js';
+import { ALERT_GRACE_MS, ALERT_KILL_MS, ALERT_TIMEOUT_MS, reapAlertGroups, runAlertCommand } from '../src/watch/alert.js';
 import { createOutputQueue, fdWriter } from '../src/watch/output-queue.js';
 import { UsageStore, writeUsage, USAGE_LIMIT } from '../src/watch/usage.js';
 import { childEnvironment } from './helpers/environment.js';
@@ -81,6 +81,73 @@ it('WATCH/alert-kill an alert command that never exits is abandoned at ALERT_KIL
     vi.useRealTimers();
     if (savedRoot === undefined) delete process.env.SystemRoot; else process.env.SystemRoot = savedRoot;
   }
+});
+
+// Audit 1.3.2: after the command exited, its group ID stayed tracked for ALERT_GRACE_MS even when
+// the group was empty; a new group leader given that ID in that second would have been killed.
+it('WATCH/alert-group an empty group is forgotten when the command exits; one with leftover members gets the grace', async () => {
+  vi.useFakeTimers();
+  // Which groups exist: the probe (signal 0) answers ESRCH for any other.
+  const groups = new Set<number>();
+  const sent: [number, string | number | undefined][] = [];
+  const kill = vi.spyOn(process, 'kill').mockImplementation(((pid: number, signal?: string | number) => {
+    if (!groups.has(-pid)) throw Object.assign(new Error('kill ESRCH'), { code: 'ESRCH' });
+    if (signal !== 0) sent.push([pid, signal]);
+    return true;
+  }) as typeof process.kill);
+  const command = (pid: number) => {
+    let exit: (code: number) => void = () => undefined;
+    const spawnFake = (() => ({ pid, kill: () => true, stdin: { on: () => undefined, end: () => undefined },
+      once: (name: string, listener: (code: number) => void) => { if (name === 'exit') exit = listener; } })) as never;
+    const outcome = runAlertCommand('/bin/alert', canary, spawnFake, 'linux');
+    return { outcome, exit: (code: number) => exit(code) };
+  };
+  try {
+    const empty = command(70_001);
+    empty.exit(0);
+    await empty.outcome;
+    // The ID is reused by an unrelated group leader during the old grace period.
+    groups.add(70_001);
+    await vi.advanceTimersByTimeAsync(ALERT_GRACE_MS);
+    reapAlertGroups();
+    expect(sent).toEqual([]);
+    groups.clear();
+    const leftover = command(70_002);
+    groups.add(70_002);
+    leftover.exit(0);
+    await leftover.outcome;
+    expect(sent).toEqual([]);
+    await vi.advanceTimersByTimeAsync(ALERT_GRACE_MS);
+    expect(sent).toEqual([[-70_002, 'SIGKILL']]);
+  } finally {
+    kill.mockRestore();
+    vi.useRealTimers();
+  }
+});
+
+// Audit 1.3.2: a write that reported 0 bytes without an error was retried at once and forever.
+it('WATCH/output-zero a write that makes no progress is backed off like EAGAIN; a writer resolving 0 fails the queue, never spins', async () => {
+  const waits: number[] = [];
+  let attempts = 0;
+  const writer = fdWriter(1, (_fd, chunk, callback) => {
+    attempts += 1;
+    callback(null, attempts <= 3 ? 0 : chunk.length);
+  }, async ms => { waits.push(ms); });
+  expect(await writer(Buffer.from('alert\n'))).toBe(6);
+  expect(waits).toEqual([5, 10, 20]);
+  // Stopped (the queue was closed): the retries end.
+  const stuck = fdWriter(1, (_fd, _chunk, callback) => callback(null, 0), async () => undefined, () => true);
+  await expect(stuck(Buffer.from('x'))).rejects.toThrow('write made no progress');
+  // A ChunkWriter of its own that resolves 0 is a broken writer: the queue closes and counts the loss.
+  let calls = 0;
+  // (It gives up after 1,000 calls, so the spin this guards against ends instead of hanging the test.)
+  const queue = createOutputQueue(async () => { if (++calls > 1_000) throw new Error('gave up'); return 0; });
+  queue.push('one\n');
+  queue.push('two\n');
+  for (let turn = 0; turn < 20; turn++) await new Promise(resolve => setImmediate(resolve));
+  expect(calls).toBe(1);
+  expect(queue.dropped()).toBe(2);
+  expect(await queue.drain(1_000)).toBe(true);
 });
 
 it('WATCH/usage-flush a full store serializes and writes quickly, and its size is bounded', async () => {
