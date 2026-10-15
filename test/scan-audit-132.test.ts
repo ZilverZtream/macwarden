@@ -59,8 +59,9 @@ it('scan refuses unsafe NODE_OPTIONS when a programmatic caller passes no env', 
   }
 }));
 
-// macOS keeps desktop app data under the home directory, read from no environment variable.
-it.skipIf(process.platform === 'darwin')('scan --agent-configs reads the agent environment from deps.env, not process.env', async () => scratch(async dir => {
+// macOS keeps desktop app data under the home directory, read from no environment variable:
+// there no location follows APPDATA or XDG_CONFIG_HOME, from deps.env or anywhere else.
+it('scan --agent-configs reads the agent environment from deps.env, not process.env', async () => scratch(async dir => {
   const appData = join(dir, 'appdata');
   mkdirSync(join(appData, 'Claude'), { recursive: true });
   const config = join(appData, 'Claude', 'claude_desktop_config.json');
@@ -72,7 +73,7 @@ it.skipIf(process.platform === 'darwin')('scan --agent-configs reads the agent e
     expect(output.error).toBeNull();
     const configs = (output.result as { summary: { agentConfigs: { found: { path: string }[]; absent: { path: string }[] } } }).summary.agentConfigs;
     const all = [...configs.found, ...configs.absent].map(item => item.path);
-    expect(all.some(path => path.startsWith(appData))).toBe(true);
+    expect(all.some(path => path.startsWith(appData))).toBe(process.platform !== 'darwin');
   } finally {
     process.chdir(saved);
   }
