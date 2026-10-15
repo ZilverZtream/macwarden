@@ -1,9 +1,10 @@
 import { writeFileSync } from 'node:fs';
+import { withCancellation } from '../src/cancellation.js';
 import { join } from 'node:path';
 import { expect, it } from 'vitest';
 import { run as inventory } from '../src/commands/inventory.js';
 import { render } from '../src/output/index.js';
-import { declare, fixture, oldId, ownId, pubkey, vector } from './helpers/cp038-online.js';
+import { declare, entry, fixture, oldId, ownId, pubkey, vector } from './helpers/cp038-online.js';
 import { expectSchemaValid } from './helpers/output-schema.js';
 
 // Found in the live field check against LND 0.20.0 (Polar): macwarden's own session
@@ -77,4 +78,33 @@ it('INVENTORY/canary-quiet without recorded canary uses there is no flag, no sum
   expect(render(result, 'text')).not.toContain('CANARY TRIGGERED');
   const review = (result.result as { report: { review: { controls: { control: string }[] } } }).report.review;
   expect(review.controls.map(item => item.control)).toEqual(['Least privilege', 'Periodic access review', 'Prompt removal']);
+});
+
+type VerifyRow = { rootKeyId: string; verify: string };
+const bobId = 4294967400n;
+
+it('INVENTORY/audit-1.3.2 --verify never checks a row whose rootKeyId was edited onto another entry\'s file and fingerprint', async () => {
+  const f = fixture();
+  const bob = { ...entry(bobId, 'Bob'), outPath: f.old.outPath, fingerprint: f.old.fingerprint };
+  f.save([f.old, bob]);
+  f.lnd.ids = [0n, ownId, oldId, bobId];
+  const result = await inventory([...f.flags, '--verify'], f.deps);
+  expectSchemaValid(result);
+  const rows = (result.result as { rootKeys: VerifyRow[] }).rootKeys;
+  expect(rows.find(item => item.rootKeyId === String(oldId))!.verify).toBe('accepted');
+  expect(rows.find(item => item.rootKeyId === String(bobId))!.verify).toBe('not-checked');
+  expect(f.lnd.calls.filter(call => call === 'CheckMacaroonPermissions')).toHaveLength(1);
+});
+
+it('INVENTORY/audit-1.3.2 an interrupt during a --verify check stops the loop and reports exit 6, step cancelled', async () => {
+  const f = fixture();
+  f.save([f.old, entry(bobId, 'Bob')]);
+  f.lnd.ids = [0n, ownId, oldId, bobId];
+  const controller = new AbortController();
+  // The first check never answers: the interrupt abandons it.
+  f.lnd.checkMacaroon = async () => { f.lnd.calls.push('CheckMacaroonPermissions'); controller.abort(); return new Promise(() => undefined); };
+  const result = await withCancellation(controller.signal, () => inventory([...f.flags, '--verify'], f.deps));
+  expectSchemaValid(result);
+  expect(result.error).toMatchObject({ code: 6, step: 'cancelled' });
+  expect(f.lnd.calls.filter(call => call === 'CheckMacaroonPermissions')).toHaveLength(1);
 });

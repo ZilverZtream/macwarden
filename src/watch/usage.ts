@@ -427,21 +427,31 @@ export class UsageStore {
     store.lastAttributionDrop = (value.lastAttributionDrop as string | null | undefined) ?? null;
     // Files written before 1.0.1 have neither list. Oldest first, so a list longer than the
     // bound keeps its most recent records.
-    const recent = <T>(items: T[], at: (item: T) => string) => [...items].sort((a, b) => at(a) < at(b) ? -1 : at(a) > at(b) ? 1 : 0);
+    // Compared as instants, as entries are (audit 1.3.2).
+    const recent = <T>(items: T[], at: (item: T) => string) => [...items].sort((a, b) => Date.parse(at(a)) - Date.parse(at(b)));
+    // A duplicate is checked against every key in the file, not only the ones kept: one evicted at
+    // the bound would otherwise be accepted when it comes again (audit 1.3.2).
+    const unique = () => { const seen = new Set<string>(); return (key: string) => {
+      if (seen.has(key)) throw new UsageFileError('invalid usage file');
+      seen.add(key);
+    }; };
+    const canaryKey = unique();
     for (const item of recent((value.canaryUses as CanaryUse[] | undefined) ?? [], item => item.lastUse)) {
       const key = `${item.nodePubkey}\0${item.rootKeyId}`;
-      if (store.canaryUses.has(key)) throw new UsageFileError('invalid usage file');
+      canaryKey(key);
       if (store.canaryUses.size >= CANARY_LIMIT) store.canaryUses.delete(store.canaryUses.keys().next().value as string);
       store.canaryUses.set(key, { ...item });
     }
+    const coverageKey = unique();
     for (const item of recent((value.coverage as Coverage[] | undefined) ?? [], item => item.lastEnd)) {
-      if (store.coverages.has(item.nodePubkey)) throw new UsageFileError('invalid usage file');
+      coverageKey(item.nodePubkey);
       if (store.coverages.size >= COVERAGE_LIMIT) store.coverages.delete(store.coverages.keys().next().value as string);
       store.coverages.set(item.nodePubkey, { ...item });
     }
     // Spans are kept only for nodes that kept a coverage record, so they share its bound.
+    const spansKey = unique();
     for (const item of (value.coverageSpans as CoverageSpans[] | undefined) ?? []) {
-      if (store.spans.has(item.nodePubkey)) throw new UsageFileError('invalid usage file');
+      spansKey(item.nodePubkey);
       if (!store.coverages.has(item.nodePubkey)) continue;
       store.spans.set(item.nodePubkey, union(item.spans.map(([from, to]) => [Date.parse(from), Date.parse(to)])));
     }
@@ -449,9 +459,10 @@ export class UsageStore {
     // than this store's limit (for example one written before the limit was lowered).
     // Compared as instants (audit 1.4.0): as text, `…:00Z` sorts after the later `…:00.900Z`.
     const ordered = [...(value.entries as UsageRecord[])].sort((a, b) => Date.parse(a.lastSeen) - Date.parse(b.lastSeen));
+    const recordKey = unique();
     for (const record of ordered) {
       const key = store.key(record.nodePubkey, record.credential, record.rootKeyId, record.method);
-      if (store.records.has(key)) throw new UsageFileError('invalid usage file');
+      recordKey(key);
       if (store.records.size >= limit) {
         store.records.delete(store.records.keys().next().value as string);
         store.evictions += 1;

@@ -1,5 +1,5 @@
 import { Cancelled, checkCancellation, cancellationSignal, cleanup, cleanupOutcome } from '../../cancellation.js';
-import { endpoint, connectionProblem, flagProblem, LABEL_RULE, nodePubkey, drift, samePermissions, listIds, failureDetails, readBoundedFile, readOnlineCredential, onlineAdapter, onlineWarnings, recoveryCommand, connectionSettings } from '../../online.js';
+import { endpoint, connectionProblem, flagProblem, LABEL_RULE, nodePubkey, drift, samePermissions, listIds, failureDetails, readBoundedFile, readOnlineCredential, onlineAdapter, onlineWarnings, recoveryCommand, inventoryRecoveryCommand, connectionSettings } from '../../online.js';
 import * as nodeFs from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { resolve } from 'node:path';
@@ -243,7 +243,7 @@ async function runSteps(args: string[], deps: Deps, state: RunState): Promise<Ba
         () => randomBytes(8).readBigUInt64BE() & ((1n << 63n) - 1n));
     } catch (error) { return lndFailure(error, warnings, 'B10'); }
     const id = rootKeyId.toString();
-    state.inspection = `root key ID ${id}; run ${recoveryCommand(request, id)}`;
+    state.inspection = `root key ID ${id}; run \`${inventoryRecoveryCommand(request)}\` to inspect state; recover with ${recoveryCommand(request, id)}`;
     const createdAt = deps.clock().toISOString();
     const entry: RegistryEntry = { nodePubkey: pubkey, label: request.label, rootKeyId: id,
       permissions: [...request.permissions], caveats: [], grade: assessment.grade,
@@ -375,9 +375,10 @@ export async function run(args: string[], deps: Deps): Promise<BakeOutput> {
     }
     return onlineWarnings(result);
   }
+  // After the send, the allocated root key ID and its recovery, as rotate and revoke report (audit 1.3.2).
   catch (error) { return onlineWarnings(cleanupOutcome(fail(error instanceof Cancelled ? (state.mutationSent ? 7 : 6) : 8,
     error instanceof Cancelled ? 'cancelled' : 'internal', error instanceof Cancelled ? 'interrupted' : 'unexpected failure' +
-    (state.mutationSent ? `; LND may have changed; ${'run macwarden inventory'}` : ''), state.warnings), state)); }
+    (state.mutationSent ? `; LND may have changed; ${state.inspection ?? 'run macwarden inventory'}` : ''), state.warnings), state)); }
 }
 
 export async function bake(args: string[]): Promise<OutputResult> {

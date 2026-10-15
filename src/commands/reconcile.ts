@@ -239,7 +239,7 @@ async function runSteps(args: string[], deps: Deps): Promise<ReconcileOutput> {
     `no default window: the journal's earliest record for this node (${new Date(earliestMine).toISOString()}) is after ` +
     `${untilFlag === null ? 'now (the clock may be behind the journal)' : '--until'}; give --since and --until explicitly`, warnings);
   const since = sinceFlag ?? earliestMine!;
-  if (since > until) return fail(2, 'Q1', '--since must not be after --until (now when --until is not given)');
+  if (since > until) return fail(2, 'Q1', '--since must not be after --until (now when --until is not given)', warnings);
   // A window of no width proves nothing either way (audit 1.4.0: one at an uncovered instant was reported complete).
   if (since === until) return fail(2, 'Q1', 'empty window: --since must be before --until (now when --until is not given)', warnings);
   const inWindow = (ms: number) => ms >= since && ms <= until;

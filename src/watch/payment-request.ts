@@ -338,7 +338,9 @@ export function decodeBolt11(input: string): { paymentHash: string; amountMsat: 
   const prefix = /^ln([a-z]+)([0-9]*[munp]?)$/.exec(hrp);
   if (!prefix) return null;
   // The currency prefix ends where the amount's digits begin; the regex is greedy on letters,
-  // so a multiplier letter without digits stays part of the currency, which zpay32 refuses too.
+  // so a multiplier letter without digits is left at the end of the currency. zpay32 reads it
+  // as an amount without digits and refuses the invoice, and no network's prefix ends in one.
+  if (prefix[2] === '' && /[munp]$/.test(prefix[1])) return null;
   const parsed = prefix[2] === '' ? null : hrpAmount(prefix[2]);
   if (parsed === 'invalid') return null;
   const amount = parsed;

@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+Fixes from three external audits of 1.3.1, each claim verified with a probe before it was fixed; every fix has a test that fails on 1.3.1. Claims that were refuted, or that describe behaviour the specification prescribes, are not changed.
+
+### Security
+
+- `scan --git-history`: git opened the scanned repository's `diff.orderFile` (on Windows a network path made an SMB connection; a protected file was read). The history read now pins the order file.
+- Output redaction: an escape-like prefix (`%2`, `\x2`, `\u000`) before a base64, base64url or base32 macaroon was decoded together with its leading `A` and hid the whole macaroon, which was then printed in full (for example in a scanned file's path). Every form is now also recognised in the literal text.
+- `scan`: an L402 value holding both an L402 and an LND macaroon is reported as its LND macaroon, but its preimage was not redacted, so it appeared in a path or in the other macaroon's caveat (SAFE-01).
+- `inventory --report`: the report redacted encoded macaroons only, and before anything else, so an L402 value's preimage, an NWC secret or a rune in key context in an alias, version or caveat was written as is (to the `--out` file; the preimage also to stdout and `--json`). The report now uses the output's whole redaction.
+- `verify`: a signature mismatch was conclusive on a registry fingerprint match even for a row recorded with `verified: false` (for example the bytes of an altered copy given to `revoke --unregistered --target-file`), so verify could call a live credential dead. Only bytes LND accepted count.
+- `inventory --verify`: a row whose root key ID was edited while it kept another credential's file and fingerprint was checked with that file and reported `accepted`. The file's root key ID must now be the row's.
+
+### Fixed
+
+- `watch`: an oversized macaroon whose header was re-framed as go-macaroon still accepts it (non-minimal varints of 5 to 10 bytes, or v1 framing) lost its identifier and was journaled `id:undecodable`; the header is now found in every framing.
+- `watch` lock: a lock refused because the path no longer named the file this watch created removed the file a link resolved to without checking it was its own, so another watch's lock could be deleted. A watch reading a lock another watch had created but not yet written called it ownerless; it now waits briefly for the owner record.
+- `scan --git-history sub .`: a work-tree file whose finding `sub/.macwardenignore` ignored was reported again from the history of `.` as a commit finding.
+- `scan`: a rune key whose value is too short to be a rune (`rune=a/b/cln_rune="…"`) moved the key search past the rune key inside it, and that rune was neither found nor redacted.
+- `recommend`: the printed `bake` command was refused by bake when the observed methods graded ADMIN (now with `--allow-admin`) or included a method LND lists but the bundled permission table does not (now withheld, warning `recommendation-unassessed`).
+- `inventory --report --out`: an existing file was refused only after every LND request; it is now refused at N7 before any, and the report is written to the path that was checked.
+- `inventory --verify`: an interrupt during the checks was recorded as a row error and the remaining rows were checked; it now stops the command (exit 6).
+- `bake`: an unexpected failure after the bake request was sent no longer omits the allocated root key ID and its recovery command.
+- `respond`: warnings from the rotations it runs (`acl-best-effort`) were dropped.
+- Usage file: records over a bound were ordered as text, so a newer record with a fraction of a second could be dropped before an older one; a duplicate key beyond a bound was accepted.
+- A repeated `--json` is refused (exit 2) like every other repeated flag.
+- `reconcile`: `--since` after now (no `--until`) dropped the warnings collected before the window was checked.
+- Payment journal: a BOLT11 invoice with a multiplier letter but no digits (`lnbcm1…`), which LND refuses, was read as an amountless invoice and its hash journaled.
+
 ## 1.3.1 (2026-10-11)
 
 Fixes from a section-by-section audit of 1.3.0 and a second external audit. No new features.

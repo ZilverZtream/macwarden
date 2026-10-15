@@ -345,6 +345,9 @@ function l402Credential(hit: Hit, path: string, line: number, column: (start: nu
   try {
     const result = decodeL402Macaroons(bytes.map(item => new Secret(item!)), preimage && new Secret(preimage), form, schemeName);
     if ('lnd' in result) {
+      // The value is reported as its LND macaroon, but its preimage is still a secret: it is
+      // redacted wherever it appears, in a path or another macaroon's caveat (SAFE-01, audit 1.3.2).
+      if (preimage !== null && preimage.length) ctx.secrets.add(preimage.toString('hex'));
       const at = starts[result.index];
       return { finding: withFacts(path, line, column(at), 'macaroon-base64', decodeMacaroon(result.lnd), now, ctx), accounted: [at] };
     }
@@ -1000,6 +1003,10 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
   const scannedFiles = new Set<string>();
   // Files with findings by identity, with the index of the path argument that scanned them.
   const owners = new Map<string, { arg: number; findings: ScanFinding[] }>();
+  // Every (path, fingerprint) the work-tree walk found, under any argument and before ignore
+  // entries apply: git history never reports a file still in the work tree as a commit finding,
+  // also when an earlier argument's .macwardenignore removed its finding (audit 1.3.2).
+  const walkedAt = new Set<string>();
   let currentArg = -1;
   const secrets = new Set<string>();
   const ctx: ScanContext = { secrets, facts: new Map(), l402: new Map() };
@@ -1214,8 +1221,10 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
   // reported. Names reached through a different argument stay silent (SPEC: several arguments).
   function alias(identity: string, path: string): void {
     const owner = owners.get(identity);
-    if (!owner || owner.arg !== currentArg) return;
+    if (!owner) return;
     const safePath = redactPath(reportedPath(path));
+    for (const finding of owner.findings) walkedAt.add(`${safePath}\0${finding.fingerprint}`);
+    if (owner.arg !== currentArg) return;
     for (const finding of owner.findings) {
       const also = finding.alsoAt ??= { count: 0, paths: [] };
       also.count++;
@@ -1234,7 +1243,7 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
     release(event.identity);
     if (event.findings.length) {
       const safePath = redactPath(reportedPath(event.path));
-      for (const finding of event.findings) finding.path = safePath;
+      for (const finding of event.findings) { finding.path = safePath; walkedAt.add(`${safePath}\0${finding.fingerprint}`); }
     }
     for (const finding of event.findings) addFinding(finding);
     dropped += event.dropped;
@@ -1412,9 +1421,9 @@ export async function scan(paths: string[], opts: ScanOptions = {}): Promise<Sca
     }
     // A credential still present in the work tree is already reported by the walk.
     // That includes a work-tree file's other hard-link names (its alsoAt).
-    const workTree = new Set(findings.flatMap(finding =>
+    const workTree = new Set([...walkedAt, ...findings.flatMap(finding =>
       [finding.path, ...(finding.commit === undefined ? finding.alsoAt?.paths ?? [] : [])]
-        .map(path => `${path}\0${finding.fingerprint}`)));
+        .map(path => `${path}\0${finding.fingerprint}`))]);
     const table = await historyEntries(git, directory, repository, pathspec);
     // Per distinct path: CLASSIFIED, MACAROON (*.macaroon), EXCLUDED (protected or in an
     // excluded directory), and whether a skip was already reported for it (skips are

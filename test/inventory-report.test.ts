@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { expect, it } from 'vitest';
 import { run as inventory } from '../src/commands/inventory.js';
@@ -101,6 +101,16 @@ it('REPORT/out writes an owner-only file once, never overwrites, and runs are de
   expect(again.error).toMatchObject({ code: 3, step: 'N7', message: 'report file already exists' });
   const printed = render(await inventory(['--report', 'markdown', ...f.flags], f.deps), 'text');
   expect(readFileSync(path, 'utf8')).toBe(printed);
+});
+
+it('REPORT/audit-1.3.2 an existing --out file is refused at N7 before any LND request', async () => {
+  const f = setup();
+  const path = join(f.dir, 'existing.md');
+  writeFileSync(path, 'kept', { mode: 0o600 });
+  const output = await inventory(['--report', 'markdown', '--out', path, ...f.flags], f.deps);
+  expect(output.error).toMatchObject({ code: 3, step: 'N7', message: 'report file already exists' });
+  expect(f.lnd.calls).toEqual([]);
+  expect(readFileSync(path, 'utf8')).toBe('kept');
 });
 
 it('REPORT/arguments refuse unknown formats and --out without --report', async () => {

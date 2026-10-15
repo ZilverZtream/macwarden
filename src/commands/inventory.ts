@@ -7,7 +7,7 @@ import { decodeMacaroon, parseTimeBefore } from '../decode/index.js';
 import { type InputIO } from '../input/index.js';
 import { createLndAdapter, type LndAdapter } from '../lnd/index.js';
 import { Secret } from '../secret.js';
-import { openRegistry, replacementLinkProblems, type RegistryEntry } from '../registry/index.js';
+import { openRegistry, recordedFileRelation, replacementLinkProblems, type RegistryEntry } from '../registry/index.js';
 import { inventoryResult, type InventoryResult, type OutputResult, type OutputWarning } from '../output/index.js';
 import { readUsage, usagePath, type UsageStore } from '../watch/usage.js';
 import { buildAccessReview, cleanReview, formatAccessReview, REPORT_FORMATS, type ReportFormat } from '../report/access-review.js';
@@ -114,15 +114,18 @@ async function runSteps(args: string[], deps: Deps): Promise<InventoryOutput> {
   if (reportOut !== undefined && isProtectedPath(reportOut)) return fail(3, 'N7', 'protected report path');
   const reportName = reportOut === undefined ? null : outputNameProblem(reportOut);
   if (reportName) return fail(3, 'N7', `report path refused: ${reportName}`);
+  let reportPath: string | undefined;
   if (reportOut !== undefined) {
     // Each check is abandoned on an interrupt (a stalled mount): exit 6, step cancelled.
     const checks = interruptibleChecks(deps.fs);
-    let reportPath: string;
     try { reportPath = await resolveUnprotectedPath(reportOut, checks); }
     catch (error) { rethrowCancelled(error); return fail(3, 'N7', 'cannot check report path'); }
     const registryFile = await registryPath(supplied['--registry'], checks, deps.env);
     if (registryFile !== null && namesRegistryFile(reportPath, registryFile))
       return fail(3, 'N7', REGISTRY_OUT_REFUSAL.replace('output path', 'report path'));
+    // An existing file is refused before any request, as bake B4 and rotate S5 do (audit 1.3.2).
+    try { await checks.lstat(reportOut); return fail(3, 'N7', 'report file already exists'); }
+    catch (error) { rethrowCancelled(error); if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return fail(3, 'N7', 'cannot check report path'); }
   }
   const settings = connectionSettings(flag => supplied[flag], deps.env);
   if (settings.problem) return fail(2, null, settings.problem);
@@ -254,8 +257,10 @@ async function runSteps(args: string[], deps: Deps): Promise<InventoryOutput> {
         mac = (await readOnlineCredential(path,
           { stdin: process.stdin, fs: deps.fs })).secret;
         decoded = decodeMacaroon(mac);
-      } catch { continue; }
-      if (decoded.fingerprint !== entry.fingerprint) continue;
+      } catch (error) { rethrowCancelled(error); continue; }
+      // The file must be this entry's credential: an edited rootKeyId keeping another entry's
+      // outPath and fingerprint would otherwise verify the wrong row (audit 1.3.2).
+      if (recordedFileRelation(entry, decoded) !== 'match') continue;
       if (decoded.permissions.length === 0 || !lnd.checkMacaroon) {
         row.verify = 'error';
         continue;
@@ -270,7 +275,7 @@ async function runSteps(args: string[], deps: Deps): Promise<InventoryOutput> {
           (result.reason === 'root-key-missing' || result.reason === 'signature-mismatch')) {
           row.verify = 'rejected';
         } else row.verify = 'error';
-      } catch { row.verify = 'error';
+      } catch (error) { rethrowCancelled(error); row.verify = 'error';
       }
       if (row.verify === 'rejected') row.flags.push('rejected');
     }
@@ -297,11 +302,13 @@ async function runSteps(args: string[], deps: Deps): Promise<InventoryOutput> {
     ownRootKeyId: facts.rootKeyId.toString(), now: deps.clock(), version: macwardenVersion() });
   const text = formatAccessReview(review, reportFormat);
   let path: string | null = null;
-  if (reportOut !== undefined) {
-    try { await interruptibleChecks(deps.fs).lstat(reportOut); return fail(3, 'N7', 'report file already exists', warnings); }
+  if (reportPath !== undefined) {
+    // Checked again: the file may have appeared during the LND requests.
+    try { await interruptibleChecks(deps.fs).lstat(reportPath); return fail(3, 'N7', 'report file already exists', warnings); }
     catch (error) { rethrowCancelled(error); if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return fail(3, 'N7', 'cannot check report path', warnings); }
     try {
-      const reserved = await interruptibleReserve(() => reserveOut(reportOut, deps.fs as typeof nodeFs));
+      const target = reportPath;
+      const reserved = await interruptibleReserve(() => reserveOut(target, deps.fs as typeof nodeFs));
       if (reserved.aclWarning) warnings.push('acl-best-effort');
       try { await reserved.reservation.write(new Secret(Buffer.from(text, 'utf8'))); }
       catch (error) { await reserved.reservation.discard().catch(() => undefined); throw error; }
@@ -309,7 +316,7 @@ async function runSteps(args: string[], deps: Deps): Promise<InventoryOutput> {
       if (error instanceof Cancelled) return fail(6, 'cancelled', OUT_CREATION_INTERRUPTED.replace('output file', 'report file'), warnings);
       return fail(3, 'N7', reserveFailure(error, 'cannot write report file'), warnings);
     }
-    path = resolve(reportOut);
+    path = resolve(reportPath);
   }
   if (output.ok && output.command === 'inventory') {
     // The review as the report holds it: credential recognition and escaping applied.
@@ -320,7 +327,9 @@ async function runSteps(args: string[], deps: Deps): Promise<InventoryOutput> {
 }
 
 export async function run(args: string[], deps: Deps): Promise<InventoryOutput> {
-  return onlineWarnings(await runSteps(args, deps));
+  // inventory changes nothing, so an interrupt is always before any mutation (exit 6), as verify.
+  try { return onlineWarnings(await runSteps(args, deps)); }
+  catch (error) { if (error instanceof Cancelled) return onlineWarnings(fail(6, 'cancelled', 'interrupted')); throw error; }
 }
 
 export async function inventory(args: string[]): Promise<OutputResult> {

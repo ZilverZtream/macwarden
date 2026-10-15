@@ -188,3 +188,25 @@ it('githist-audit/paths names that are not UTF-8 stay distinct paths', async () 
   expect(listed.paths.length).toBe(2);
   expect(listed.path[0]).not.toBe(listed.path[1]);
 });
+
+// A file reached through several arguments is reported under the first one (SPEC). When that
+// argument's .macwardenignore drops its finding, the history of a later argument must not report
+// the same live file as a commit finding (audit 1.3.2).
+it('githist-audit/ignore a work-tree file ignored under an earlier argument is not reported from the history of a later argument', async () => {
+  const dir = repository();
+  const sub = join(dir, 'sub');
+  mkdirSync(sub);
+  writeFileSync(join(sub, 'app.env'), hexLine('default-readonly'));
+  writeFileSync(join(sub, '.macwardenignore'), `${fingerprint('default-readonly')} app.env
+`);
+  commit(dir, 'add');
+  const { scan: scanPaths } = await import('../src/scan/index.js');
+  const alone = await scanPaths([sub], { gitHistory: true }) as Result;
+  const both = await scanPaths([sub, dir], { gitHistory: true }) as Result;
+  expect(alone.findings).toEqual([]);
+  expect(both.findings).toEqual([]);
+  // The other order reports the live file once, from the work tree.
+  const reversed = await scanPaths([dir, sub], { gitHistory: true }) as Result;
+  expect(reversed.findings).toEqual([expect.objectContaining({ fingerprint: fingerprint('default-readonly') })]);
+  expect(reversed.findings[0].commit).toBeUndefined();
+});

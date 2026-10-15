@@ -112,6 +112,48 @@ it('WATCH/lock-race a watch whose fresh lock a stale takeover briefly moves asid
   }
 });
 
+// A watch whose exclusive create met a lock it did not make (the path reached through a linked
+// directory, now holding another watch's lock) refuses it and removes only a file it created
+// itself: never the other watch's lock the link resolves to.
+it('WATCH/lock-race a refused lock never removes a file this watch did not create', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mw-lock-race-'));
+  try {
+    const path = join(dir, 'linked.watch.lock');
+    const other = join(dir, 'other.watch.lock');
+    const otherRecord = `${JSON.stringify({ pid: second, hostname: hostname() })}
+`;
+    writeFileSync(other, otherRecord);
+    const files = { ...fs,
+      async lstat(target: string, options?: { bigint?: boolean }) { return fs.lstat(target === path ? other : target, options as never); },
+      async realpath(target: string) { return target === path ? other : fs.realpath(target); } } as unknown as typeof fs;
+    await expect(acquireLock(path, depsFor(first, files))).rejects.toThrow(/symbolic link/);
+    expect(readFileSync(other, 'utf8')).toBe(otherRecord);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Between another watch's exclusive create and its owner record the lock is empty: a watch that
+// reads it then waits for the record instead of calling a live watch's lock ownerless. A lock
+// that stays empty is still ownerless.
+it('WATCH/lock-race an empty lock another watch is still writing is held, not ownerless', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mw-lock-race-'));
+  try {
+    const path = join(dir, 'writing.watch.lock');
+    writeFileSync(path, '');
+    const written = new Promise(resolve => setTimeout(resolve, 40))
+      .then(() => writeFileSync(path, `${JSON.stringify({ pid: first, hostname: hostname() })}
+`));
+    await expect(acquireLock(path, depsFor(second, fs))).rejects.toMatchObject({ code: 'EEXIST' });
+    await written;
+    const empty = join(dir, 'empty.watch.lock');
+    writeFileSync(empty, '');
+    await expect(acquireLock(empty, depsFor(second, fs))).rejects.toThrow(/without owner record/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // The other order: B starts first but is still looking up its process domain when A takes the
 // lock, so B's exclusive create meets A's fresh lock and reads its record. A live owner keeps it.
 it('WATCH/lock-race a watch that reads the fresh lock of another watch refuses it', async () => {

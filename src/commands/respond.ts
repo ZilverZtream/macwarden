@@ -363,11 +363,14 @@ async function runSteps(args: string[], deps: Deps): Promise<RespondOutput> {
 
   // P8: each credential through the rotate path, which keeps its own safety checks and lock.
   const codes: number[] = [];
+  const warningCode = (warning: OutputResult['warnings'][number]) => typeof warning === 'string' ? warning : warning.code;
   for (const item of selected) {
     if (cancellationSignal()?.aborted) break;
     const args = request.finish ? [item.label!, '--finish', '--yes', ...connection(request)]
       : [item.label!, '--out', join(result.outDir!, `${item.label}.macaroon`), ...(request.allowAdmin ? ['--allow-admin'] : []), ...connection(request)];
     const outcome = await rotate(args, deps);
+    // Rotate's own invocation warnings (acl-best-effort) reach the batch result once (audit 1.3.2).
+    for (const warning of outcome.warnings) if (!warnings.some(seen => warningCode(seen) === warningCode(warning))) warnings.push(warning);
     if (!outcome.ok) {
       item.status = 'failed';
       item.error = { code: outcome.error.code, step: outcome.error.step, message: outcome.error.message };

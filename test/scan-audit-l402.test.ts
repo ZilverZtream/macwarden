@@ -60,6 +60,24 @@ it('L402 <aperture>,<admin>:<preimage> reports the LND admin macaroon, not an L4
   expect(gate.exitCode).toBe(1);
 }));
 
+// The preimage of a value reported as its LND macaroon is redacted like any L402 preimage: in the
+// path and in the caveats of the other macaroon in the value, in either order (SAFE-01).
+it('L402 <aperture>,<admin>:<preimage> never prints the preimage, in a path or a caveat', async () => scratch(async dir => {
+  const admin = vector('default-admin').bytes.toString('base64');
+  const preimage = 'cd'.repeat(32);
+  const aperture = token(302, [`note=${preimage}`]).base64;
+  const sub = join(dir, `d-${preimage}`);
+  await fs.mkdir(sub);
+  for (const value of [`L402 ${aperture},${admin}:${preimage}`, `L402 ${admin},${aperture}:${preimage}`]) {
+    const path = join(sub, 'app.env');
+    writeFileSync(path, `AUTH=${value}
+`);
+    const result = await scan([path], { clock });
+    expect(result.findings.map(finding => finding.kind).sort()).toEqual(['l402', 'macaroon-base64']);
+    expect(JSON.stringify(result).toLowerCase()).not.toContain(preimage);
+  }
+}));
+
 it('an L402 value that does not decode hides none of the macaroons inside it', async () => scratch(async dir => {
   const admin = vector('default-admin');
   const a = admin.bytes.toString('base64');

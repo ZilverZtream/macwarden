@@ -44,3 +44,24 @@ it('DECODE-AUDIT/recognition the parse budget never stops a real credential bein
   // Text that only looks like a macaroon start is left alone.
   expect(macaroonEnds(Buffer.from([2, 2, 1, 3, 0, 0, 6, 32, ...Buffer.alloc(32)]))(0)).toBeNull();
 });
+
+// Audit 1.3.2: every base64 and base32 macaroon starts with 'A', a hex digit, so an escape-like
+// prefix ("%2", "\x2", "\u000") decoded together with it hid the whole macaroon from redaction.
+it('DECODE-AUDIT/recognition an escape-like prefix never hides a base64 or base32 macaroon', () => {
+  const bytes = readFileSync(resolve('test/vectors/default-readonly.macaroon'));
+  const base32 = (data: Buffer) => {
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'; let acc = 0, bits = 0, text = '';
+    for (const byte of data) { acc = ((acc << 8) | byte) & 0xffff; bits += 8;
+      while (bits >= 5) { bits -= 5; text += alphabet[(acc >>> bits) & 31]; } }
+    return bits ? text + alphabet[(acc << (5 - bits)) & 31] : text;
+  };
+  for (const [form, encoded] of [['base64', bytes.toString('base64')], ['base64url', bytes.toString('base64url')], ['base32', base32(bytes)]]) {
+    expect(encoded.startsWith('A'), form).toBe(true);
+    for (const prefix of ['%2', '%0', 'x=%2', '\\x2', '\\x0', '"\\x2', '\\u000', '&#x2', '%u00']) {
+      const out = redactEncodedCredentials(`${prefix}${encoded} tail`);
+      expect(out, `${prefix} ${form}`).not.toContain(encoded.slice(8, 40));
+      expect(out, `${prefix} ${form}`).toContain('[redacted]');
+      expect(out.endsWith(' tail'), `${prefix} ${form}`).toBe(true);
+    }
+  }
+});

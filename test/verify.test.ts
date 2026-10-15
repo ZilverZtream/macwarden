@@ -349,6 +349,23 @@ it('VERIFY/RT-01 regeneration a signature mismatch on the exact bytes the regist
   expect(exit(await verify([alice.outPath!], mismatch()))).toBe(1);
 });
 
+// Audit 1.3.2: revoke --unregistered --target-file records any file's fingerprint with verified:false,
+// so only a verified row's fingerprint proves the bytes genuine.
+it('VERIFY/audit-1.3.2 a signature mismatch on bytes a verified:false row recorded is not conclusive', async () => {
+  const alice = entry(oldId);
+  const mismatch = () => fake({ check: { valid: false, reason: 'signature-mismatch', message: 'x' } }).lnd;
+  saveRegistry([{ ...alice, verified: false }]);
+  const unverified = await verify([alice.outPath!], mismatch());
+  expect(exit(unverified)).toBe(1);
+  expect(value(unverified)).toMatchObject({ rejection: 'signature-mismatch', conclusive: false, rootKeyListed: true,
+    registry: { label: 'Alice', match: 'root-key-id' } });
+  expect(value(unverified).guidance).toContain(SIGNATURE_MISMATCH_HOW_TO_CONCLUDE);
+  saveRegistry([alice]);
+  const verified = await verify([alice.outPath!], mismatch());
+  expect(exit(verified)).toBe(0);
+  expect(value(verified)).toMatchObject({ conclusive: true, registry: { match: 'fingerprint' } });
+});
+
 // 1.2.1: LND's two answers must agree. A rejection that says the root key ID is gone while
 // ListMacaroonIDs still lists it is a contradiction, not a verdict.
 it('VERIFY/contradicted a root-key-missing rejection while the root key ID is still listed is not conclusive', async () => {

@@ -290,6 +290,12 @@ export async function main(rawArgv: string[], runtime: { execArgv?: readonly str
       // the flags could expose what the command handles, and watch's HTTP/2 client depends on
       // the fixed Node releases package.json names.
       if (runtime.execArgv && unsafeNodeFlags(runtime.execArgv)) { await write(failure(2, null, 'unsafe Node diagnostic settings (node flags)', command), mode); return 2; }
+      // --json is removed before the command parses its flags, so a repeat is refused here as every
+      // other repeated flag is by its command (audit 1.3.2); watch parses --json itself.
+      if (command !== 'watch' && flags.filter(arg => arg === '--json').length > 1) {
+        await write(failure(2, null, '--json was given more than once', command), mode);
+        return 2;
+      }
       const unsupported = command === 'watch' && runtime.nodeVersion !== undefined ? nodeVersionWarning(runtime.nodeVersion) : null;
       // watch streams events while it runs, so it alone keeps --json to format them.
       const args = argv.slice(1).filter((arg, index) => arg !== '--json' || command === 'watch' ||

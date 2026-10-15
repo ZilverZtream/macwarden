@@ -194,6 +194,13 @@ function redact(text: string): string {
   return safe;
 }
 
+/**
+ * Every credential form the output redacts (rune contexts, lndconnect and NWC URIs, L402 values
+ * with their preimages, encoded macaroons), for text written past this module: the inventory
+ * report file (audit 1.3.2).
+ */
+export function redactCredentialText(text: string): string { return redact(text); }
+
 function redactUncached(text: string): string {
   lndconnectAll.lastIndex = 0;
   const withLndconnectRedacted = redactRuneContexts(text).replace(lndconnectAll, match => hasCredentialInLndconnect(match) ? '[redacted]' : match);
