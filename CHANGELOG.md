@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.3.2 (2026-10-15)
 
 Fixes from an external audit of every source file of 1.3.1, each claim verified with a probe before it was fixed; every fix has a test that fails on 1.3.1. Claims that were refuted, or that describe behaviour the specification prescribes, are not changed.
 
@@ -40,6 +40,10 @@ Fixes from an external audit of every source file of 1.3.1, each claim verified 
 - `scan --agent-configs --git-history`: history was read for the discovered agent locations, which are usually outside a git work tree, so the scan failed (exit 3). History is read for path arguments only; without one the combination is a usage error.
 - `scan`: a repeated `--format` said "takes one of …"; it now says the flag was given more than once. The unsafe `NODE_OPTIONS` check also runs when a programmatic caller passes no environment.
 - `--version` reads the installed version without failing.
+
+### Repository
+
+- A code of conduct (`CODE_OF_CONDUCT.md`, reports through private reporting) and a question issue template beside the bug and feature forms.
 
 ### Payment lab
 
