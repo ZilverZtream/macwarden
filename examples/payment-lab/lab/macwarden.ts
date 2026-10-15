@@ -22,12 +22,14 @@ export function macwardenScript(): string {
  * The environment for macwarden: connection settings come from flags only, so
  * MACWARDEN_* connection variables are removed (macwarden refuses a mix of
  * flags and variables), and NODE_OPTIONS and NODE_DEBUG are removed because
- * macwarden refuses to run with them.
+ * macwarden refuses to run with them. Names are compared in any case, as macwarden reads them
+ * (Windows keeps a variable's case as set: `node_options` is NODE_OPTIONS there; audit 1.3.2).
  */
-function macwardenEnv(): NodeJS.ProcessEnv {
+export function macwardenEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (key.startsWith('MACWARDEN_') || key === 'NODE_OPTIONS' || key === 'NODE_DEBUG') continue;
+  for (const [key, value] of Object.entries(source)) {
+    const upper = key.toUpperCase();
+    if (upper.startsWith('MACWARDEN_') || upper === 'NODE_OPTIONS' || upper === 'NODE_DEBUG') continue;
     env[key] = value;
   }
   return env;

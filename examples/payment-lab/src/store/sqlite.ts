@@ -35,8 +35,10 @@ export type Migration = string | ((db: DatabaseSync) => void);
  */
 export function openDatabase(path: string, migrations: readonly Migration[]): DatabaseSync {
   if (readOnlyOpens > 0) return openReadOnly(path, migrations);
-  // Create the file owner-only before SQLite does; SQLite gives -wal and -shm the same mode.
-  closeSync(openSync(path, 'a', 0o600));
+  // Create the file owner-only before SQLite does; SQLite gives -wal and -shm the same mode. ':memory:' and '' name
+  // SQLite's in-memory and temporary databases, not files: pre-creating one would leave a stray file named ':memory:'
+  // on POSIX and fail with ENOENT on Windows, where ':' is not allowed in a name (audit 1.3.2).
+  if (!inMemory(path)) closeSync(openSync(path, 'a', 0o600));
   const db = new DatabaseSync(path, { timeout: BUSY_TIMEOUT_MS, readBigInts: true, enableForeignKeyConstraints: true });
   try {
     // Read before the journal-mode PRAGMA, which converts the file to WAL: a newer database is left as it was.
@@ -67,7 +69,8 @@ let readOnlyOpens = 0;
  * reading only, for the commands that only read (explain, show, ledger-verify, outbox-status, …):
  *
  * - a database that does not exist is not created: an empty in-memory database with the current schema
- *   stands in for it, so the command reads no records and nothing appears on disk;
+ *   stands in for it, so the command reads no records and nothing appears on disk; so does one at schema
+ *   version 0 with no tables (a first open interrupted before its migrations committed), which is left as it is;
  * - an existing database is opened with SQLite's read-only flag (a write through it fails) and must have the
  *   current schema: an older one is refused, not migrated, and a newer one is refused as openDatabase refuses
  *   it; either is left unchanged. A command that records migrates it.
@@ -83,25 +86,40 @@ export function readOnly<T>(open: () => T): T {
   }
 }
 
-function openReadOnly(path: string, migrations: readonly Migration[]): DatabaseSync {
-  if (!existsSync(path)) {
-    const db = new DatabaseSync(':memory:', { readBigInts: true, enableForeignKeyConstraints: true });
-    try {
-      immediate(db, () => {
-        for (const step of migrations) {
-          if (typeof step === 'string') db.exec(step); else step(db);
-        }
-        db.exec(`PRAGMA user_version = ${migrations.length}`);
-      });
-    } catch (error) {
-      try { db.close(); } catch { /* the original error is the one to report */ }
-      throw error;
-    }
-    return db;
+/** SQLite's names for a database that is not a file: in-memory (':memory:') and a private temporary one (''). */
+function inMemory(path: string): boolean {
+  return path === ':memory:' || path === '';
+}
+
+/** The stand-in for a database that does not exist: empty, in memory, with the current schema. */
+function emptyInMemory(migrations: readonly Migration[]): DatabaseSync {
+  const db = new DatabaseSync(':memory:', { readBigInts: true, enableForeignKeyConstraints: true });
+  try {
+    immediate(db, () => {
+      for (const step of migrations) {
+        if (typeof step === 'string') db.exec(step); else step(db);
+      }
+      db.exec(`PRAGMA user_version = ${migrations.length}`);
+    });
+  } catch (error) {
+    try { db.close(); } catch { /* the original error is the one to report */ }
+    throw error;
   }
+  return db;
+}
+
+function openReadOnly(path: string, migrations: readonly Migration[]): DatabaseSync {
+  if (!existsSync(path)) return emptyInMemory(migrations);
   const db = new DatabaseSync(path, { readOnly: true, timeout: BUSY_TIMEOUT_MS, readBigInts: true, enableForeignKeyConstraints: true });
   try {
     const version = refuseNewer(db, migrations.length);
+    // Schema version 0 with no tables is a first open that was interrupted before its migrations committed (the file
+    // pre-created, or only its WAL header written): nothing was ever recorded in it, so it reads as missing, not as a
+    // database "older than this code" that a recording command must migrate first (audit 1.3.2).
+    if (version === 0 && db.prepare('SELECT 1 FROM sqlite_master LIMIT 1').get() === undefined) {
+      db.close();
+      return emptyInMemory(migrations);
+    }
     if (version < migrations.length) {
       throw new Error(`database schema version ${version} is older than this code's (${migrations.length}); a command that only reads does not `
         + 'migrate it, and it is left unchanged: run a command that records (reconcile, for one) to migrate it first');

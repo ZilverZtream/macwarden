@@ -34,6 +34,19 @@ export const REFRESH_DEADLINE_MS = 60_000;
 export interface RefreshOptions {
   /** The overall deadline; REFRESH_DEADLINE_MS when not given (the tests shorten it). */
   deadlineMs?: number;
+  /**
+   * The subject's own operation or order ID. Scrubbed as known, like the payment hashes, so a 64-hex ID that LND
+   * echoes (an invoice memo, for one) is shown as its fingerprint, as everywhere else in the explanation, not as
+   * [redacted] (audit 1.3.2).
+   */
+  subject?: string;
+}
+
+/** The hashes looked up and the subject's own ID, lower-cased: what scrub fingerprints instead of redacting. */
+function knownSet(hashes: string[], options: RefreshOptions): Set<string> {
+  const known = new Set(hashes.map(hash => hash.toLowerCase()));
+  if (options.subject !== undefined) known.add(options.subject.toLowerCase());
+  return known;
 }
 
 /**
@@ -77,7 +90,7 @@ function fact(detail: string, known: ReadonlySet<string>): TimelineItem {
 
 export async function refreshPayer(explanation: Explanation, hashes: string[], api: TrackSource, options: RefreshOptions = {}):
   Promise<RefreshResult> {
-  const known = new Set(hashes.map(hash => hash.toLowerCase()));
+  const known = knownSet(hashes, options);
   const recorded = new Map(((explanation.outcome.payments ?? []) as RecordedPayment[]).map(item => [item.payment, item]));
   const facts: TimelineItem[] = [];
   return await bounded(hashes, options, 'payment hash(es)', known, facts, async (hash, signal) => {
@@ -108,9 +121,22 @@ export async function refreshPayer(explanation: Explanation, hashes: string[], a
   });
 }
 
+/**
+ * The record as a refreshed fact names it. A record not-created whose invoice LND created after all carries the state LND
+ * showed then (audit 1.3.2: "not-created" alone read as if LND had no such invoice, and agreed with an OPEN one).
+ */
+function receiverRecordLabel(record: RecordedInvoice): string {
+  return record.state === 'not-created' && record.lateLndState !== null ? `not-created, LND ${record.lateLndState}` : record.state;
+}
+
+/** A late invoice LND showed OPEN or ACCEPTED is still to be canceled (receiver reconcile cancels it), whatever LND says now. */
+function stillToCancel(record: RecordedInvoice | undefined): boolean {
+  return record?.state === 'not-created' && (record.lateLndState === 'OPEN' || record.lateLndState === 'ACCEPTED');
+}
+
 export async function refreshReceiver(explanation: Explanation, hashes: string[], api: LookupSource, options: RefreshOptions = {}):
   Promise<RefreshResult> {
-  const known = new Set(hashes.map(hash => hash.toLowerCase()));
+  const known = knownSet(hashes, options);
   const recorded = new Map(((explanation.outcome.invoices ?? []) as RecordedInvoice[]).map(item => [item.invoice, item]));
   const facts: TimelineItem[] = [];
   return await bounded(hashes, options, 'invoice(s)', known, facts, async (hash, signal) => {
@@ -131,9 +157,10 @@ export async function refreshReceiver(explanation: Explanation, hashes: string[]
     const agrees = recordState === lndState && (lndState !== 'settled' || record?.amtPaidMsat === invoice.amtPaidMsat.toString()
       || record?.state === 'not-created');
     facts.push(fact(`${fingerprint(hash)} LookupInvoice now: ${invoice.state}, paid ${invoice.amtPaidMsat} msat, settle index ${invoice.settleIndex}, `
-      + `memo ${JSON.stringify(invoice.memo)}; ${agrees ? `agrees with the record (${record?.state ?? 'unknown'})`
-        : `differs from the record (${record === undefined ? 'no record' : `${record.state}${record.amtPaidMsat === null ? '' : `, paid ${record.amtPaidMsat} msat`}`}): `
-          + 'run receiver reconcile'}`, known));
+      + `memo ${JSON.stringify(invoice.memo)}; ${agrees ? `agrees with the record (${record === undefined ? 'unknown' : receiverRecordLabel(record)})`
+        : `differs from the record (${record === undefined ? 'no record'
+          : `${receiverRecordLabel(record)}${record.amtPaidMsat === null ? '' : `, paid ${record.amtPaidMsat} msat`}`})`}`
+      + (stillToCancel(record) ? '; still to be canceled: run receiver reconcile' : agrees ? '' : ': run receiver reconcile'), known));
     return undefined;
   });
 }

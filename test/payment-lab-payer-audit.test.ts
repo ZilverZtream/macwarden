@@ -354,6 +354,90 @@ describe('payment lab payer audit: the claim reports its own submission, across 
   });
 });
 
+describe('payment lab payer audit 1.3.2: a superseded submission\'s own stream tags its attempts and creation time with its submission', () => {
+  const attemptTags = (store: PayerStore): string[] => store.db.prepare('SELECT attempt_id, submission, status FROM htlc_attempts ORDER BY attempt_id').all()
+    .map(row => `${String(row.attempt_id)}:${String(row.submission)}:${String(row.status)}`);
+  const creations = (store: PayerStore): string[] => store.db.prepare('SELECT submission FROM payment_creations ORDER BY submission').all()
+    .map(row => `submission ${String(row.submission)}`);
+
+  it.each([
+    ['with an HTLC attempt', true],
+    ['without attempts', false],
+  ])('submission 1 reaches LND after a revert and submission 2\'s claim and fails (%s): the FAILED a tracker for submission 2 reads is stale', (_name, withAttempt) => {
+    const label = `own-stream-${String(withAttempt)}`;
+    const store = payerStore(`${label}.db`);
+    store.setBudget('B', 1100n);
+    const { paymentHash: hash } = preimageFor(label);
+    expect(store.recordIntent({ operationId: 'OP-OWN', kind: 'payout', paymentRequest: `lnbcrt-${label}`, invoice: decoded(hash, 1000n),
+      feeLimitMsat: 100n, maxParts: 1, budgetId: 'B' }).outcome).toBe('recorded');
+    const first: { submission?: number } = {};
+    expect(store.claimForSubmission(hash, first)).toBe(true);
+    // Another process finds nothing in LND yet and reverts; a third claims submission 2, which has not reached LND.
+    expect(store.markNotInitiated(hash, 'TrackPaymentV2: NotFound', 1)).toBe('reverted');
+    const second: { submission?: number } = {};
+    expect(store.claimForSubmission(hash, second)).toBe(true);
+    expect([first.submission, second.submission]).toEqual([1, 2]);
+    // Submission 1's request reaches LND after all, makes attempt 7 and fails; its own SendPaymentV2 stream reports it.
+    const htlcs = (status: HtlcAttempt['status']): HtlcAttempt[] => withAttempt ? [attempt('7', status)] : [];
+    expect(store.applyUpdate(payment(label, 'IN_FLIGHT', htlcs('IN_FLIGHT'), FRESH_NS), 'SendPaymentV2', 1)).toMatchObject({ stale: true });
+    expect(store.applyUpdate(payment(label, 'FAILED', htlcs('FAILED'), FRESH_NS), 'SendPaymentV2', 1)).toMatchObject({ stale: true });
+    expect(attemptTags(store)).toEqual(withAttempt ? ['7:1:FAILED'] : []);
+    expect(creations(store)).toEqual(['submission 1']);
+    // A reconcile for submission 2, before submission 2's request reaches LND, reads that FAILED: it is submission 1's.
+    expect(store.applyUpdate(payment(label, 'FAILED', htlcs('FAILED'), FRESH_NS), 'TrackPaymentV2', 2)).toMatchObject({ state: 'submitting', stale: true });
+    expect(store.payment(hash)).toMatchObject({ state: 'submitting', submissions: 2 });
+    expect(store.operation('OP-OWN')?.state).toBe('open');
+    store.setBudget('B', 2200n);
+    expect(store.budgetStatus('B')).toMatchObject({ heldMsat: 1100n });
+    expect(replacement(store, 'OP-OWN')).toBe('refused');
+    // Submission 2 reaches LND: a new payment (attempt 8, a later creation time) whose FAILED is its own.
+    expect(store.applyUpdate(payment(label, 'FAILED', withAttempt ? [attempt('8', 'FAILED')] : [], FRESH_NS + 1n), 'TrackPaymentV2', 2).state).toBe('failed');
+    expect(store.budgetStatus('B')).toMatchObject({ heldMsat: 0n });
+  });
+});
+
+describe('payment lab payer audit 1.3.2: an intent for a recorded payment must name its recorded terms', () => {
+  function reverted(store: PayerStore, label: string, budgetId: string | undefined): string {
+    const { paymentHash: hash } = preimageFor(label);
+    store.setBudget('B', 5000n);
+    store.setBudget('C', 5000n);
+    expect(store.recordIntent({ operationId: `OP-${label}`, kind: 'payout', paymentRequest: `lnbcrt-${label}`, invoice: decoded(hash, 1000n),
+      feeLimitMsat: 100n, maxParts: 1, ...(budgetId === undefined ? {} : { budgetId }) }).outcome).toBe('recorded');
+    expect(store.claimForSubmission(hash)).toBe(true);
+    expect(store.markNotInitiated(hash, 'connection not established', 1)).toBe('reverted');
+    return hash;
+  }
+  const again = (store: PayerStore, label: string, terms: { feeLimitMsat?: bigint; maxParts?: number; budgetId?: string }) => store.recordIntent({
+    operationId: `OP-${label}`, kind: 'payout', paymentRequest: `lnbcrt-${label}`, invoice: decoded(preimageFor(label).paymentHash, 1000n),
+    feeLimitMsat: terms.feeLimitMsat ?? 100n, maxParts: terms.maxParts ?? 1, ...(terms.budgetId === undefined ? {} : { budgetId: terms.budgetId }) });
+
+  it('an intent recorded without a budget, given again with --budget, another fee limit or other parts, is refused, not sent unreserved', () => {
+    const store = payerStore('terms-unbudgeted.db');
+    const hash = reverted(store, 'terms-u', undefined);
+    expect(again(store, 'terms-u', { feeLimitMsat: 900n, maxParts: 5, budgetId: 'B' })).toEqual({ outcome: 'refused',
+      reason: `--fee-limit-msat 900 differs from payment ${hash}'s recorded fee limit 100 msat` });
+    expect(again(store, 'terms-u', { maxParts: 5 })).toEqual({ outcome: 'refused', reason: `--max-parts 5 differs from payment ${hash}'s recorded 1` });
+    expect(again(store, 'terms-u', { budgetId: 'B' })).toEqual({ outcome: 'refused',
+      reason: `--budget B differs from payment ${hash}, which holds no budget reservation` });
+    expect(store.budgetStatus('B')).toMatchObject({ heldMsat: 0n });
+    expect(store.payment(hash)).toMatchObject({ state: 'intent', feeLimitMsat: 100n, maxParts: 1 });
+    expect(again(store, 'terms-u', {})).toMatchObject({ outcome: 'existing', payment: { paymentHash: hash, state: 'intent' } });
+  });
+
+  it('a budgeted intent is answered from the record only for its own budget', () => {
+    const store = payerStore('terms-budgeted.db');
+    const hash = reverted(store, 'terms-b', 'B');
+    expect(again(store, 'terms-b', { budgetId: 'C' })).toEqual({ outcome: 'refused', reason: `--budget C differs from payment ${hash}'s reservation against budget B` });
+    expect(again(store, 'terms-b', {})).toEqual({ outcome: 'refused', reason: `no --budget differs from payment ${hash}'s reservation against budget B` });
+    expect(again(store, 'terms-b', { budgetId: 'B' })).toMatchObject({ outcome: 'existing', payment: { paymentHash: hash, state: 'intent' } });
+    // Resolved (its reservation consumed), a replay with the same terms is still answered from the record.
+    expect(store.claimForSubmission(hash)).toBe(true);
+    expect(store.applyUpdate(payment('terms-b', 'SUCCEEDED', [], FRESH_NS), 'SendPaymentV2', 2).state).toBe('succeeded');
+    expect(again(store, 'terms-b', { budgetId: 'B' })).toMatchObject({ outcome: 'existing', payment: { state: 'succeeded' } });
+    expect(again(store, 'terms-b', {}).outcome).toBe('refused');
+  });
+});
+
 /** The harness's scripted LND (examples/payment-lab/test/harness/lnd.ts), as far as this test drives it by hand. */
 interface HarnessCall { id: number; kind: string; submission: number | undefined }
 interface HarnessLnd {
@@ -566,6 +650,67 @@ describe('payment lab payer audit: LND REST errors', () => {
     const error = await client.stream('POST', '/v2/router/send', {}, () => 'continue').then(() => undefined, (thrown: unknown) => thrown);
     expect(error).toBeInstanceOf(lab.LndError);
     expect((error as { httpStatus?: number }).httpStatus).toBe(500);
+  }, 90_000);
+
+  /** The stream's outcome, or 'pending' when it has not settled by the time `stop` aborts it. */
+  async function streamOutcome(port: number, cert: Buffer, onMessage: (message: unknown) => StreamDecision, stop: AbortSignal): Promise<unknown> {
+    const { LndRestClient } = await loadLabModule<RestModule>('lnd/rest.ts');
+    const client = new LndRestClient({ label: 'test', host: '127.0.0.1', port, tlsCert: cert, macaroonHex: '00' }) as RestClient & {
+      stream(method: 'POST', path: string, body: unknown, onMessage: (message: unknown) => StreamDecision, options: { signal: AbortSignal }): Promise<void> };
+    return client.stream('POST', '/v2/router/send', {}, onMessage, { signal: stop }).then(() => 'resolved',
+      (thrown: unknown) => (thrown as Error).message.includes('aborted by the caller') ? 'pending' : thrown);
+  }
+
+  it('a stream the handler drops rejects, also when the server\'s end arrived in the same chunk (audit 1.3.2)', async () => {
+    const { port, cert } = await serve((incoming, response) => {
+      incoming.resume();
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(`${JSON.stringify({ result: { status: 'IN_FLIGHT' } })}\n${JSON.stringify({ result: { status: 'SUCCEEDED' } })}\n`);
+    });
+    const seen: unknown[] = [];
+    const outcome = await streamOutcome(port, cert, message => { seen.push(message); return 'drop'; }, AbortSignal.timeout(10_000));
+    expect(seen).toEqual([{ status: 'IN_FLIGHT' }]);
+    expect(outcome).toBeInstanceOf(lab.TransportError);
+  }, 90_000);
+
+  it('a non-200 stream answer whose error body grows past the unary size is refused at once, not read until the caller stops (audit 1.3.2)', async () => {
+    const { port, cert } = await serve((incoming, response) => {
+      incoming.resume();
+      response.writeHead(500, { 'content-type': 'application/json' });
+      const megabyte = Buffer.alloc(1 << 20, 0x61);
+      for (let index = 0; index < 20; index += 1) response.write(megabyte);
+    });
+    const outcome = await streamOutcome(port, cert, () => 'continue', AbortSignal.timeout(20_000));
+    expect(outcome).toBeInstanceOf(lab.ProtocolError);
+    expect((outcome as Error).message).toMatch(/HTTP 500 error body larger than 16777216 bytes/);
+  }, 90_000);
+
+  it('a non-200 stream answer whose error body never completes ends after the unary timeout (audit 1.3.2)', async () => {
+    let headersSent = false;
+    const { port, cert } = await serve((incoming, response) => {
+      incoming.resume();
+      response.writeHead(500, { 'content-type': 'application/json' });
+      response.write('{"code":2,');
+      headersSent = true;
+    });
+    // Only setTimeout is faked: the sockets' own timers are Node's internal ones, so the connection runs in real time.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const stop = new AbortController();
+      const outcome = streamOutcome(port, cert, () => 'continue', stop.signal);
+      let settled: unknown;
+      void outcome.then(value => { settled = value; });
+      // The connect timer is armed at once; a second timer means the client has the error response's headers.
+      const began = Date.now();
+      while ((!headersSent || vi.getTimerCount() < 2) && Date.now() - began < 10_000) await new Promise(resolve => setImmediate(resolve));
+      await vi.advanceTimersByTimeAsync(30_000);
+      for (let turn = 0; turn < 20 && settled === undefined; turn += 1) await new Promise(resolve => setImmediate(resolve));
+      stop.abort();
+      expect(await outcome).toBeInstanceOf(lab.TransportError);
+      expect((await outcome as Error).message).toMatch(/HTTP 500 error body not complete within 30000 ms/);
+    } finally {
+      vi.useRealTimers();
+    }
   }, 90_000);
 });
 

@@ -194,7 +194,23 @@ export interface OutboxStatus {
   overdueCount: number;
 }
 
+/**
+ * The status from one snapshot: its queries run in one read transaction (BEGIN, deferred, so it works on the
+ * read-only connection outbox-status opens), as explain reads its records. In autocommit each query saw the file as
+ * it was then, and a worker's claim or ack committed between two of them could count a row in no state or in two,
+ * or list an overdue row the counts call done (audit 1.3.2). A caller already in a transaction keeps its own.
+ */
 export function outboxStatus(db: DatabaseSync, nowMs: number, deadlineS: number): OutboxStatus {
+  const own = !db.isTransaction;
+  if (own) db.exec('BEGIN');
+  try {
+    return statusIn(db, nowMs, deadlineS);
+  } finally {
+    if (own && db.isTransaction) db.exec('COMMIT');
+  }
+}
+
+function statusIn(db: DatabaseSync, nowMs: number, deadlineS: number): OutboxStatus {
   const counts = { pending: 0, leased: 0, done: 0 };
   for (const row of db.prepare('SELECT state, COUNT(*) AS n FROM outbox GROUP BY state').all()) {
     counts[text(row, 'state') as OutboxState] = Number(int(row, 'n'));

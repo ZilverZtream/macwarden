@@ -494,11 +494,16 @@ export class ReceiverStore {
       && (late === 'CANCELED' || (LND_RANK[invoice.state] ?? 0) < (LND_RANK[late] ?? 0));
     const blocked = record.state === 'not-created' && (next === 'canceled' || behind || this.#mayNotAdopt(record));
     if (blocked) {
+      // A late SETTLED also keeps LND's amount and settle index (SETTLED ranks highest, so it is written once), so that
+      // ledger-verify can compare the settlement's entry with the record without LND (audit 1.3.2).
+      const settledLate = invoice.state === 'SETTLED';
       const moved = changes(this.db.prepare(`UPDATE invoices SET late_lnd_state = ?, add_index = COALESCE(add_index, ?),
+          amt_paid_msat = CASE WHEN ? THEN ? ELSE amt_paid_msat END, settle_index = CASE WHEN ? THEN ? ELSE settle_index END,
           payment_request = COALESCE(payment_request, ?), updated_at = ? WHERE payment_hash = ? AND (${LATE_RANK('?')} > ${LATE_RANK('late_lnd_state')}
             OR (? IN ('OPEN', 'ACCEPTED') AND late_lnd_state IN ('OPEN', 'ACCEPTED') AND late_lnd_state <> ?))`)
-        .run(invoice.state, invoice.addIndex, invoice.paymentRequest === '' ? null : invoice.paymentRequest, now, invoice.paymentHash,
-          invoice.state, invoice.state, invoice.state)) === 1;
+        .run(invoice.state, invoice.addIndex, settledLate ? 1 : 0, invoice.amtPaidMsat, settledLate ? 1 : 0,
+          invoice.settleIndex === 0n ? null : invoice.settleIndex, invoice.paymentRequest === '' ? null : invoice.paymentRequest, now,
+          invoice.paymentHash, invoice.state, invoice.state, invoice.state)) === 1;
       if (next === 'open' || next === 'accepted') return behind ? 'unchanged' : 'late-invoice';
       if (next === 'canceled') return moved ? 'state-updated' : 'unchanged';
     }

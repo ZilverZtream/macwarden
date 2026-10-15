@@ -33,8 +33,9 @@ import { ISO_TIME, MAX_CLOCK_STEP_MS, MAX_SAFE_ENTRY_ID, parseBalance, signed, t
  *    operation after its first, for the payment's value. Receiver: one settlement entry per
  *    invoice, exactly for the invoices the record says settled (or, for one recorded
  *    not-created, LND reported SETTLED), for the record's amt_paid_msat, underpaid-settlement
- *    exactly when that is less than the invoice's amount; and a double-payment entry, for the
- *    same amount, exactly for a paid invoice that did not fulfill its order because another did.
+ *    exactly when that is less than the invoice's amount; a fulfillment only for an invoice with
+ *    an invoice-settled entry, one per order; and a double-payment entry, for the same amount,
+ *    exactly for a paid invoice that did not fulfill its order because another did.
  *    A difference here unbalances the result even when the account totals happen to agree.
  * 4. With an LND source, the wallet and fee accounts agree with LND over the same window, the
  *    payment hashes this store knows: settled invoices' amt_paid_msat (ListInvoices) for the
@@ -761,6 +762,17 @@ async function verifyIn(db: DatabaseSync, book: 'payer' | 'receiver', lndSource:
     for (const account of lndAccounts) {
       const expected = reported?.get(account) ?? 0n;
       add(lnd, account, expected);
+      if (posted === undefined) {
+        // The posted side can not be read (a line missing or damaged, or the record damaged): LND's amount is in the total
+        // above, and the hash is listed, as nothing shows the two agree (audit 1.3.2).
+        lndCheck.different = true;
+        const unreadable = explain(account, entry, `LND reports ${expected} msat for ${account} on payment hash ${hash}; `
+          + `the amount the entries post can not be read (record ${state})`, hash);
+        lndDifferenceCount += 1;
+        if (lndDifferences.length < LIST_LIMIT) lndDifferences.push(unreadable);
+        flag(account, entry, unreadable.reason, hash);
+        continue;
+      }
       const actual = posted.get(account) ?? 0n;
       if (actual === expected) continue;
       if (actual === 0n && unresolved) { lndCheck.pending += 1; continue; }
@@ -869,8 +881,11 @@ function reservationView(row: Row): ReservationView {
 }
 
 type Flag = (account: string, entry: EntryInfo | undefined, reason: string, paymentHash?: string) => void;
-/** Compares one known payment hash's posted amounts (per account) with LND's; `unresolved` makes an unposted amount pending. */
-type CompareLnd = (hash: string, posted: ReadonlyMap<string, bigint>, entry: EntryInfo | undefined, state: string, unresolved: boolean) => void;
+/**
+ * Compares one known payment hash's posted amounts (per account) with LND's; `unresolved` makes an unposted amount pending.
+ * `posted` is undefined when the posted amounts or the record can not be read.
+ */
+type CompareLnd = (hash: string, posted: ReadonlyMap<string, bigint> | undefined, entry: EntryInfo | undefined, state: string, unresolved: boolean) => void;
 type Pause = () => Promise<void>;
 
 /**
@@ -994,16 +1009,26 @@ async function payerRecords(db: DatabaseSync, context: { records: Map<string, bi
   records.set(ACCOUNT.walletOutgoing, 0n);
   records.set(ACCOUNT.routingFees, 0n);
   // Per payment: its payment-succeeded entry with the amounts of lines 1 (principal) and 3 (fee); for a succeeded one,
-  // how many other succeeded payments of its operation succeeded before it (by that entry, counted from the
-  // operation's entries, journal_entries_by_operation), and its double-payment entry with the amount of its line 1.
+  // how many other succeeded payments of its operation succeeded before it, and its double-payment entry with the amount
+  // of its line 1. Success order is taken from the records, the payments' `succeeded` events (one each, in the success's
+  // transaction; payment_events_by_payment), not from the entries: a deleted payment-succeeded entry of the first payment
+  // is that payment's finding, not also one on the second's valid double-payment entry (audit 1.3.2). A payment without
+  // a `succeeded` event (a book written without its events) falls back to the order of its operation's entries
+  // (journal_entries_by_operation).
   const paymentColumns = ['record_rowid', 'payment_hash', 'operation_id', 'state', 'value_msat', 'fee_msat', 'succeeded_entry', 'principal_msat',
     'fee_line_msat', 'earlier', 'double_entry', 'double_msat'] as const;
+  const succeededEvent = (alias: string): string => `(SELECT MIN(event_id) FROM payment_events INDEXED BY payment_events_by_payment
+    WHERE payment_hash = ${alias}.payment_hash AND kind = 'succeeded')`;
   const payments = rowReader(db.prepare(`SELECT p.rowid AS record_rowid, p.payment_hash, p.operation_id, p.state, p.value_msat, p.fee_msat,
       ps.entry_id AS succeeded_entry,
       (SELECT amount_msat FROM journal_lines WHERE entry_id = ps.entry_id AND line_no = 1) AS principal_msat,
       (SELECT amount_msat FROM journal_lines WHERE entry_id = ps.entry_id AND line_no = 3) AS fee_line_msat,
-      CASE WHEN p.state = 'succeeded' AND ps.entry_id IS NOT NULL THEN
-        (SELECT COUNT(*) FROM journal_entries qe INDEXED BY journal_entries_by_operation CROSS JOIN payments q ON q.payment_hash = qe.reference
+      CASE WHEN p.state <> 'succeeded' OR ps.entry_id IS NULL THEN NULL
+        WHEN ${succeededEvent('p')} IS NOT NULL THEN
+        (SELECT COUNT(*) FROM payments q INDEXED BY payments_by_operation
+          WHERE q.operation_id = p.operation_id AND q.state = 'succeeded' AND q.payment_hash <> p.payment_hash
+            AND ${succeededEvent('q')} < ${succeededEvent('p')})
+        ELSE (SELECT COUNT(*) FROM journal_entries qe INDEXED BY journal_entries_by_operation CROSS JOIN payments q ON q.payment_hash = qe.reference
           WHERE qe.operation_id = p.operation_id AND qe.event = 'payment-succeeded' AND qe.entry_id < ps.entry_id
             AND q.operation_id = p.operation_id AND q.state = 'succeeded' AND q.payment_hash <> p.payment_hash) END AS earlier,
       dp.entry_id AS double_entry,
@@ -1024,8 +1049,15 @@ async function payerRecords(db: DatabaseSync, context: { records: Map<string, bi
       const entry = succeededEntry === undefined ? undefined : named(succeededEntry, 'payment-succeeded', hash, textOf(row, 'operation_id'));
       const damaged = recordProblems(row, [['state', 'text'], ['operation_id', 'text'], ...(succeeded
         ? [['value_msat', 'integer'], ['fee_msat', 'integer']] as [string, 'integer'][] : [])]);
+      const postedValue = entry === undefined ? 0n : intOf(row, 'principal_msat');
+      const postedFee = entry === undefined ? 0n : intOf(row, 'fee_line_msat');
+      // Undefined when a posted line is missing or unreadable: LND's amounts for the hash are still counted, and the hash
+      // listed, so the LND totals cover every known hash whatever the books' damage (audit 1.3.2).
+      const posted = postedValue === undefined || postedFee === undefined ? undefined
+        : new Map<string, bigint>([[ACCOUNT.walletOutgoing, -(postedValue + postedFee)], [ACCOUNT.routingFees, postedFee]]);
       if (damaged.length > 0) {
         flag(ACCOUNT.walletOutgoing, entry, `payment ${hash}'s record is damaged: ${damaged.join('; ')}`, hash);
+        context.compareLnd(hash, posted, entry, state ?? 'unreadable', UNRESOLVED_PAYMENT.has(state ?? ''));
         continue;
       }
       const value = succeeded ? row.value_msat as bigint : 0n;
@@ -1035,12 +1067,7 @@ async function payerRecords(db: DatabaseSync, context: { records: Map<string, bi
       if (succeeded && entry === undefined) {
         flag(ACCOUNT.walletOutgoing, undefined, `payment ${hash} is succeeded in the record but has no payment-succeeded entry`, hash);
       }
-      const postedValue = entry === undefined ? 0n : intOf(row, 'principal_msat');
-      const postedFee = entry === undefined ? 0n : intOf(row, 'fee_line_msat');
-      const posted = new Map<string, bigint>();
-      if (postedValue !== undefined && postedFee !== undefined) {
-        posted.set(ACCOUNT.walletOutgoing, -(postedValue + postedFee));
-        posted.set(ACCOUNT.routingFees, postedFee);
+      if (posted !== undefined) {
         for (const [account, expected] of [[ACCOUNT.walletOutgoing, -(value + fee)], [ACCOUNT.routingFees, fee]] as const) {
           const actual = posted.get(account) ?? 0n;
           if (actual !== expected) {
@@ -1050,7 +1077,7 @@ async function payerRecords(db: DatabaseSync, context: { records: Map<string, bi
         }
       }
       if (succeeded && entry !== undefined) checkDoublePayment(hash, value, row.operation_id as string, entry, row, flag);
-      if (postedValue !== undefined && postedFee !== undefined) context.compareLnd(hash, posted, entry, state ?? '', UNRESOLVED_PAYMENT.has(state ?? ''));
+      context.compareLnd(hash, posted, entry, state ?? '', UNRESOLVED_PAYMENT.has(state ?? ''));
     }
   });
 }
@@ -1098,7 +1125,9 @@ async function receiverRecords(db: DatabaseSync, context: { flag: Flag; compareL
       list.push({ info: named(row.entry_id as bigint, String(row.event), hash, textOf(row, 'operation_id')), amount: intOf(row, 'amount_msat') });
       entriesOf.set(hash, list);
     }
-    const needed = rows.filter(row => row.fulfilled !== 1n && entriesOf.has(row.payment_hash as string)).flatMap(row => textOf(row, 'order_id') ?? []);
+    // A paid invoice that did not fulfill its order needs to know which one did; a fulfilled one too, so an order fulfilled
+    // twice (a second payment booked as a sale, with no double-payment entry) is found (audit 1.3.2).
+    const needed = rows.filter(row => row.fulfilled === 1n || entriesOf.has(row.payment_hash as string)).flatMap(row => textOf(row, 'order_id') ?? []);
     const fulfilledBy = new Map<string, string[]>();
     if (needed.length > 0) {
       for (const row of fulfillmentsOf.iterate(JSON.stringify([...new Set(needed)]))) {
@@ -1113,10 +1142,15 @@ async function receiverRecords(db: DatabaseSync, context: { flag: Flag; compareL
         continue;
       }
       const entries = entriesOf.get(hash) ?? [];
+      const settlements = entries.filter(item => SETTLEMENT_EVENTS.has(item.info.event));
+      // Undefined when a settlement's line 1 is missing or unreadable: LND's amount is still counted and the hash listed (audit 1.3.2).
+      const posted = settlements.every(item => item.amount !== undefined)
+        ? new Map([[ACCOUNT.walletIncoming as string, settlements.reduce((sum, item) => sum + (item.amount ?? 0n), 0n)]]) : undefined;
       const damaged = recordProblems(row, [['order_id', 'text'], ['state', 'text'], ['amount_msat', 'integer'], ['amt_paid_msat', 'integer', true],
         ['late_lnd_state', 'text', true]]);
       if (damaged.length > 0) {
         flag(ACCOUNT.walletIncoming, entries[0]?.info, `invoice ${hash}'s record is damaged: ${damaged.join('; ')}`, hash);
+        context.compareLnd(hash, posted, settlements[0]?.info, textOf(row, 'state') ?? 'unreadable', false);
         continue;
       }
       const state = row.state as string;
@@ -1124,11 +1158,7 @@ async function receiverRecords(db: DatabaseSync, context: { flag: Flag; compareL
       const orderId = row.order_id as string;
       checkInvoice({ hash, orderId, state, late, amount: row.amount_msat as bigint, amtPaid: intOf(row, 'amt_paid_msat'), fulfilled: row.fulfilled === 1n,
         otherFulfillments: (fulfilledBy.get(orderId) ?? []).filter(other => other !== hash) }, entries, flag);
-      const settlements = entries.filter(item => SETTLEMENT_EVENTS.has(item.info.event));
-      if (settlements.every(item => item.amount !== undefined)) {
-        const posted = new Map([[ACCOUNT.walletIncoming as string, settlements.reduce((sum, item) => sum + (item.amount ?? 0n), 0n)]]);
-        context.compareLnd(hash, posted, settlements[0]?.info, state, state !== 'settled' && late !== 'SETTLED');
-      }
+      context.compareLnd(hash, posted, settlements[0]?.info, state, state !== 'settled' && late !== 'SETTLED');
     }
   });
 }
@@ -1155,8 +1185,10 @@ function checkInvoice(invoice: InvoiceFacts, entries: { info: EntryInfo; amount:
       flag(wallet, settlement.info, `invoice ${hash} is ${invoice.state} in the record${invoice.late === undefined ? '' : ` (LND ${invoice.late})`}; `
         + `entry ${settlement.info.entryId} posts a settlement for it`, hash);
     }
-    // A late invoice recorded not-created keeps no amt_paid_msat; its amount is compared with LND only.
-    if (invoice.state === 'settled' && settlement.amount !== invoice.amtPaid) {
+    // A late invoice recorded not-created keeps LND's amt_paid_msat with its late SETTLED (audit 1.3.2) and is compared
+    // with it too; one a store before that wrote keeps none, and its amount is compared with LND only.
+    const recordsAmount = invoice.state === 'settled' || (invoice.state === 'not-created' && invoice.late === 'SETTLED' && invoice.amtPaid !== undefined);
+    if (recordsAmount && settlement.amount !== invoice.amtPaid) {
       flag(wallet, settlement.info, `entry ${settlement.info.entryId} settles ${settlement.amount ?? 'an unreadable amount of'} msat; `
         + `the invoice record's amt_paid_msat ${invoice.amtPaid ?? 'null'}`, hash);
     }
@@ -1168,6 +1200,18 @@ function checkInvoice(invoice: InvoiceFacts, entries: { info: EntryInfo; amount:
   }
   const settledEntry = settlement?.info.event === 'invoice-settled' ? settlement : undefined;
   const suspense = ACCOUNT.suspenseDoublePayment;
+  // A fulfillment is written with its invoice-settled entry, once per order: a fulfilled invoice with no such entry (open,
+  // canceled, underpaid), or an order with another fulfillment (a second payment booked as a sale, where suspense and a
+  // double-payment entry belong), is a difference the totals need not show (audit 1.3.2).
+  if (invoice.fulfilled && settledEntry === undefined) {
+    flag(ACCOUNT.customerReceivable, settlement?.info, `invoice ${hash} fulfilled order ${invoice.orderId} but has no invoice-settled entry `
+      + `(record ${invoice.state}${settlement === undefined ? '' : `, entry ${settlement.info.entryId} is ${settlement.info.event}`})`, hash);
+  }
+  if (invoice.fulfilled && invoice.otherFulfillments.length > 0) {
+    flag(suspense, settledEntry?.info ?? settlement?.info, `order ${invoice.orderId} is fulfilled by ${invoice.otherFulfillments.length + 1} invoices `
+      + `(${[hash, ...invoice.otherFulfillments].slice(0, PROBLEM_LIMIT).join(', ')}${invoice.otherFulfillments.length >= PROBLEM_LIMIT ? ', …' : ''}); an order is fulfilled once, and a payment after the first is a double payment `
+      + `(posted to ${suspense})`, hash);
+  }
   if (settledEntry !== undefined && !invoice.fulfilled && double === undefined) {
     flag(suspense, settledEntry.info, `invoice ${hash} was paid but did not fulfill order ${invoice.orderId}${invoice.otherFulfillments.length > 0
       ? ` (invoice ${invoice.otherFulfillments[0] ?? ''} did)` : ''}; it has no double-payment entry`, hash);

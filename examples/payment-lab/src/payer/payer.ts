@@ -2,6 +2,7 @@ import type { PayerApi } from '../lnd/api.ts';
 import { LndError, TransportError, definiteRefusal, describeError } from '../lnd/errors.ts';
 import type { StreamDecision } from '../lnd/rest.ts';
 import { isTerminal, type DecodedPayReq, type Payment } from '../lnd/types.ts';
+import { bolt11PaymentHash } from '../util/bolt11.ts';
 import type { IntentResult, OperationKind, PayerStore, PaymentState, UpdateResult } from './store.ts';
 
 /**
@@ -74,9 +75,21 @@ export function checkInvoice(invoice: DecodedPayReq, nowSeconds: bigint): string
   return undefined;
 }
 
+/**
+ * Decodes the invoice with LND and checks it. LND's payment hash must be the one the payment request
+ * itself carries (audit 1.3.2): the intent and its reservation are recorded under the decoded hash
+ * while SendPaymentV2 pays the request, so an answer for another hash would leave the real payment
+ * untracked and the recorded one failed with its budget released. A request not readable offline is
+ * left to LND, as the receiver's foreignAnswer leaves it. PayerApi.decodePayReq checks the same; the
+ * check is repeated here so that any PayerApi the workflow is given is held to it.
+ */
 export async function decodeInvoice(deps: PayerDeps, paymentRequest: string): Promise<{ invoice: DecodedPayReq } | { error: string }> {
   try {
     const invoice = await deps.api.decodePayReq(paymentRequest);
+    const offline = bolt11PaymentHash(paymentRequest);
+    if (offline !== undefined && offline !== invoice.paymentHash) {
+      return { error: `DecodePayReq: LND decoded the payment request as payment hash ${invoice.paymentHash}; the request's own is ${offline}` };
+    }
     const problem = checkInvoice(invoice, BigInt(Math.floor(Date.now() / 1000)));
     return problem === undefined ? { invoice } : { error: problem };
   } catch (error) {

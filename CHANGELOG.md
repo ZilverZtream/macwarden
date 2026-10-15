@@ -41,6 +41,17 @@ Fixes from an external audit of every source file of 1.3.1, each claim verified 
 - `scan`: a repeated `--format` said "takes one of …"; it now says the flag was given more than once. The unsafe `NODE_OPTIONS` check also runs when a programmatic caller passes no environment.
 - `--version` reads the installed version without failing.
 
+### Payment lab
+
+- Payer: an HTLC attempt or creation time learnt from a superseded submission's own SendPaymentV2 stream was recorded under the live submission, so a tracker's FAILED for the live submission, read before that submission reached LND, could fail it, release its budget and admit a replacement while it might still pay. A SendPaymentV2 update now records under its own submission.
+- Payer: `payer pay` on a payment still in intent ignored a different `--budget`, `--fee-limit-msat` or `--max-parts`, and could submit with no reservation held; such a request is now refused.
+- Payer: the payment hash LND's DecodePayReq returned was not checked against the payment request; a different one is refused, as the receiver already refuses one. AddInvoice's hash is checked the same way.
+- Outbox: a row edited in the database was signed with its edited operation, order, subject, value or fee; the worker now checks each against the row's ledger entry.
+- `ledger-verify`: an order fulfilled twice, or fulfilled from an invoice not settled in full, passed; both are now named. A late settlement now keeps LND's amount, so it is checked without LND too. A deleted entry no longer distorts which payment counts as first, and LND's totals include payments whose posted lines cannot be read.
+- REST: a stream dropped by a fault after the server's end arrived resolved instead of failing; an error answer to a stream had no time or size limit.
+- `explain`: a long line starting with `::` was cut by three characters; a failed submission's HTLC attempts are shown at its failure, before the retry; `--refresh` names a late invoice's LND state and when it still has to be canceled, and fingerprints the subject's own ID instead of redacting it.
+- `outbox-status` reads one snapshot. `:memory:` stores and an empty database file left by an interrupted first open are handled. The CLI removes its signal listeners after each command, and the lab removes Node diagnostic variables from macwarden's environment in any case.
+
 ## 1.3.1 (2026-10-11)
 
 Fixes from a section-by-section audit of 1.3.0 and a second external audit. No new features.

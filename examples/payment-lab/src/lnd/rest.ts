@@ -169,10 +169,12 @@ export class LndRestClient {
     return new Promise<void>((resolve, reject) => {
       let settled = false;
       let responded = false;
+      let bodyTimer: ReturnType<typeof setTimeout> | undefined;
       const finish = (error: Error | undefined): void => {
         if (settled) return;
         settled = true;
         clearTimeout(connectTimer);
+        clearTimeout(bodyTimer);
         options.signal?.removeEventListener('abort', onAbort);
         req.destroy();
         if (error) reject(error); else resolve();
@@ -191,10 +193,19 @@ export class LndRestClient {
           // A non-200 status carries one error object, not a stream. Its body can be cut
           // off like any other response, so this branch needs the same error and close
           // handling as the stream below: the connect timer is over once TLS is up, and
-          // nothing else would settle the promise.
+          // nothing else would settle the promise. It is bounded as call() bounds a unary
+          // response: a peer that sends the headers and then holds the body, or streams it
+          // without end, is cut off after the unary timeout or past the unary size, not
+          // waited on until the caller's signal (audit 1.3.2).
           const chunks: Buffer[] = [];
           let size = 0;
-          res.on('data', (chunk: Buffer) => { size += chunk.length; if (size <= MAX_UNARY_BYTES) chunks.push(chunk); });
+          bodyTimer = setTimeout(() => finish(new TransportError(
+            `${this.label}: HTTP ${res.statusCode} error body not complete within ${DEFAULT_UNARY_TIMEOUT_MS} ms`, 'response')), DEFAULT_UNARY_TIMEOUT_MS);
+          res.on('data', (chunk: Buffer) => {
+            size += chunk.length;
+            if (size > MAX_UNARY_BYTES) { finish(new ProtocolError(`${this.label}: HTTP ${res.statusCode} error body larger than ${MAX_UNARY_BYTES} bytes`)); return; }
+            chunks.push(chunk);
+          });
           res.on('error', error => finish(new TransportError(`${this.label}: ${error.message}`, 'response', { cause: error })));
           res.on('close', () => { if (!res.complete) finish(new TransportError(`${this.label}: HTTP ${res.statusCode} response ended early`, 'response')); });
           res.on('end', () => {
@@ -249,6 +260,9 @@ export class LndRestClient {
         res.on('error', error => finish(new TransportError(`${this.label}: ${error.message}`, 'response', { cause: error })));
         res.on('close', () => {
           if (settled) return;
+          // A dropped stream always rejects, also when the server's end arrived in the same chunk as the line that
+          // dropped it: res.complete is then true, and resolving would report a clean end the handler refused (audit 1.3.2).
+          if (halted) { finish(new TransportError(`${this.label}: stream dropped by the handler`, 'response')); return; }
           if (!res.complete) { finish(new TransportError(`${this.label}: stream connection closed before the server ended it`, 'response')); return; }
           if (pendingSize > 0 && !halted) handleLine(Buffer.concat(pending));
           finish(undefined);

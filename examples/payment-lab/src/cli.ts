@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { existsSync, mkdirSync, readdirSync, realpathSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -232,12 +233,21 @@ function seconds(values: Record<string, unknown>, name: string, fallback: number
   return Number(value);
 }
 
+/**
+ * The SIGINT and SIGTERM listeners the running main() call added, removed when its command finishes. Without this every
+ * in-process call (the harness and tests run main() many times) left two listeners on the process for good, and Node
+ * warned of a listener leak past ten (audit 1.3.2). Per call, not one module-wide list: two calls running at once each
+ * remove only their own.
+ */
+const stopListeners = new AsyncLocalStorage<(() => void)[]>();
+
 /** Aborts on SIGINT or SIGTERM, and after `timeoutSeconds` when given. */
 function stopSignal(timeoutSeconds?: number): AbortSignal {
   const controller = new AbortController();
   const stop = (): void => controller.abort();
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
+  stopListeners.getStore()?.push(stop);
   return timeoutSeconds === undefined ? controller.signal : AbortSignal.any([controller.signal, AbortSignal.timeout(timeoutSeconds * 1000)]);
 }
 
@@ -893,6 +903,18 @@ All commands accept --lab <dir> (default: the run named in runtime/current.json)
 the options listed for it, and any other is a usage error.`;
 
 export async function main(argv: string[], services: Services = LAB_SERVICES): Promise<number> {
+  const added: (() => void)[] = [];
+  try {
+    return await stopListeners.run(added, () => runMain(argv, services));
+  } finally {
+    for (const stop of added) {
+      process.removeListener('SIGINT', stop);
+      process.removeListener('SIGTERM', stop);
+    }
+  }
+}
+
+async function runMain(argv: string[], services: Services): Promise<number> {
   const [component, command, ...rest] = argv;
   try {
     if (component === undefined || command === undefined) throw new UsageError('component and command are required');

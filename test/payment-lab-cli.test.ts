@@ -127,6 +127,31 @@ describe('payment lab CLI: payer reconcile and the outbox pass', () => {
     expect(await lab.main(['payer', 'reconcile', '--as', 'customer-payer', '--timeout-s', '30'], run)).toBe(0);
     expect(outbox).toHaveBeenCalledTimes(1);
   });
+
+  it('each main() call removes the SIGINT and SIGTERM listeners its stop signal added, and only its own (audit 1.3.2)', async () => {
+    const count = (): number[] => [process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')];
+    const before = count();
+    const { run } = services('listeners.db', () => Promise.reject(new Error('nothing is unresolved')));
+    for (let index = 0; index < 12; index += 1) expect(await lab.main(['payer', 'reconcile', '--as', 'customer-payer'], run)).toBe(0);
+    expect(count()).toEqual(before);
+    // A call still running keeps its listeners while another call finishes, and its stop signal still works.
+    inFlight('listeners-held.db', 'lh');
+    let started: (() => void) | undefined;
+    const tracking = new Promise<void>(resolve => { started = resolve; });
+    const held = services('listeners-held.db', (_onUpdate, signal) => new Promise((_resolve, reject) => {
+      signal?.addEventListener('abort', () => { reject(new lab.TransportError('aborted by the caller', 'response')); }, { once: true });
+      started?.();
+    }));
+    const running = lab.main(['payer', 'reconcile', '--as', 'customer-payer'], held.run);
+    await tracking;
+    expect(count()).toEqual(before.map(item => item + 1));
+    expect(await lab.main(['payer', 'reconcile', '--as', 'customer-payer'], run)).toBe(0);
+    expect(count()).toEqual(before.map(item => item + 1));
+    const added = process.listeners('SIGINT').at(-1) as () => void;
+    added();
+    expect(await running).toBe(75);
+    expect(count()).toEqual(before);
+  });
 });
 
 describe('payment lab CLI: each command takes its own flags', () => {

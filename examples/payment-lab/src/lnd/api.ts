@@ -1,4 +1,6 @@
-import { assertHash, hexToBase64, hexToUrlParam } from '../util/encoding.ts';
+import { bolt11PaymentHash } from '../util/bolt11.ts';
+import { assertHash, base64ToHex, hexToBase64, hexToUrlParam } from '../util/encoding.ts';
+import { ProtocolError } from './errors.ts';
 import { asObject, array, integer, string } from './json.ts';
 import type { LndRestClient, StreamDecision } from './rest.ts';
 import {
@@ -38,9 +40,21 @@ export class PayerApi {
     return parseGetInfo(await this.#client.call('GET', '/v1/getinfo'));
   }
 
+  /**
+   * lnrpc.DecodePayReq. LND's payment_hash is checked against the one read offline from the payment
+   * request (audit 1.3.2): an answer for another hash (a proxy, a cache or a hostile node) would have
+   * the payer record and reserve under that hash while SendPaymentV2 pays the invoice's own, and the
+   * real payment would end recorded as failed with its budget released. A request not readable offline
+   * is left to LND, as the receiver's foreignAnswer leaves it.
+   */
   async decodePayReq(paymentRequest: string): Promise<DecodedPayReq> {
     if (!/^ln[a-z0-9]+$/i.test(paymentRequest) || paymentRequest.length > 8192) throw new Error('not a BOLT 11 payment request');
-    return parsePayReq(await this.#client.call('GET', `/v1/payreq/${encodeURIComponent(paymentRequest)}`));
+    const decoded = parsePayReq(await this.#client.call('GET', `/v1/payreq/${encodeURIComponent(paymentRequest)}`));
+    const offline = bolt11PaymentHash(paymentRequest);
+    if (offline !== undefined && offline !== decoded.paymentHash) {
+      throw new ProtocolError(`LND decoded the payment request as payment hash ${decoded.paymentHash}; the request's own is ${offline}`);
+    }
+    return decoded;
   }
 
   /** routerrpc.SendPaymentV2. Every update is handed to `onUpdate` in order. */
@@ -63,6 +77,19 @@ export class PayerApi {
   }
 }
 
+/**
+ * AddInvoice's r_hash as 64 hex characters, read as parseInvoice reads it (audit 1.3.2): Buffer's lenient
+ * base64 turned a malformed or short value into some other hex string, which the receiver then compared
+ * as if LND had answered for another hash. An unreadable answer is a ProtocolError at the API boundary.
+ */
+function rHash(value: string): string {
+  try {
+    return assertHash(base64ToHex(value), 'r_hash');
+  } catch (error) {
+    throw new ProtocolError(`AddInvoice r_hash: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 export class InvoiceApi {
   readonly #client: LndRestClient;
   constructor(client: LndRestClient) { this.#client = client; }
@@ -79,8 +106,8 @@ export class InvoiceApi {
       memo: request.memo,
       expiry: String(request.expirySeconds),
     });
-    return { paymentHash: Buffer.from(string(response, 'r_hash'), 'base64').toString('hex'),
-      paymentRequest: string(response, 'payment_request'), addIndex: integer(response, 'add_index') };
+    return { paymentHash: rHash(string(response, 'r_hash')), paymentRequest: string(response, 'payment_request'),
+      addIndex: integer(response, 'add_index') };
   }
 
   /** invoicesrpc.AddHoldInvoice: LND accepts HTLCs for `hash` and holds them until SettleInvoice or CancelInvoice. */

@@ -1,16 +1,17 @@
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import type { DatabaseSync } from 'node:sqlite';
-import { optionalInt, text } from '../store/sqlite.ts';
+import type { Row } from '../store/sqlite.ts';
 import { EffectError, effectFields, publish, temporaryFileLister, type EffectHooks, type EffectTarget } from './effects.ts';
-import { acknowledge, claim, notDoneCount, retryLater, type OutboxRow } from './outbox.ts';
+import { acknowledge, claim, notDoneCount, retryLater, type OutboxRow, type PayloadValue } from './outbox.ts';
 
 /**
  * The outbox worker. One pass claims due rows one at a time, the one due longest first (earliest
  * next_attempt_at, then lowest outbox ID), and for each:
  *
  *   claim (BEGIN IMMEDIATE: pending and due, or a lease that ran out -> leased to this worker, attempts + 1)
- *   check (the row's ledger entry exists, is its own and posted the row's amount; otherwise the row fails and nothing is written)
+ *   check (the row's ledger entry exists and is its own: event, payment hash, operation or order ID as subject and
+ *          payload, and the amounts it posted; otherwise the row fails and nothing is written)
  *   effect (publish: an existing file with a valid HMAC over the same fields counts as performed;
  *           any other existing file is a named failure, never overwritten)
  *   ack (BEGIN IMMEDIATE: leased to this worker -> done, acknowledged_at, lease cleared, in one statement)
@@ -59,35 +60,82 @@ export function workerId(): string {
 /** The journal entry a row's effect cites, by kind: the settlement of the order, or the success of the operation's payment. */
 const ENTRY_EVENT = { 'fulfill-order': 'invoice-settled', 'confirm-operation': 'payment-succeeded' } as const;
 
+/** The payload field that names the row's subject, by kind: the order a receipt fulfils, the operation a confirmation confirms. */
+const SUBJECT_FIELD = { 'fulfill-order': 'orderId', 'confirm-operation': 'operationId' } as const;
+
+/**
+ * Reads a column of the row's journal entry; a value of another type (or none where one is required)
+ * is a ledger-entry-mismatch, a named row failure, not a plain Error (audit 1.3.2).
+ */
+function entryText(entry: Row, column: string, id: number): string {
+  const value = entry[column];
+  if (typeof value !== 'string') throw new EffectError('ledger-entry-mismatch', `ledger entry ${id} has no text ${column}`);
+  return value;
+}
+
+function entryAmount(entry: Row, column: string, id: number): bigint | undefined {
+  const value = entry[column];
+  if (value === null || value === undefined) return undefined;
+  if (typeof value === 'bigint') return value;
+  if (typeof value === 'number' && Number.isSafeInteger(value)) return BigInt(value);
+  throw new EffectError('ledger-entry-mismatch', `ledger entry ${id} has a ${column} that is not an integer`);
+}
+
+/** The row's amount field must be what the entry posted on that line; otherwise the receipt would sign an amount the books do not hold. */
+function requirePosted(entry: Row, column: string, id: number, reference: string, field: string, value: PayloadValue | undefined): void {
+  const posted = entryAmount(entry, column, id);
+  if (posted === undefined || posted.toString() !== value) {
+    throw new EffectError('ledger-entry-mismatch', `ledger entry ${id} posted ${posted === undefined ? 'no amount' : `${posted} msat`} for ${reference}, `
+      + `not the row's ${field} ${String(value)} msat`);
+  }
+}
+
 /**
  * The consistency check before an effect: the row's ledgerEntryId must name a journal entry of this
- * database, that entry must be the row's own (the settlement or success for its payment hash), and
- * a fulfill-order row's amountMsat must be what the entry posted (its line 1, the amount the order
- * was fulfilled for: a 1.3.0 row enqueued with the record's amount is repaired by migration 7, and
- * one that repair could not touch, leased when it ran, is refused here rather than published as it
- * is). A row that fails it is not performed and no file is written; it stays pending with a named
- * error (ledger-entry-missing or ledger-entry-mismatch), visible in outbox-status.
+ * database, and that entry must be the row's own in every field the effect signs that the journal
+ * records (audit 1.3.2: a row edited in the database was otherwise signed and published as edited):
+ *
+ * - the event and reference: the settlement or success for the row's payment hash;
+ * - the entry's operation_id: the row's subject (which names the file) and the payload's orderId or
+ *   operationId, all three one ID;
+ * - the amounts: a fulfill-order row's amountMsat is the entry's line 1 (the amount the order was
+ *   fulfilled for: a 1.3.0 row enqueued with the record's amount is repaired by migration 7, and one
+ *   that repair could not touch, leased when it ran, is refused here rather than published as it is);
+ *   a confirm-operation row's valueMsat is line 1 (the principal leg) and its feeMsat line 3 (the
+ *   routing-fee leg) of the payment-succeeded entry.
+ *
+ * The journal records no settle index and no operation kind, so a receipt's settleIndex and a
+ * confirmation's operationKind are not checked here. A row that fails the check is not performed and
+ * no file is written; it stays pending with a named error (ledger-entry-missing or
+ * ledger-entry-mismatch), visible in outbox-status.
  */
 function checkLedgerEntry(db: DatabaseSync, row: OutboxRow): void {
   const id = row.payload.ledgerEntryId;
   if (typeof id !== 'number' || !Number.isSafeInteger(id)) {
     throw new EffectError('ledger-entry-missing', `the row names no ledger entry (ledgerEntryId ${JSON.stringify(id ?? null)})`);
   }
-  const entry = db.prepare(`SELECT e.event, e.reference, (SELECT l.amount_msat FROM journal_lines l WHERE l.entry_id = e.entry_id AND l.line_no = 1) AS amount_msat
+  const entry = db.prepare(`SELECT e.event, e.reference, e.operation_id,
+      (SELECT l.amount_msat FROM journal_lines l WHERE l.entry_id = e.entry_id AND l.line_no = 1) AS line1_msat,
+      (SELECT l.amount_msat FROM journal_lines l WHERE l.entry_id = e.entry_id AND l.line_no = 3) AS line3_msat
     FROM journal_entries e WHERE e.entry_id = ?`).get(id);
   if (entry === undefined) throw new EffectError('ledger-entry-missing', `ledger entry ${id} does not exist in the journal`);
   const expected = ENTRY_EVENT[row.kind];
-  const event = text(entry, 'event');
-  const reference = text(entry, 'reference');
+  const event = entryText(entry, 'event', id);
+  const reference = entryText(entry, 'reference', id);
   if (event !== expected || reference !== row.payload.paymentHash) {
     throw new EffectError('ledger-entry-mismatch', `ledger entry ${id} is ${event} for ${reference}, not ${expected} for ${String(row.payload.paymentHash)}`);
   }
+  const operationId = entryText(entry, 'operation_id', id);
+  const field = SUBJECT_FIELD[row.kind];
+  if (row.subject !== operationId || row.payload[field] !== operationId) {
+    throw new EffectError('ledger-entry-mismatch', `ledger entry ${id} is for ${operationId}, not the row's subject ${row.subject} `
+      + `and ${field} ${String(row.payload[field])}`);
+  }
   if (row.kind === 'fulfill-order') {
-    const posted = optionalInt(entry, 'amount_msat');
-    if (posted === undefined || posted.toString() !== row.payload.amountMsat) {
-      throw new EffectError('ledger-entry-mismatch', `ledger entry ${id} posted ${posted === undefined ? 'no amount' : `${posted} msat`} for ${reference}, `
-        + `not the row's ${String(row.payload.amountMsat)} msat`);
-    }
+    requirePosted(entry, 'line1_msat', id, reference, 'amountMsat', row.payload.amountMsat);
+  } else {
+    requirePosted(entry, 'line1_msat', id, reference, 'valueMsat', row.payload.valueMsat);
+    requirePosted(entry, 'line3_msat', id, reference, 'feeMsat', row.payload.feeMsat);
   }
 }
 
